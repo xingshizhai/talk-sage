@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import AsyncIterator
+from typing import AsyncGenerator, AsyncIterator
 
 
 class LLMProvider(ABC):
@@ -7,7 +7,7 @@ class LLMProvider(ABC):
     async def complete(self, prompt: str, system: str) -> str:
         """Return a single completion string."""
 
-    async def stream(self, prompt: str, system: str) -> AsyncIterator[str]:
+    async def stream(self, prompt: str, system: str) -> AsyncGenerator[str, None]:
         """Stream completion tokens. Default: yield complete() as one chunk."""
         result = await self.complete(prompt=prompt, system=system)
         yield result
