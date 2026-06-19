@@ -1,0 +1,78 @@
+# TalkSage 配置文件模板
+#
+# 使用方法：
+#   Windows: 复制到 C:\Users\<用户名>\.talksage\config.yaml
+#   macOS:   复制到 ~/.talksage/config.yaml
+#   Linux:   复制到 ~/.talksage/config.yaml
+#
+# 只需填写你要使用的 LLM 提供商的 api_key，其余字段保持默认即可。
+# 未填写的字段会从内置默认值自动读取。
+
+# ── 语音转写 ──────────────────────────────────────────────────────────────────
+transcribe:
+  mode: local       # local（本地 Whisper）/ api（云端 API，暂未实现）
+  model: base       # Whisper 模型大小：tiny / base / small / medium / large
+                    # 越大越准确，但占用更多内存和 CPU
+
+# ── LLM 提供商 ────────────────────────────────────────────────────────────────
+llm:
+  default: deepseek   # 默认提供商，插件未单独指定时使用
+
+  providers:
+    # DeepSeek（推荐，中文理解好，速度快）
+    deepseek:
+      base_url: https://api.deepseek.com/v1
+      api_key: ""       # 填入你的 DeepSeek API Key
+      model: deepseek-chat
+
+    # Kimi / 月之暗面（长上下文）
+    kimi:
+      base_url: https://api.moonshot.cn/v1
+      api_key: ""       # 填入你的 Kimi API Key
+      model: moonshot-v1-32k
+
+    # MiniMax
+    minimax:
+      base_url: https://api.minimax.chat/v1
+      api_key: ""       # 填入你的 MiniMax API Key
+      model: abab6.5s-chat
+
+    # Claude / Anthropic（谈判分析、技术评估效果好）
+    claude:
+      base_url: null    # 留空使用官方端点
+      api_key: ""       # 填入你的 Anthropic API Key
+      model: claude-sonnet-4-6
+
+    # Groq（速度极快，适合术语解释、翻译）
+    groq:
+      base_url: https://api.groq.com/openai/v1
+      api_key: ""       # 填入你的 Groq API Key
+      model: llama3-70b-8192
+
+    # Ollama（本地离线，无需 API Key）
+    ollama:
+      base_url: http://localhost:11434/v1
+      api_key: ollama   # 固定值，不需要修改
+      model: llama3     # 替换为你本地已拉取的模型名
+
+# ── 插件开关 ──────────────────────────────────────────────────────────────────
+plugins:
+  # 术语解释：识别英文缩写（NPI、BOQ 等）并用中文解释
+  term_explainer:
+    enabled: true
+    llm: deepseek     # 指定使用哪个提供商，留空则用 llm.default
+
+  # 实时翻译（Phase 2，暂未实现）
+  translator:
+    enabled: false
+    llm: groq
+
+  # 技术方案评估（Phase 2，暂未实现）
+  tech_evaluator:
+    enabled: false
+    llm: claude
+
+  # 商务谈判分析（Phase 2，暂未实现）
+  negotiation_analyzer:
+    enabled: false
+    llm: claude
