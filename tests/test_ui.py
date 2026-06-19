@@ -49,4 +49,4 @@ def test_transcript_section_shows_speaker(qapp, qtbot):
     seg = TranscriptSegment(speaker="client", text="our NPI schedule", language="en")
     section.add_segment(seg)
     text = section.document().toPlainText()
-    assert "client" in text.lower()
+    assert "客户" in text  # client speaker is shown as "客户" in the redesigned UI
