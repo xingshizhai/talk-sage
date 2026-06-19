@@ -1,0 +1,42 @@
+transcribe:
+  mode: local         # local / api
+  model: base         # tiny, base, small, medium, large
+
+llm:
+  default: deepseek
+  providers:
+    claude:
+      base_url: null
+      api_key: ""
+      model: claude-sonnet-4-6
+    deepseek:
+      base_url: https://api.deepseek.com/v1
+      api_key: ""
+      model: deepseek-chat
+    kimi:
+      base_url: https://api.moonshot.cn/v1
+      api_key: ""
+      model: moonshot-v1-32k
+    minimax:
+      base_url: https://api.minimax.chat/v1
+      api_key: ""
+      model: abab6.5s-chat
+    groq:
+      base_url: https://api.groq.com/openai/v1
+      api_key: ""
+      model: llama3-70b-8192
+    ollama:
+      base_url: http://localhost:11434/v1
+      api_key: ollama
+      model: llama3
+
+plugins:
+  term_explainer:
+    enabled: true
+    llm: deepseek
+  translator:
+    enabled: false
+  tech_evaluator:
+    enabled: false
+  negotiation_analyzer:
+    enabled: false
