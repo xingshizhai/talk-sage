@@ -1,11 +1,12 @@
 from abc import ABC, abstractmethod
+from typing import ClassVar
 from core.models import TranscriptSegment, PluginResult, ConversationContext
 
 
 class AnalyzerPlugin(ABC):
-    name: str
-    display_name: str
-    ui_section: str
+    name: ClassVar[str]
+    display_name: ClassVar[str]
+    ui_section: ClassVar[str]
 
     @abstractmethod
     def should_trigger(self, segment: TranscriptSegment) -> bool:

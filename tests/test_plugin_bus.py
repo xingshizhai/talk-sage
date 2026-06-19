@@ -1,5 +1,4 @@
 import pytest
-from unittest.mock import AsyncMock
 from core.models import TranscriptSegment, PluginResult, ConversationContext
 from core.plugin_bus import PluginBus
 from plugins.base import AnalyzerPlugin
