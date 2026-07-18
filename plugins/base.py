@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from typing import AsyncGenerator, ClassVar
 from core.models import TranscriptSegment, PluginResult, ConversationContext
 
 
@@ -14,4 +14,10 @@ class AnalyzerPlugin(ABC):
 
     @abstractmethod
     async def analyze(self, segment: TranscriptSegment, context: ConversationContext) -> PluginResult:
-        """Analyze segment and return a result to display in the UI."""
+        """Analyze segment and return a final result to display in the UI."""
+
+    async def analyze_stream(
+        self, segment: TranscriptSegment, context: ConversationContext
+    ) -> AsyncGenerator[PluginResult, None]:
+        """Yield progressive results (skeleton → final). Default: single final result."""
+        yield await self.analyze(segment, context)

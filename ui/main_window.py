@@ -1,12 +1,14 @@
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFrame, QSizePolicy
+    QPushButton, QLabel
 )
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, Signal, Slot, QTimer
 from PySide6.QtGui import QColor
-from core.models import TranscriptSegment, PluginResult
+from core.models import PluginResult
 from ui.sections.transcript import TranscriptSection
 from ui.sections.terms import TermsSection
+from ui.sections.context import ContextSection
+from ui.sections.suggestions import SuggestionsSection
 from ui.style import STYLESHEET
 
 
@@ -44,7 +46,7 @@ class _PulseDot(QWidget):
         self.update()
 
     def paintEvent(self, event) -> None:
-        from PySide6.QtGui import QPainter, QBrush, QPen
+        from PySide6.QtGui import QPainter, QBrush
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         if self._active:
@@ -86,6 +88,9 @@ def _section_header(icon: str, title: str) -> tuple[QWidget, QLabel]:
 class MainWindow(QMainWindow):
     segment_received = Signal(object)
     result_received = Signal(object)
+    asr_status_received = Signal(str)
+    state_received = Signal(object)
+    notes_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -94,6 +99,8 @@ class MainWindow(QMainWindow):
         self.setMaximumWidth(420)
         self.setStyleSheet(STYLESHEET)
         self._term_count = 0
+        self._listening = False
+        self._asr_status = "待机"
 
         central = QWidget()
         central.setObjectName("central")
@@ -128,33 +135,52 @@ class MainWindow(QMainWindow):
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(12, 12, 12, 12)
-        content_layout.setSpacing(12)
+        content_layout.setSpacing(10)
 
-        # Record button
+        # Record + notes buttons
         btn_row = QWidget()
         btn_layout = QHBoxLayout(btn_row)
         btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(8)
         self._record_btn = QPushButton("▶  开始监听")
         self._record_btn.setObjectName("record_btn")
         self._record_btn.setCheckable(True)
         self._record_btn.setFixedHeight(40)
         self._record_btn.toggled.connect(self._on_record_toggled)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self._record_btn)
-        btn_layout.addStretch()
+
+        self._notes_btn = QPushButton("生成纪要")
+        self._notes_btn.setObjectName("notes_btn")
+        self._notes_btn.setFixedHeight(40)
+        self._notes_btn.setEnabled(False)
+        self._notes_btn.clicked.connect(self.notes_requested.emit)
+
+        btn_layout.addWidget(self._record_btn, stretch=2)
+        btn_layout.addWidget(self._notes_btn, stretch=1)
         content_layout.addWidget(btn_row)
 
-        # Transcript section
+        # Context
+        c_header, _ = _section_header("🧭", "上下文")
+        content_layout.addWidget(c_header)
+        self.context_section = ContextSection()
+        content_layout.addWidget(self.context_section)
+
+        # Transcript
         t_header, _ = _section_header("🎙", "实时转写")
         content_layout.addWidget(t_header)
         self.transcript_section = TranscriptSection()
         content_layout.addWidget(self.transcript_section)
 
-        # Terms section
+        # Terms
         tm_header, self._term_count_lbl = _section_header("📖", "术语")
         content_layout.addWidget(tm_header)
         self.terms_section = TermsSection()
         content_layout.addWidget(self.terms_section)
+
+        # Suggestions / brief
+        s_header, _ = _section_header("💡", "简报")
+        content_layout.addWidget(s_header)
+        self.suggestions_section = SuggestionsSection()
+        content_layout.addWidget(self.suggestions_section)
 
         content_layout.addStretch()
         root.addWidget(content)
@@ -162,20 +188,57 @@ class MainWindow(QMainWindow):
         # Signals
         self.segment_received.connect(self.transcript_section.add_segment)
         self.result_received.connect(self._route_result)
+        self.asr_status_received.connect(self._on_asr_status)
+        self.state_received.connect(self.context_section.set_state)
+
+    def set_record_checked(self, checked: bool) -> None:
+        """Update record button without emitting toggled (for consent cancel)."""
+        self._record_btn.blockSignals(True)
+        self._record_btn.setChecked(checked)
+        self._record_btn.blockSignals(False)
+        self._on_record_toggled(checked)
+
+    def set_notes_enabled(self, enabled: bool) -> None:
+        self._notes_btn.setEnabled(enabled)
+
+    def set_notes_status(self, text: str) -> None:
+        self._notes_btn.setText(text)
+
+    @Slot(str)
+    def _on_asr_status(self, message: str) -> None:
+        self._asr_status = message
+        if not self._listening:
+            self._status_badge.setText(message)
+            loading = "加载" in message or "失败" in message
+            self._status_badge.setProperty("active", "false" if loading else "true")
+            self._status_badge.style().unpolish(self._status_badge)
+            self._status_badge.style().polish(self._status_badge)
 
     @Slot(bool)
     def _on_record_toggled(self, checked: bool) -> None:
+        self._listening = checked
         self._record_btn.setText("⏹  停止监听" if checked else "▶  开始监听")
         self._dot.set_active(checked)
-        self._status_badge.setText("● 监听中" if checked else "待机")
-        self._status_badge.setProperty("active", "true" if checked else "false")
-        # Force stylesheet re-evaluation after property change
+        if checked:
+            self._status_badge.setText("● 监听中")
+            self._status_badge.setProperty("active", "true")
+            self._notes_btn.setEnabled(False)
+            self._notes_btn.setText("生成纪要")
+        else:
+            self._status_badge.setText(self._asr_status if self._asr_status else "待机")
+            ready = "就绪" in self._asr_status
+            self._status_badge.setProperty("active", "true" if ready else "false")
+            self._notes_btn.setEnabled(True)
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
 
     @Slot(object)
     def _route_result(self, result: PluginResult) -> None:
-        if result.ui_section == "terms":
+        if result.ui_section == "terms" and result.content:
+            is_update = bool(result.result_id) and result.status == "final"
             self.terms_section.add_result(result)
-            self._term_count += 1
-            self._term_count_lbl.setText(str(self._term_count))
+            if not is_update:
+                self._term_count += 1
+                self._term_count_lbl.setText(str(self._term_count))
+        elif result.ui_section == "suggestions" and result.content:
+            self.suggestions_section.add_result(result)

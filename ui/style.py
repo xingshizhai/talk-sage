@@ -84,8 +84,8 @@ QLabel#section_count {
     font-family: 'Courier New', monospace;
 }
 
-/* ── Transcript box ──────────────────────────────────────── */
-QTextEdit#transcript {
+/* ── Transcript / context boxes ──────────────────────────── */
+QTextEdit#transcript, QTextEdit#context {
     background-color: #080c14;
     border: 1px solid rgba(255,255,255,0.06);
     border-radius: 10px;
@@ -95,6 +95,18 @@ QTextEdit#transcript {
     padding: 8px;
     selection-background-color: #1e3a5f;
 }
+
+QPushButton#notes_btn {
+    background: #121826;
+    color: #94a3b8;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 20px;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 500;
+}
+QPushButton#notes_btn:hover { border-color: rgba(245,158,11,0.4); color: #f59e0b; }
+QPushButton#notes_btn:disabled { color: #334155; border-color: rgba(255,255,255,0.04); }
 
 /* ── Terms list ──────────────────────────────────────────── */
 QScrollArea#terms_scroll {

@@ -5,14 +5,35 @@
 #   macOS:   复制到 ~/.talksage/config.yaml
 #   Linux:   复制到 ~/.talksage/config.yaml
 #
-# 只需填写你要使用的 LLM 提供商的 api_key，其余字段保持默认即可。
-# 未填写的字段会从内置默认值自动读取。
+# 只需填写你要使用的字段，其余字段会从内置默认值自动读取。
 
-# ── 语音转写 ──────────────────────────────────────────────────────────────────
+# ── 语音识别 ──────────────────────────────────────────────────────────────────
 transcribe:
-  mode: local       # local（本地 Whisper）/ api（云端 API，暂未实现）
-  model: base       # Whisper 模型大小：tiny / base / small / medium / large
-                    # 越大越准确，但占用更多内存和 CPU
+  # local = 本地双引擎；cloud = OpenAI 兼容 Whisper API（按 3 秒块上传）
+  mode: local
+  cloud:
+    api_key: ""                              # mode: cloud 时必填
+    base_url: https://api.openai.com/v1      # 也可换成其他兼容端点
+    model: whisper-1
+
+  # 客户声音（英文）→ faster-whisper（mode: local）
+  client:
+    model: small          # tiny / base / small / medium / large-v3
+                          # small 在 CPU 上推荐；有 GPU 可用 medium 或 large-v3
+    device: cpu           # cpu / cuda
+    compute_type: int8    # int8 最省内存；有 GPU 可改 float16
+    vad_filter: true      # 自动过滤静音，减少误识别
+
+  # 用户声音（中文）→ FunASR Paraformer
+  user:
+    model: paraformer-zh  # paraformer-zh（离线）/ paraformer-zh-streaming（流式）
+    device: cpu           # cpu / cuda
+
+  # 系统声音回环（视频会议场景，捕获扬声器输出作为客户声源）
+  loopback:
+    enabled: false        # 改为 true 启用（适用于视频会议）
+    device: null          # null = 自动检测 Stereo Mix / WASAPI Loopback
+                          # 也可以填写设备编号，运行 python -c "import sounddevice; print(sounddevice.query_devices())" 查看
 
 # ── LLM 提供商 ────────────────────────────────────────────────────────────────
 llm:
@@ -60,7 +81,8 @@ plugins:
   # 术语解释：识别英文缩写（NPI、BOQ 等）并用中文解释
   term_explainer:
     enabled: true
-    llm: deepseek     # 指定使用哪个提供商，留空则用 llm.default
+    llm: deepseek     # 指定使用哪个提供商
+    cooldown_seconds: 10  # 两次 LLM 解释的最短间隔，避免刷屏
 
   # 实时翻译（Phase 2，暂未实现）
   translator:
@@ -76,3 +98,31 @@ plugins:
   negotiation_analyzer:
     enabled: false
     llm: claude
+
+# ── 隐私 ──────────────────────────────────────────────────────────────────────
+privacy:
+  # 首次点击「开始监听」时会弹出同意确认；同意后写入 true
+  recording_consent_accepted: false
+  # Windows：尽量让本窗口不被屏幕共享/截屏捕获（对方看不到侧边栏）
+  # macOS / Linux：请使用「共享特定窗口」并勿共享 TalkSage；见 README
+  hide_from_screen_share: true
+
+# ── 会话落盘 ──────────────────────────────────────────────────────────────────
+session:
+  auto_save: true   # 写入 ~/.talksage/sessions/<时间戳>.md
+  notes_llm: null   # 生成纪要使用的 LLM；null = llm.default
+
+# ── 客户简报知识库（可选）────────────────────────────────────────────────────
+knowledge_base:
+  enabled: false
+  folder: ""        # 指向含 .md / .txt 的文件夹
+
+# ── 首次设置 ──────────────────────────────────────────────────────────────────
+setup:
+  completed: false  # 完成向导后自动设为 true；改回 false 可再次弹出
+
+# ── 双路串音抑制 ──────────────────────────────────────────────────────────────
+audio:
+  crosstalk:
+    similarity_threshold: 0.6
+    window_seconds: 8

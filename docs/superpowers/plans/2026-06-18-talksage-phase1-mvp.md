@@ -1,5 +1,10 @@
 # TalkSage Phase 1 MVP Implementation Plan
 
+> **状态（2026-07-18）：已完成并归档。**  
+> 后续进度见 [2026-07-18-post-mvp-progress.md](./2026-07-18-post-mvp-progress.md)；  
+> 最新架构与完成度见 [设计文档](../specs/2026-06-18-talksage-design.md)。  
+> 下文保留为 Phase 1 历史任务清单，checkbox 不再作为当前工作跟踪。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a working MVP that captures microphone audio, transcribes with local Whisper, detects English technical terms, explains them in Chinese via LLM, and displays results in a PySide6 sidebar.

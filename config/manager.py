@@ -27,6 +27,10 @@ class ConfigManager:
                 user_data = yaml.safe_load(f) or {}
             self._data = _deep_merge(self._data, user_data)
 
+    @property
+    def config_dir(self) -> Path:
+        return self._dir
+
     def get(self, key: str, default: Any = None) -> Any:
         parts = key.split(".")
         node = self._data
