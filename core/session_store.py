@@ -3,25 +3,36 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from core.models import TranscriptSegment, PluginResult
+from core.session_db import SessionDatabase
 
 _SPEAKER_LABEL = {"client": "客户", "user": "我"}
 
 
 class SessionStore:
-    """Auto-save transcript + final plugin results as Markdown under sessions_dir."""
+    """Auto-save transcript + terms as Markdown; optionally mirror into SQLite."""
 
-    def __init__(self, sessions_dir: Path | None = None):
+    def __init__(
+        self,
+        sessions_dir: Path | None = None,
+        db: SessionDatabase | None = None,
+    ):
         self._dir = sessions_dir or (Path.home() / ".talksage" / "sessions")
+        self._db = db
         self._path: Path | None = None
         self._last_path: Path | None = None
+        self._session_id: int | None = None
         self._segments: list[TranscriptSegment] = []
-        self._terms: dict[str, str] = {}  # result_id or content key -> final content
+        self._terms: dict[str, str] = {}
         self._term_order: list[str] = []
         self._active = False
 
     @property
     def active(self) -> bool:
         return self._active
+
+    @property
+    def db(self) -> SessionDatabase | None:
+        return self._db
 
     def start(self) -> Path:
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -31,7 +42,12 @@ class SessionStore:
         self._terms = {}
         self._term_order = []
         self._last_path = None
+        self._session_id = None
         self._active = True
+        if self._db is not None:
+            self._session_id = self._db.start_session(
+                stamp=stamp, markdown_path=str(self._path)
+            )
         self._flush()
         return self._path
 
@@ -39,6 +55,8 @@ class SessionStore:
         if not self._active:
             return
         self._segments.append(segment)
+        if self._db is not None and self._session_id is not None:
+            self._db.add_segment(self._session_id, segment)
         self._flush()
 
     def add_result(self, result: PluginResult) -> None:
@@ -53,6 +71,8 @@ class SessionStore:
         key = result.result_id or result.content
         if key not in self._terms:
             self._term_order.append(key)
+            if self._db is not None and self._session_id is not None:
+                self._db.add_term(self._session_id, result.content)
         self._terms[key] = result.content
         self._flush()
 
@@ -61,8 +81,9 @@ class SessionStore:
             return None
         self._flush()
         path = self._path
+        if self._db is not None and self._session_id is not None:
+            self._db.end_session(self._session_id)
         self._active = False
-        # Keep path for post-session notes append
         self._last_path = path
         self._path = None
         return path
@@ -79,11 +100,12 @@ class SessionStore:
             return None
         existing = target.read_text(encoding="utf-8") if target.exists() else ""
         if "## 会议纪要" in existing:
-            # Replace previous notes section
             head = existing.split("## 会议纪要")[0].rstrip() + "\n\n"
         else:
             head = existing.rstrip() + "\n\n"
         target.write_text(head + "## 会议纪要\n\n" + notes.strip() + "\n", encoding="utf-8")
+        if self._db is not None and self._session_id is not None:
+            self._db.set_notes(self._session_id, notes.strip())
         return target
 
     def _flush(self) -> None:

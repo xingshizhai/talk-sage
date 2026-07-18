@@ -16,18 +16,18 @@ transcribe:
     base_url: https://api.openai.com/v1      # 也可换成其他兼容端点
     model: whisper-1
 
-  # 客户声音（英文）→ faster-whisper（mode: local）
+  # 客户声音（英文）（mode: local）
   client:
-    model: small          # tiny / base / small / medium / large-v3
-                          # small 在 CPU 上推荐；有 GPU 可用 medium 或 large-v3
-    device: cpu           # cpu / cuda
-    compute_type: int8    # int8 最省内存；有 GPU 可改 float16
-    vad_filter: true      # 自动过滤静音，减少误识别
+    engine: faster-whisper  # faster-whisper | parakeet
+    model: small            # whisper 尺寸；parakeet 用 nemo-parakeet-tdt-0.6b-v3
+    device: auto            # auto（启动探测 GPU）/ cpu / cuda
+    compute_type: auto      # 仅 faster-whisper：auto / int8 / float16
+    vad_filter: true
 
   # 用户声音（中文）→ FunASR Paraformer
   user:
     model: paraformer-zh  # paraformer-zh（离线）/ paraformer-zh-streaming（流式）
-    device: cpu           # cpu / cuda
+    device: auto          # auto / cpu / cuda
 
   # 系统声音回环（视频会议场景，捕获扬声器输出作为客户声源）
   loopback:
@@ -110,6 +110,7 @@ privacy:
 # ── 会话落盘 ──────────────────────────────────────────────────────────────────
 session:
   auto_save: true   # 写入 ~/.talksage/sessions/<时间戳>.md
+  sqlite: true      # 同步写入 sessions.db，可用「历史」搜索
   notes_llm: null   # 生成纪要使用的 LLM；null = llm.default
 
 # ── 客户简报知识库（可选）────────────────────────────────────────────────────
@@ -121,8 +122,16 @@ knowledge_base:
 setup:
   completed: false  # 完成向导后自动设为 true；改回 false 可再次弹出
 
-# ── 双路串音抑制 ──────────────────────────────────────────────────────────────
+# ── 音频设备与处理 ────────────────────────────────────────────────────────────
 audio:
+  mic_device: null        # null = 默认麦；或 sounddevice 设备编号（也可在 UI「设置」里选）
+  ducking:
+    enabled: true         # 系统音响时压低麦克风，减轻串音
+    threshold: 0.04
+    factor: 0.35
+  soft_limit:
+    enabled: true         # 防削波
+    threshold: 0.95
   crosstalk:
     similarity_threshold: 0.6
     window_seconds: 8

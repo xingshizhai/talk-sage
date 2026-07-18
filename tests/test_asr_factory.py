@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from core.asr.factory import build_asr_engine
 from core.asr.dual_engine import DualASREngine
 from core.asr.faster_whisper_engine import FasterWhisperEngine
@@ -39,3 +39,15 @@ def test_build_defaults_to_local():
     engine = build_asr_engine({})
     assert isinstance(engine, DualASREngine)
     assert isinstance(engine._client_engine, FasterWhisperEngine)
+
+
+def test_build_local_resolves_auto_device():
+    with patch("core.device_probe.detect_compute_device", return_value="cuda"):
+        engine = build_asr_engine({
+            "mode": "local",
+            "client": {"model": "small", "device": "auto", "compute_type": "auto", "vad_filter": True},
+            "user": {"model": "paraformer-zh", "device": "auto"},
+        })
+    assert engine._client_engine._device == "cuda"
+    assert engine._client_engine._compute_type == "float16"
+    assert engine._user_engine._device == "cuda"

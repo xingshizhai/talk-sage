@@ -8,7 +8,7 @@
 
 ## 目标
 
-在 Phase 1 MVP 管道之上，完成合规与体验（P0）、架构可扩展性（P1）、产品化能力（P2），使 TalkSage 可日常试用；并为翻译/评估/谈判插件与真流式 ASR 留好接口。
+在 Phase 1 MVP 管道之上，完成合规与体验（P0）、架构可扩展性（P1）、产品化能力（P2），并吸收 Meetily 在本地 ASR / 音频质量 / 会话检索上的实践，使 TalkSage 可日常试用；翻译 / 评估 / 谈判插件与真流式 ASR 仍为下一阶段。
 
 ---
 
@@ -41,7 +41,18 @@
 | 知识库 | 本地 md/txt + brief 插件 | `core/knowledge_base.py`, `plugins/brief_retriever.py` |
 | 会后纪要 | LLM 生成并追加会话文件 | `core/notes_generator.py`, `main.py` |
 
-**测试：** `pytest` 约 100+ 用例通过（以本地运行为准）。
+### Meetily 启发优化
+
+| 项 | 实现要点 | 主要文件 |
+|----|---------|---------|
+| GPU / `device: auto` | 启动探测 CUDA；`compute_type: auto` | `core/device_probe.py`, `core/asr/factory.py` |
+| 设备与引擎 UI | 麦 / 回环 / 英文引擎 / GPU | `ui/settings_dialog.py` |
+| 闪避 + 防削波 | 回环响时压麦；峰值软限制 | `core/audio_process.py`, `core/audio_hub.py` |
+| 导入音频 | 离线分块 ASR → sessions | `core/import_audio.py`, `main.py` |
+| SQLite 会话库 | `sessions.db` + 历史搜索；Markdown 仍导出 | `core/session_db.py`, `ui/history_dialog.py` |
+| Parakeet 引擎 | 可选 onnx-asr 英文后端 | `core/asr/parakeet_engine.py` |
+
+**测试：** `pytest` 约 120+ 用例通过（以本地运行为准）。
 
 ---
 
@@ -74,10 +85,12 @@
 ## 验收清单（当前可用）
 
 - [x] 本地双引擎转写 + 可选云端 Whisper API  
+- [x] 可选 Parakeet 英文引擎 + `device: auto`  
 - [x] 术语解释不刷屏（去重/冷却/骨架）  
-- [x] 双路采集 + 串音抑制  
-- [x] 首次向导 + 录音同意 + Windows 屏享排除  
-- [x] 会话自动保存 + 会后纪要  
+- [x] 双路采集 + 闪避/防削波 + 串音抑制  
+- [x] 首次向导 + 设置页 + 录音同意 + Windows 屏享排除  
+- [x] 会话 Markdown + SQLite 历史检索  
+- [x] 导入音频离线转写 + 会后纪要  
 - [x] 可选客户简报检索  
 - [ ] 实时翻译区  
 - [ ] 技术评估 / 谈判分析  
@@ -92,5 +105,17 @@
 |------|------|
 | `~/.talksage/config.yaml` | 用户配置 |
 | `~/.talksage/sessions/` | 会话 Markdown |
+| `~/.talksage/sessions.db` | SQLite 可检索历史（`session.sqlite: true`） |
 | `config/defaults.yaml` | 内置默认 |
 | `config/config.template.yaml` | 用户复制模板 |
+
+### 关键配置键
+
+```yaml
+transcribe.client.engine: faster-whisper | parakeet
+transcribe.client.device: auto | cpu | cuda
+session.sqlite: true
+audio.mic_device / ducking / soft_limit / crosstalk
+```
+
+Parakeet 可选依赖：`pip install "onnx-asr[cpu,hub]"`

@@ -11,6 +11,10 @@
 - **对话上下文**：自动跟踪话题、未决问题与近期决策
 - **客户简报知识库**：可选本地 `.md/.txt` 文件夹，会议中按关键词检索提示
 - **首次设置向导**：引导选择 ASR 模式、LLM 与知识库
+- **设备与音频优化**：设置页选择麦克风/回环；GPU 自动探测；麦克风闪避与防削波
+- **导入音频**：支持导入录音离线转写并保存到会话目录
+- **SQLite 会话历史**：转写可检索；「历史」按钮浏览/搜索
+- **可选 Parakeet 英文 ASR**：设置中切换（需 `pip install "onnx-asr[cpu,hub]"`）
 - **插件化架构**：翻译、技术评估、谈判分析等功能可按需启用
 - **多 LLM 支持**：DeepSeek、Kimi、MiniMax、Groq、Ollama、Claude
 
@@ -51,7 +55,8 @@ pip install -r requirements.txt
 > **首次运行说明**
 > - faster-whisper 会在第一次使用时自动下载所选 Whisper 模型（`small` 约 244MB）
 > - FunASR 会在第一次使用时自动从 ModelScope 下载 `paraformer-zh` 等模型（共约 700MB）
-> - 模型缓存在系统用户目录，后续启动无需重新下载
+> - 若启用 Parakeet，首次还会通过 onnx-asr 下载对应 ONNX 模型
+> - `device: auto` 会在启动时探测 GPU；模型缓存在系统用户目录，后续无需重下
 
 ### 4. 系统音频依赖（Linux）
 
@@ -103,22 +108,48 @@ transcribe:
   #   base_url: https://api.openai.com/v1
   #   model: whisper-1
 
-  # 客户声音（英文）→ faster-whisper
+  # 客户声音（英文）
   client:
-    model: small          # tiny / base / small / medium / large-v3
-    device: cpu           # cpu / cuda（有 GPU 时改为 cuda）
-    compute_type: int8    # int8（CPU）/ float16（GPU）
+    engine: faster-whisper  # faster-whisper | parakeet
+    model: small            # whisper: tiny/base/small/...；parakeet: nemo-parakeet-tdt-0.6b-v3
+    device: auto            # auto / cpu / cuda（auto 启动时探测 GPU）
+    compute_type: auto      # auto / int8 / float16（仅 faster-whisper）
     vad_filter: true
 
   # 用户声音（中文）→ FunASR Paraformer
   user:
     model: paraformer-zh
-    device: cpu
+    device: auto
 
   # 视频会议：捕获系统音频作为客户声源
   loopback:
     enabled: false        # 改为 true 启用
     device: null          # null = 自动检测；或填写设备编号（见下方）
+```
+
+使用 Parakeet 时需额外安装：
+
+```bash
+pip install "onnx-asr[cpu,hub]"
+```
+
+也可在应用内「设置」中切换英文引擎与设备，无需手改配置文件。
+
+### 音频与会话
+
+```yaml
+audio:
+  mic_device: null          # null = 系统默认；或 sounddevice 设备编号
+  ducking:
+    enabled: true           # 回环响时压低麦克风，减轻串音
+  soft_limit:
+    enabled: true           # 防削波
+  crosstalk:
+    similarity_threshold: 0.6
+
+session:
+  auto_save: true           # ~/.talksage/sessions/*.md
+  sqlite: true              # ~/.talksage/sessions.db（「历史」可搜索）
 ```
 
 #### 查看可用音频设备
@@ -145,7 +176,17 @@ Windows 上通常可以启用"立体声混音（Stereo Mix）"或使用 WASAPI L
 python main.py
 ```
 
-首次启动会弹出**设置向导**（ASR / LLM / 可选知识库）。之后状态栏显示 **ASR 加载中…** → **ASR 就绪**。首次点击「▶ 开始监听」时会弹出录音同意确认。停止监听后可点「生成纪要」，结果追加写入当次会话 Markdown。
+首次启动会弹出**设置向导**（ASR / LLM / 可选知识库）。之后状态栏显示 **ASR 加载中…** → **ASR 就绪**。首次点击「开始监听」时会弹出录音同意确认。
+
+常用按钮：
+
+| 按钮 | 作用 |
+|------|------|
+| 开始监听 / 停止 | 实时双路转写 |
+| 生成纪要 | 会后 LLM 纪要，追加到当次会话 Markdown |
+| 导入音频 | 离线转写录音并保存到会话目录 |
+| 历史 | 浏览 / 搜索 SQLite 会话 |
+| 设置 | 麦克风、回环、英文 ASR 引擎、GPU、闪避等 |
 
 将 `setup.completed` 改回 `false` 可再次打开向导。
 
@@ -157,8 +198,9 @@ TalkSage 会采集麦克风音频，并在启用系统回环时采集扬声器�
 
 ### 数据如何离开本机
 
-- **音频**：默认在本地由 faster-whisper / FunASR 识别，不上传。
+- **音频**：默认在本地由 faster-whisper（或 Parakeet）/ FunASR 识别，不上传。
 - **文本**：启用术语解释等插件时，转写后的文本会发送到你配置的 LLM API。
+- **会话**：Markdown 与可选 SQLite 仅保存在本机 `~/.talksage/`。
 - **API Key**：仅保存在本机配置文件中。
 
 ### 屏幕共享隐形
@@ -197,45 +239,23 @@ pytest
 talk-sage/
 ├── core/
 │   ├── asr/
-│   │   ├── base.py                 # ASREngine 抽象基类
-│   │   ├── factory.py              # local / cloud 工厂
-│   │   ├── faster_whisper_engine.py
-│   │   ├── funasr_engine.py
-│   │   ├── openai_cloud_engine.py  # 云端 Whisper API
-│   │   └── dual_engine.py
-│   ├── audio_hub.py                # 音频采集（麦克风 + 回环）
-│   ├── echo_filter.py              # 双路串音抑制
-│   ├── session_store.py            # 会话 Markdown 落盘
-│   ├── conversation_state.py       # 话题/未决问题启发式跟踪
-│   ├── knowledge_base.py           # 本地客户简报检索
-│   ├── notes_generator.py          # 会后纪要生成
-│   ├── pipeline.py                 # 主管线（音频 → ASR → 插件 → UI）
-│   ├── plugin_bus.py               # 插件总线（支持骨架→终稿）
-│   └── models.py                   # 数据模型
-├── plugins/
-│   ├── base.py                     # 插件抽象基类
-│   ├── term_explainer.py           # 术语解释插件
-│   └── brief_retriever.py          # 客户简报检索插件
-├── llm/
-│   ├── base.py                     # LLM Provider 接口
-│   └── openai_compat.py            # OpenAI 兼容实现（DeepSeek/Kimi/Groq 等）
+│   │   ├── base.py / factory.py / dual_engine.py
+│   │   ├── faster_whisper_engine.py / funasr_engine.py
+│   │   ├── openai_cloud_engine.py / parakeet_engine.py
+│   ├── audio_hub.py / audio_process.py / device_probe.py
+│   ├── echo_filter.py / pipeline.py / plugin_bus.py
+│   ├── session_store.py / session_db.py / import_audio.py
+│   ├── conversation_state.py / knowledge_base.py / notes_generator.py
+│   └── models.py
+├── plugins/          # term_explainer, brief_retriever
+├── llm/              # OpenAI 兼容 Provider
 ├── ui/
-│   ├── main_window.py              # 主窗口
-│   ├── setup_wizard.py             # 首次设置向导
-│   ├── consent_dialog.py           # 录音同意弹窗
-│   ├── screen_share.py             # 屏幕共享排除（Windows）
-│   ├── style.py                    # 深色主题样式
-│   └── sections/
-│       ├── context.py              # 对话上下文
-│       ├── transcript.py           # 实时转写区
-│       ├── terms.py                # 术语卡片区
-│       └── suggestions.py          # 简报提示区
+│   ├── main_window.py / setup_wizard.py / settings_dialog.py
+│   ├── history_dialog.py / consent_dialog.py / screen_share.py
+│   └── sections/     # context, transcript, terms, suggestions
 ├── config/
-│   ├── manager.py                  # 配置管理
-│   ├── defaults.yaml               # 内置默认值
-│   └── config.template.yaml        # 用户配置模板
-├── tests/                          # 单元测试
-├── main.py                         # 程序入口
+├── tests/
+├── main.py
 └── requirements.txt
 ```
 
@@ -252,4 +272,7 @@ talk-sage/
 
 ## 参考项目
 
-产品与交互上参考了 [OpenOats](https://github.com/yazinsai/OpenOats)（会议侧边栏转写、本地 ASR、知识库提示、屏享隐形、录音同意与会话落盘等思路）。TalkSage 定位不同：面向**中英双语商务/技术沟通**，侧重双引擎 ASR、术语解释与客户简报辅助，而非通用笔记检索型会议助手。
+| 项目 | 借鉴点 | TalkSage 差异 |
+|------|--------|---------------|
+| [OpenOats](https://github.com/yazinsai/OpenOats) | 侧边栏转写、门控节流、屏享隐形、录音同意、会话落盘 | 非通用笔记 RAG；主线为中英术语 / 简报 / 谈判 |
+| [Meetily](https://github.com/Zackriya-Solutions/meetily) | 本地 ASR 性能（Parakeet）、闪避/混音、SQLite、导入重转写 | 不做通用纪要工具；优先会中侧边栏辅助 |

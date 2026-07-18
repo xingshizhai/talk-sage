@@ -62,3 +62,24 @@ def test_append_notes_after_stop(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert "## 会议纪要" in text
     assert "讨论 NPI" in text
+
+
+def test_session_store_mirrors_to_sqlite(tmp_path):
+    from core.session_db import SessionDatabase
+
+    db = SessionDatabase(tmp_path / "t.db")
+    store = SessionStore(sessions_dir=tmp_path / "md", db=db)
+    store.start()
+    store.add_segment(TranscriptSegment(speaker="client", text="RFQ due Friday", language="en"))
+    store.add_result(PluginResult(
+        plugin_name="term_explainer",
+        ui_section="terms",
+        content="RFQ = 询价单",
+        status="final",
+    ))
+    store.stop()
+    sessions = db.list_sessions()
+    assert len(sessions) == 1
+    assert sessions[0]["segment_count"] == 1
+    hits = db.search("RFQ")
+    assert hits

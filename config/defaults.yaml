@@ -5,16 +5,17 @@ transcribe:
     api_key: ""
     base_url: https://api.openai.com/v1
     model: whisper-1
-  # client stream: English, uses faster-whisper
+  # client stream: English
   client:
-    model: small          # tiny / base / small / medium / large-v3
-    device: cpu           # cpu / cuda
-    compute_type: int8    # int8 / float16 / float32
+    engine: faster-whisper  # faster-whisper | parakeet（需 pip install "onnx-asr[cpu,hub]"）
+    model: small          # whisper: tiny/base/small/...；parakeet: nemo-parakeet-tdt-0.6b-v3
+    device: auto          # auto / cpu / cuda（auto 启动时探测 GPU）
+    compute_type: auto    # auto / int8 / float16 / float32（仅 faster-whisper）
     vad_filter: true
   # user stream: Chinese, uses FunASR Paraformer
   user:
     model: paraformer-zh  # paraformer-zh / paraformer-zh-streaming
-    device: cpu           # cpu / cuda
+    device: auto          # auto / cpu / cuda
   # system audio loopback capture (video calls)
   loopback:
     enabled: false
@@ -66,6 +67,7 @@ privacy:
 
 session:
   auto_save: true   # 监听期间自动写入 ~/.talksage/sessions/*.md
+  sqlite: true      # 同步写入 ~/.talksage/sessions.db（可搜索历史）
   notes_llm: null   # null = 使用 llm.default
 
 knowledge_base:
@@ -76,6 +78,14 @@ setup:
   completed: false  # 首次启动向导完成后为 true
 
 audio:
+  mic_device: null              # null = 系统默认麦克风；或 sounddevice 设备编号
+  ducking:
+    enabled: true
+    threshold: 0.04
+    factor: 0.35
+  soft_limit:
+    enabled: true
+    threshold: 0.95
   crosstalk:
     similarity_threshold: 0.6   # 用户转写与近期客户转写 Jaccard 相似度超过则丢弃（回声）
     window_seconds: 8

@@ -37,3 +37,13 @@ def test_audio_hub_resets_buffer_after_flush():
     chunk = np.zeros((16000, 1), dtype=np.float32)
     hub._on_mic_data(chunk, None, None, None)
     assert hub._mic_buffer.shape[0] == 0
+
+
+def test_audio_hub_soft_limits_hot_mic_chunk():
+    flushed = []
+    hub = AudioHub(sample_rate=16000, chunk_seconds=1, soft_limit_enabled=True, ducking_enabled=False)
+    hub.on_segment = lambda audio, speaker: flushed.append(audio)
+    chunk = np.ones((16000, 1), dtype=np.float32) * 1.8
+    hub._on_mic_data(chunk, None, None, None)
+    assert len(flushed) == 1
+    assert float(np.max(np.abs(flushed[0]))) <= 1.0

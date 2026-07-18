@@ -91,12 +91,15 @@ class MainWindow(QMainWindow):
     asr_status_received = Signal(str)
     state_received = Signal(object)
     notes_requested = Signal()
+    settings_requested = Signal()
+    import_requested = Signal()
+    history_requested = Signal()
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("TalkSage")
         self.setMinimumWidth(340)
-        self.setMaximumWidth(420)
+        self.setMaximumWidth(440)
         self.setStyleSheet(STYLESHEET)
         self._term_count = 0
         self._listening = False
@@ -157,6 +160,24 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self._record_btn, stretch=2)
         btn_layout.addWidget(self._notes_btn, stretch=1)
         content_layout.addWidget(btn_row)
+
+        util_row = QWidget()
+        util_layout = QHBoxLayout(util_row)
+        util_layout.setContentsMargins(0, 0, 0, 0)
+        util_layout.setSpacing(8)
+        self._import_btn = QPushButton("导入音频")
+        self._import_btn.setObjectName("notes_btn")
+        self._import_btn.clicked.connect(self.import_requested.emit)
+        self._history_btn = QPushButton("历史")
+        self._history_btn.setObjectName("notes_btn")
+        self._history_btn.clicked.connect(self.history_requested.emit)
+        self._settings_btn = QPushButton("设置")
+        self._settings_btn.setObjectName("notes_btn")
+        self._settings_btn.clicked.connect(self.settings_requested.emit)
+        util_layout.addWidget(self._import_btn)
+        util_layout.addWidget(self._history_btn)
+        util_layout.addWidget(self._settings_btn)
+        content_layout.addWidget(util_row)
 
         # Context
         c_header, _ = _section_header("🧭", "上下文")

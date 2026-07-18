@@ -39,6 +39,10 @@ class Pipeline:
     def sessions(self) -> SessionStore | None:
         return self._sessions
 
+    @property
+    def engine(self) -> ASREngine:
+        return self._engine
+
     def warmup(self) -> None:
         """Pre-load ASR models and report status via on_asr_status."""
         self._emit_asr_status("ASR 加载中…")
@@ -53,13 +57,17 @@ class Pipeline:
         if self.on_asr_status:
             self.on_asr_status(message)
 
-    def start(self, loopback_device: int | None = None) -> None:
+    def start(
+        self,
+        loopback_device: int | None = None,
+        mic_device: int | None = None,
+    ) -> None:
         self._loop = asyncio.new_event_loop()
         t = threading.Thread(target=self._loop.run_forever, daemon=True)
         t.start()
         if self._sessions is not None:
             self._sessions.start()
-        self._hub.start(loopback_device=loopback_device)
+        self._hub.start(loopback_device=loopback_device, mic_device=mic_device)
 
     def stop(self) -> None:
         self._hub.stop()

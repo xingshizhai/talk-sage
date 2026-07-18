@@ -4,6 +4,8 @@ from core.asr.dual_engine import DualASREngine
 from core.asr.faster_whisper_engine import FasterWhisperEngine
 from core.asr.funasr_engine import FunASREngine
 from core.asr.openai_cloud_engine import OpenAICloudEngine
+from core.asr.parakeet_engine import ParakeetEngine
+from core.device_probe import apply_auto_device_to_config
 
 
 def build_asr_engine(transcribe_cfg: dict[str, Any] | None) -> ASREngine:
@@ -13,19 +15,32 @@ def build_asr_engine(transcribe_cfg: dict[str, Any] | None) -> ASREngine:
 
     if mode == "cloud":
         return _build_cloud(cfg)
+    cfg = apply_auto_device_to_config(cfg)
     return _build_local(cfg)
+
+
+def _build_client_engine(client_cfg: dict[str, Any]) -> ASREngine:
+    engine_name = (client_cfg.get("engine") or "faster-whisper").lower()
+    device = client_cfg.get("device", "cpu")
+    if engine_name == "parakeet":
+        return ParakeetEngine(
+            model_id=client_cfg.get("model") or "nemo-parakeet-tdt-0.6b-v3",
+            device=device,
+            language="en",
+        )
+    return FasterWhisperEngine(
+        model_size=client_cfg.get("model", "small"),
+        device=device,
+        compute_type=client_cfg.get("compute_type", "int8"),
+        vad_filter=client_cfg.get("vad_filter", True),
+        language="en",
+    )
 
 
 def _build_local(cfg: dict[str, Any]) -> DualASREngine:
     client_cfg = cfg.get("client") or {}
     user_cfg = cfg.get("user") or {}
-    client_engine = FasterWhisperEngine(
-        model_size=client_cfg.get("model", "small"),
-        device=client_cfg.get("device", "cpu"),
-        compute_type=client_cfg.get("compute_type", "int8"),
-        vad_filter=client_cfg.get("vad_filter", True),
-        language="en",
-    )
+    client_engine = _build_client_engine(client_cfg)
     user_engine = FunASREngine(
         model=user_cfg.get("model", "paraformer-zh"),
         device=user_cfg.get("device", "cpu"),

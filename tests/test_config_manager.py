@@ -13,6 +13,8 @@ def test_loads_defaults_when_no_file(tmp_config_dir):
     mgr = ConfigManager(config_dir=tmp_config_dir)
     assert mgr.get("transcribe.client.model") == "small"
     assert mgr.get("transcribe.user.model") == "paraformer-zh"
+    assert mgr.get("transcribe.client.device") == "auto"
+    assert mgr.get("audio.ducking.enabled") is True
 
 
 def test_creates_config_dir_on_save(tmp_config_dir):
