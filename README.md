@@ -15,6 +15,7 @@
 - **导入音频**：支持导入录音离线转写并保存到会话目录
 - **SQLite 会话历史**：转写可检索；「历史」按钮浏览/搜索
 - **可选 Parakeet 英文 ASR**：设置中切换（需 `pip install "onnx-asr[cpu,hub]"`）
+- **可选 BitNet CPU 英文 ASR**：经 [VibeASR.cpp](https://github.com/microsoft/VibeASR.cpp) 本地推理；导入音频默认优先使用
 - **插件化架构**：翻译、技术评估、谈判分析等功能可按需启用
 - **多 LLM 支持**：DeepSeek、Kimi、MiniMax、Groq、Ollama、Claude
 
@@ -110,7 +111,7 @@ transcribe:
 
   # 客户声音（英文）
   client:
-    engine: faster-whisper  # faster-whisper | parakeet
+    engine: faster-whisper  # faster-whisper | parakeet | bitnet
     model: small            # whisper: tiny/base/small/...；parakeet: nemo-parakeet-tdt-0.6b-v3
     device: auto            # auto / cpu / cuda（auto 启动时探测 GPU）
     compute_type: auto      # auto / int8 / float16（仅 faster-whisper）
@@ -125,6 +126,15 @@ transcribe:
   loopback:
     enabled: false        # 改为 true 启用
     device: null          # null = 自动检测；或填写设备编号（见下方）
+
+  # BitNet CPU（可选，见下方「BitNet 安装」）
+  bitnet:
+    binary: ""            # asr_infer 路径；空则自动查找
+    vae_model: ""
+    lm_model: ""
+    threads: 4
+  import:
+    prefer_bitnet: true   # 导入音频优先 BitNet
 ```
 
 使用 Parakeet 时需额外安装：
@@ -132,6 +142,17 @@ transcribe:
 ```bash
 pip install "onnx-asr[cpu,hub]"
 ```
+
+#### BitNet 安装（可选）
+
+1. 编译 [VibeASR.cpp](https://github.com/microsoft/VibeASR.cpp) 得到 `asr_infer`（Windows 需 MinGW，勿用 MSVC）
+2. 从 Hugging Face 下载 [VibeVoice-ASR-BitNet](https://huggingface.co/microsoft/VibeVoice-ASR-BitNet) 的两个 GGUF
+3. 任选一种配置方式：
+   - 写入 `~/.talksage/config.yaml` 的 `transcribe.bitnet.binary / vae_model / lm_model`
+   - 或将 `asr_infer` 与两个 `.gguf` 放到 `~/.talksage/vibeasr/`
+   - 或设置环境变量 `TALKSAGE_VIBEASR_ROOT` 指向含二进制与模型的目录
+
+设置页可将英文引擎切到「BitNet CPU」。导入音频在 `prefer_bitnet: true` 且路径可用时**整段**走 BitNet。
 
 也可在应用内「设置」中切换英文引擎与设备，无需手改配置文件。
 
@@ -230,6 +251,7 @@ pytest
 ### 设计文档
 
 - [产品设计（含架构与完成度）](docs/superpowers/specs/2026-06-18-talksage-design.md)
+- [BitNet ASR 接入设计](docs/superpowers/specs/2026-08-04-bitnet-asr-design.md)
 - [Post-MVP 进度与 Phase 3 计划](docs/superpowers/plans/2026-07-18-post-mvp-progress.md)
 - [Phase 1 MVP 历史计划](docs/superpowers/plans/2026-06-18-talksage-phase1-mvp.md)
 
@@ -241,7 +263,7 @@ talk-sage/
 │   ├── asr/
 │   │   ├── base.py / factory.py / dual_engine.py
 │   │   ├── faster_whisper_engine.py / funasr_engine.py
-│   │   ├── openai_cloud_engine.py / parakeet_engine.py
+│   │   ├── openai_cloud_engine.py / parakeet_engine.py / bitnet_engine.py
 │   ├── audio_hub.py / audio_process.py / device_probe.py
 │   ├── echo_filter.py / pipeline.py / plugin_bus.py
 │   ├── session_store.py / session_db.py / import_audio.py
@@ -276,3 +298,4 @@ talk-sage/
 |------|--------|---------------|
 | [OpenOats](https://github.com/yazinsai/OpenOats) | 侧边栏转写、门控节流、屏享隐形、录音同意、会话落盘 | 非通用笔记 RAG；主线为中英术语 / 简报 / 谈判 |
 | [Meetily](https://github.com/Zackriya-Solutions/meetily) | 本地 ASR 性能（Parakeet）、闪避/混音、SQLite、导入重转写 | 不做通用纪要工具；优先会中侧边栏辅助 |
+| [VibeVoice / VibeASR.cpp](https://github.com/microsoft/VibeASR.cpp) | BitNet CPU 量化 ASR、长音频单次推理 | 作可选英文后端 + 导入优先；中文仍 FunASR |

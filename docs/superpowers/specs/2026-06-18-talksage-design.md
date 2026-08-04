@@ -1,7 +1,7 @@
 # TalkSage — 实时 AI 会议秘书 设计文档
 
-**日期：** 2026-06-18（初版） / **修订：** 2026-07-18（含 Meetily 启发优化）  
-**状态：** 实施中（Phase 1 + P0–P2 + 音频/ASR/会话库增强已落地）
+**日期：** 2026-06-18（初版） / **修订：** 2026-08-04（含 BitNet CPU ASR）  
+**状态：** 实施中（Phase 1 + P0–P2 + Meetily 优化 + BitNet 已落地）
 
 ---
 
@@ -54,15 +54,18 @@ AudioHub（麦 + 回环；ducking / soft-limit）
 
 | `transcribe.mode` | 客户（英文） | 用户（中文） |
 |-------------------|-------------|-------------|
-| `local`（默认） | `faster-whisper`（默认）或 `parakeet` | `FunASREngine`（Paraformer） |
+| `local`（默认） | `faster-whisper` / `parakeet` / `bitnet` | `FunASREngine`（Paraformer） |
 | `cloud` | `OpenAICloudEngine`（en） | `OpenAICloudEngine`（zh） |
 
 | `transcribe.client.engine` | 说明 | 依赖 |
 |----------------------------|------|------|
 | `faster-whisper` | 默认；`model` 为 tiny/base/small/… | `faster-whisper` |
 | `parakeet` | NVIDIA Parakeet ONNX，通常更快 | 可选：`pip install "onnx-asr[cpu,hub]"` |
+| `bitnet` | VibeVoice-ASR-BitNet（CPU 子进程） | [VibeASR.cpp](https://github.com/microsoft/VibeASR.cpp) + GGUF |
 
-`device` / `compute_type` 支持 `auto`：启动时由 `device_probe` 探测 CUDA，GPU 推荐 `float16`，否则 CPU `int8`。
+`device` / `compute_type` 支持 `auto`：启动时由 `device_probe` 探测 CUDA，GPU 推荐 `float16`，否则 CPU `int8`（BitNet 固定 CPU）。
+
+导入：`transcribe.import.prefer_bitnet`（默认 true）时，若 BitNet 路径可用则整段调用 `BitNetEngine`，否则回退 client 引擎。详见 [bitnet-asr-design](./2026-08-04-bitnet-asr-design.md)。
 
 云端模式为**分块批处理**（`/audio/transcriptions`），非 WebSocket 真流式。
 
@@ -75,7 +78,7 @@ class ASREngine(ABC):
 ```
 
 启动后台 `warmup()`；状态栏：`ASR 加载中…` → `ASR 就绪`。  
-推理在 `run_in_executor` 中执行。导入音频走 `OfflineTranscriber`（同一 `ASREngine`）。
+推理在 `run_in_executor` 中执行。导入音频走 `OfflineTranscriber`（BitNet 用 `chunk_seconds=0`）。
 
 ---
 
@@ -233,13 +236,20 @@ transcribe:
     base_url: https://api.openai.com/v1
     model: whisper-1
   client:
-    engine: faster-whisper    # faster-whisper | parakeet
+    engine: faster-whisper    # faster-whisper | parakeet | bitnet
     model: small              # 或 nemo-parakeet-tdt-0.6b-v3
     device: auto
     compute_type: auto
     vad_filter: true
   user: { model: paraformer-zh, device: auto }
   loopback: { enabled: false, device: null }
+  bitnet:
+    binary: ""
+    vae_model: ""
+    lm_model: ""
+    threads: 4
+  import:
+    prefer_bitnet: true
 
 llm:
   default: deepseek
@@ -293,7 +303,7 @@ talk-sage/
 │   └── asr/
 │       ├── base.py / factory.py / dual_engine.py
 │       ├── faster_whisper_engine.py / funasr_engine.py
-│       ├── openai_cloud_engine.py / parakeet_engine.py
+│       ├── openai_cloud_engine.py / parakeet_engine.py / bitnet_engine.py
 ├── plugins/   # term_explainer, brief_retriever
 ├── llm/       # openai_compat
 ├── ui/
@@ -347,6 +357,12 @@ talk-sage/
 - [x] SQLite 会话库 + 历史 UI  
 - [x] 可选 Parakeet 英文引擎  
 
+### BitNet CPU（已完成，2026-08）
+
+- [x] `BitNetEngine` 子进程包装 `asr_infer`  
+- [x] 设置页可选；导入 `prefer_bitnet` 整段转写  
+- [x] 配置 / README / 设计文档  
+
 ### Phase 3 — 下一阶段（待做）
 
 1. 翻译插件 + 翻译区 UI  
@@ -366,5 +382,6 @@ talk-sage/
 |------|--------|---------------|
 | [OpenOats](https://github.com/yazinsai/OpenOats) | 门控节流、屏享隐形、同意声明、会话落盘、会中提示节奏 | 非通用笔记 RAG；主线为中英术语/简报/谈判 |
 | [Meetily](https://github.com/Zackriya-Solutions/meetily) | 本地 ASR 性能（Parakeet）、混音/闪避、SQLite、导入重转写、安装体验 | 不做成通用纪要工具；侧边栏会中辅助优先 |
+| [VibeASR.cpp](https://github.com/microsoft/VibeASR.cpp) | BitNet CPU 量化 ASR | 可选英文后端 + 导入优先；中文仍 FunASR |
 
 产品主线始终是：**中英会议辅助 + 术语解释 + 客户简报 + 可扩展谈判/技术插件**。

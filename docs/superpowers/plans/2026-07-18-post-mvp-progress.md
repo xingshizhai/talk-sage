@@ -51,8 +51,11 @@
 | 导入音频 | 离线分块 ASR → sessions | `core/import_audio.py`, `main.py` |
 | SQLite 会话库 | `sessions.db` + 历史搜索；Markdown 仍导出 | `core/session_db.py`, `ui/history_dialog.py` |
 | Parakeet 引擎 | 可选 onnx-asr 英文后端 | `core/asr/parakeet_engine.py` |
+| BitNet CPU | `asr_infer` 子进程；设置可选；导入默认优先 | `core/asr/bitnet_engine.py`, `factory.py` |
 
 **测试：** `pytest` 约 120+ 用例通过（以本地运行为准）。
+
+设计补充：[BitNet ASR 接入](../specs/2026-08-04-bitnet-asr-design.md) · [实现计划](./2026-08-04-bitnet-asr.md)
 
 ---
 
@@ -86,6 +89,7 @@
 
 - [x] 本地双引擎转写 + 可选云端 Whisper API  
 - [x] 可选 Parakeet 英文引擎 + `device: auto`  
+- [x] 可选 BitNet CPU + 导入优先整段转写  
 - [x] 术语解释不刷屏（去重/冷却/骨架）  
 - [x] 双路采集 + 闪避/防削波 + 串音抑制  
 - [x] 首次向导 + 设置页 + 录音同意 + Windows 屏享排除  

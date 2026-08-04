@@ -18,7 +18,7 @@ transcribe:
 
   # 客户声音（英文）（mode: local）
   client:
-    engine: faster-whisper  # faster-whisper | parakeet
+    engine: faster-whisper  # faster-whisper | parakeet | bitnet
     model: small            # whisper 尺寸；parakeet 用 nemo-parakeet-tdt-0.6b-v3
     device: auto            # auto（启动探测 GPU）/ cpu / cuda
     compute_type: auto      # 仅 faster-whisper：auto / int8 / float16
@@ -34,6 +34,16 @@ transcribe:
     enabled: false        # 改为 true 启用（适用于视频会议）
     device: null          # null = 自动检测 Stereo Mix / WASAPI Loopback
                           # 也可以填写设备编号，运行 python -c "import sounddevice; print(sounddevice.query_devices())" 查看
+
+  # BitNet CPU（VibeASR.cpp）— 可选；导入默认优先
+  bitnet:
+    binary: ""            # asr_infer.exe 完整路径；或设 TALKSAGE_VIBEASR_ROOT
+    vae_model: ""         # vibeasr-vae-encoder-i8_s.gguf
+    lm_model: ""          # vibeasr-lm-i2_s-embed-q6_k.gguf
+    threads: 4
+    timeout_seconds: 600
+  import:
+    prefer_bitnet: true
 
 # ── LLM 提供商 ────────────────────────────────────────────────────────────────
 llm:

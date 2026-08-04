@@ -7,7 +7,7 @@ transcribe:
     model: whisper-1
   # client stream: English
   client:
-    engine: faster-whisper  # faster-whisper | parakeet（需 pip install "onnx-asr[cpu,hub]"）
+    engine: faster-whisper  # faster-whisper | parakeet | bitnet
     model: small          # whisper: tiny/base/small/...；parakeet: nemo-parakeet-tdt-0.6b-v3
     device: auto          # auto / cpu / cuda（auto 启动时探测 GPU）
     compute_type: auto    # auto / int8 / float16 / float32（仅 faster-whisper）
@@ -20,6 +20,15 @@ transcribe:
   loopback:
     enabled: false
     device: null          # null = auto-detect; or set to sounddevice device index
+  # VibeVoice-ASR-BitNet via VibeASR.cpp (optional CPU engine)
+  bitnet:
+    binary: ""            # asr_infer 路径；空则 PATH / ~/.talksage/vibeasr / TALKSAGE_VIBEASR_ROOT
+    vae_model: ""         # vibeasr-vae-encoder-i8_s.gguf
+    lm_model: ""          # vibeasr-lm-i2_s-embed-q6_k.gguf
+    threads: 4
+    timeout_seconds: 600
+  import:
+    prefer_bitnet: true   # 导入音频时优先 BitNet（不可用则回退 client 引擎）
 
 llm:
   default: deepseek

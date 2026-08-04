@@ -11,7 +11,8 @@ from ui.setup_wizard import maybe_run_setup_wizard
 from ui.settings_dialog import SettingsDialog
 from ui.history_dialog import HistoryDialog
 from core.audio_hub import AudioHub
-from core.asr.factory import build_asr_engine
+from core.asr.factory import build_asr_engine, resolve_import_engine
+from core.asr.bitnet_engine import BitNetEngine
 from core.plugin_bus import PluginBus
 from core.pipeline import Pipeline
 from core.session_store import SessionStore
@@ -182,15 +183,18 @@ def main():
         def worker() -> None:
             try:
                 audio, _sr = load_audio_file(path)
-                # Prefer client (English) engine path for imported meeting audio
-                ot = OfflineTranscriber(engine=pipeline().engine, chunk_seconds=3)
-                # Dual engine routes by speaker; use client for EN-heavy imports
+                engine = resolve_import_engine(config.get("transcribe", {}))
+                # BitNet handles long-form in one pass; others keep 3s chunks
+                chunk_seconds = 0 if isinstance(engine, BitNetEngine) else 3
+                ot = OfflineTranscriber(engine=engine, chunk_seconds=chunk_seconds)
                 text = ot.transcribe(audio, speaker="client")
+                engine_name = type(engine).__name__
                 out_dir = config.config_dir / "sessions"
                 out_dir.mkdir(parents=True, exist_ok=True)
                 out = out_dir / f"import-{Path(path).stem}.md"
                 out.write_text(
-                    f"# 导入转写\n\n- source: {path}\n\n## 转写\n\n{text or '（无识别结果）'}\n",
+                    f"# 导入转写\n\n- source: {path}\n- engine: {engine_name}\n\n"
+                    f"## 转写\n\n{text or '（无识别结果）'}\n",
                     encoding="utf-8",
                 )
 

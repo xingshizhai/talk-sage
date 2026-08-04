@@ -1,5 +1,6 @@
 from typing import Any
 from core.asr.base import ASREngine
+from core.asr.bitnet_engine import BitNetEngine, bitnet_available
 from core.asr.dual_engine import DualASREngine
 from core.asr.faster_whisper_engine import FasterWhisperEngine
 from core.asr.funasr_engine import FunASREngine
@@ -19,9 +20,51 @@ def build_asr_engine(transcribe_cfg: dict[str, Any] | None) -> ASREngine:
     return _build_local(cfg)
 
 
-def _build_client_engine(client_cfg: dict[str, Any]) -> ASREngine:
+def build_bitnet_engine(transcribe_cfg: dict[str, Any] | None) -> BitNetEngine:
+    cfg = (transcribe_cfg or {}).get("bitnet") or {}
+    return BitNetEngine(
+        binary=cfg.get("binary") or None,
+        vae_model=cfg.get("vae_model") or None,
+        lm_model=cfg.get("lm_model") or None,
+        threads=int(cfg.get("threads") or 4),
+        timeout_seconds=float(cfg.get("timeout_seconds") or 600),
+        language="en",
+    )
+
+
+def resolve_import_engine(transcribe_cfg: dict[str, Any] | None) -> ASREngine:
+    """Engine for offline import: prefer BitNet when configured and available."""
+    cfg = transcribe_cfg or {}
+    import_cfg = cfg.get("import") or {}
+    prefer = bool(import_cfg.get("prefer_bitnet", True))
+    bitnet_cfg = cfg.get("bitnet") or {}
+    if prefer and bitnet_available(
+        bitnet_cfg.get("binary") or None,
+        bitnet_cfg.get("vae_model") or None,
+        bitnet_cfg.get("lm_model") or None,
+    ):
+        return build_bitnet_engine(cfg)
+    # Fall back to client side of the dual stack
+    dual = build_asr_engine(cfg)
+    return getattr(dual, "_client_engine", dual)
+
+
+def _build_client_engine(
+    client_cfg: dict[str, Any],
+    bitnet_cfg: dict[str, Any] | None = None,
+) -> ASREngine:
     engine_name = (client_cfg.get("engine") or "faster-whisper").lower()
     device = client_cfg.get("device", "cpu")
+    if engine_name == "bitnet":
+        bcfg = bitnet_cfg or {}
+        return BitNetEngine(
+            binary=bcfg.get("binary") or None,
+            vae_model=bcfg.get("vae_model") or None,
+            lm_model=bcfg.get("lm_model") or None,
+            threads=int(bcfg.get("threads") or 4),
+            timeout_seconds=float(bcfg.get("timeout_seconds") or 600),
+            language="en",
+        )
     if engine_name == "parakeet":
         return ParakeetEngine(
             model_id=client_cfg.get("model") or "nemo-parakeet-tdt-0.6b-v3",
@@ -40,7 +83,7 @@ def _build_client_engine(client_cfg: dict[str, Any]) -> ASREngine:
 def _build_local(cfg: dict[str, Any]) -> DualASREngine:
     client_cfg = cfg.get("client") or {}
     user_cfg = cfg.get("user") or {}
-    client_engine = _build_client_engine(client_cfg)
+    client_engine = _build_client_engine(client_cfg, cfg.get("bitnet") or {})
     user_engine = FunASREngine(
         model=user_cfg.get("model", "paraformer-zh"),
         device=user_cfg.get("device", "cpu"),

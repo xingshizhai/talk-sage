@@ -61,3 +61,10 @@ def test_transcribe_mode_default_local(tmp_config_dir):
     mgr = ConfigManager(config_dir=tmp_config_dir)
     assert mgr.get("transcribe.mode") == "local"
     assert mgr.get("session.auto_save") is True
+
+
+def test_bitnet_import_defaults(tmp_config_dir):
+    mgr = ConfigManager(config_dir=tmp_config_dir)
+    assert mgr.get("transcribe.import.prefer_bitnet") is True
+    assert mgr.get("transcribe.bitnet.threads") == 4
+    assert mgr.get("transcribe.bitnet.binary") == ""

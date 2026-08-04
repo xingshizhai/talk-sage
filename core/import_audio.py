@@ -59,7 +59,11 @@ def _resample(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
 
 
 class OfflineTranscriber:
-    """Chunk an audio buffer and run ASREngine, joining non-empty texts."""
+    """Chunk an audio buffer and run ASREngine, joining non-empty texts.
+
+    Pass ``chunk_seconds=0`` (or negative) to send the whole buffer in one call
+    (preferred for BitNet / long-form engines).
+    """
 
     def __init__(
         self,
@@ -69,12 +73,19 @@ class OfflineTranscriber:
     ):
         self._engine = engine
         self._sample_rate = sample_rate
-        self._chunk_size = sample_rate * chunk_seconds
+        self._chunk_seconds = chunk_seconds
+        self._chunk_size = sample_rate * chunk_seconds if chunk_seconds > 0 else 0
 
     def transcribe(self, audio: np.ndarray, speaker: str = "client") -> str:
-        parts: list[str] = []
         if audio.size == 0:
             return ""
+        if self._chunk_size <= 0:
+            segment = self._engine.transcribe(
+                np.asarray(audio, dtype=np.float32), speaker=speaker
+            )
+            return segment.text.strip() if segment and segment.text else ""
+
+        parts: list[str] = []
         # Pad short leftover so final speech is not dropped
         total = len(audio)
         offset = 0

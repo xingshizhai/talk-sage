@@ -46,6 +46,7 @@ class SettingsDialog(QDialog):
         self.client_engine = QComboBox()
         self.client_engine.addItem("faster-whisper（默认）", "faster-whisper")
         self.client_engine.addItem("Parakeet（需 onnx-asr）", "parakeet")
+        self.client_engine.addItem("BitNet CPU（需 VibeASR.cpp）", "bitnet")
 
         self.asr_device = QComboBox()
         self.asr_device.addItem("自动检测", "auto")
@@ -101,6 +102,7 @@ class SettingsDialog(QDialog):
         self._config.set("transcribe.client.engine", engine)
         if engine == "parakeet":
             self._config.set("transcribe.client.model", "nemo-parakeet-tdt-0.6b-v3")
+        # bitnet uses transcribe.bitnet.* paths; no model size field
         asr_dev = self.asr_device.currentData()
         self._config.set("transcribe.client.device", asr_dev)
         self._config.set("transcribe.user.device", asr_dev)
