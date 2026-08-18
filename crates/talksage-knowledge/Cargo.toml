@@ -1,0 +1,8 @@
+[package]
+name = "talksage-knowledge"
+description = "TalkSage v2 local knowledge base keyword retrieval (Jaccard)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

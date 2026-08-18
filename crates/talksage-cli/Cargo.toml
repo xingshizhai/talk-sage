@@ -14,4 +14,7 @@ talksage-core = { path = "../talksage-core" }
 talksage-config = { path = "../talksage-config" }
 talksage-asr = { path = "../talksage-asr" }
 talksage-pipeline = { path = "../talksage-pipeline" }
+talksage-llm = { path = "../talksage-llm" }
+talksage-knowledge = { path = "../talksage-knowledge" }
+talksage-plugins = { path = "../talksage-plugins" }
 clap = { version = "4", features = ["derive"] }

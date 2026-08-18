@@ -3776,7 +3776,10 @@ dependencies = [
  "talksage-audio",
  "talksage-config",
  "talksage-core",
+ "talksage-knowledge",
+ "talksage-llm",
  "talksage-pipeline",
+ "talksage-plugins",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
@@ -3809,7 +3812,10 @@ dependencies = [
  "talksage-asr",
  "talksage-config",
  "talksage-core",
+ "talksage-knowledge",
+ "talksage-llm",
  "talksage-pipeline",
+ "talksage-plugins",
 ]
 
 [[package]]
@@ -3830,6 +3836,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "talksage-knowledge"
+version = "0.1.0"
+
+[[package]]
+name = "talksage-llm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "talksage-pipeline"
 version = "0.1.0"
 dependencies = [
@@ -3839,6 +3859,18 @@ dependencies = [
  "talksage-asr",
  "talksage-audio",
  "talksage-core",
+ "talksage-llm",
+ "talksage-plugins",
+]
+
+[[package]]
+name = "talksage-plugins"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "talksage-core",
+ "talksage-knowledge",
+ "talksage-llm",
 ]
 
 [[package]]
@@ -4622,6 +4654,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]

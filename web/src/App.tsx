@@ -3,6 +3,9 @@ import { getApi } from "./lib/transport";
 import type { AppConfig, DomainEvent } from "./lib/api";
 import { TranscriptAccumulator, type TranscriptLine } from "./lib/transcript";
 import TranscriptSection from "./sections/TranscriptSection";
+import TermsSection, { type TermItem } from "./sections/TermsSection";
+import TranslationSection, { type TranslationItem } from "./sections/TranslationSection";
+import BriefSection, { type BriefItem } from "./sections/BriefSection";
 
 const api = getApi();
 
@@ -12,6 +15,9 @@ export default function App() {
   const [listening, setListening] = useState(false);
   const [status, setStatus] = useState<string>("待机");
   const [lines, setLines] = useState<TranscriptLine[]>([]);
+  const [terms, setTerms] = useState<TermItem[]>([]);
+  const [translations, setTranslations] = useState<TranslationItem[]>([]);
+  const [briefs, setBriefs] = useState<BriefItem[]>([]);
   const [rawEvents, setRawEvents] = useState<string[]>([]);
   const [pong, setPong] = useState<string>("");
   const accumulatorRef = useRef(new TranscriptAccumulator());
@@ -31,6 +37,29 @@ export default function App() {
         const acc = accumulatorRef.current;
         acc.push(ev);
         setLines([...acc.getLines()]);
+      }
+      // 术语：骨架插入，final 按 result_id 原地更新
+      if (ev.type === "term") {
+        setTerms((prev) => {
+          const idx = prev.findIndex((t) => t.resultId === ev.result_id);
+          if (idx >= 0) {
+            const next = [...prev];
+            next[idx] = { resultId: ev.result_id, content: ev.content, isFinal: ev.status === "final" };
+            return next;
+          }
+          return [...prev, { resultId: ev.result_id, content: ev.content, isFinal: ev.status === "final" }];
+        });
+      }
+      // 翻译
+      if (ev.type === "translation") {
+        setTranslations((prev) => [
+          ...prev,
+          { resultId: ev.result_id, direction: ev.direction, content: ev.content },
+        ]);
+      }
+      // 简报
+      if (ev.type === "brief") {
+        setBriefs((prev) => [...prev, { source: ev.source, text: ev.text }]);
       }
       // 调试事件流
       setRawEvents((prev) => [...prev.slice(-19), `${ev.type}: ${JSON.stringify(ev).slice(0, 100)}`]);
@@ -93,6 +122,21 @@ export default function App() {
       <section style={{ marginTop: 12 }}>
         <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>实时转写</h2>
         <TranscriptSection lines={lines} />
+      </section>
+
+      <section style={{ marginTop: 12 }}>
+        <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>术语</h2>
+        <TermsSection items={terms} />
+      </section>
+
+      <section style={{ marginTop: 12 }}>
+        <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>实时翻译</h2>
+        <TranslationSection items={translations} />
+      </section>
+
+      <section style={{ marginTop: 12 }}>
+        <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>简报</h2>
+        <BriefSection items={briefs} />
       </section>
 
       <section style={{ marginTop: 12 }}>

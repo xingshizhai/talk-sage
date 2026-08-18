@@ -8,8 +8,9 @@
 
 - **双流实时转写**：user（麦克风，中文 streaming paraformer）+ client（回环/文件，英文 streaming zipformer），各自 VAD 分段 + 流式增量出字
 - **全本地处理**：sherpa-onnx 流式 ASR（CPU 推理，RTF ≈ 0.04，比实时快 20+ 倍）
-- **领域事件驱动**：转写/状态事件经 IPC（Tauri）或 WS（headless 预留）推送，前端增量渲染
-- **全自动测试**：核心链路（wav → VAD → ASR → 事件 → 前端行聚合）确定性可测，`scripts/run_tests.ps1` 一键全量
+- **会议辅助插件**：术语解释（英文缩写 → LLM 中文解释，冷却+去重+先骨架）、客户简报检索（本地知识库 Jaccard）、实时中英互译——独立线程执行不阻塞音频链路
+- **领域事件驱动**：转写/术语/翻译/简报/状态事件经 IPC（Tauri）或 WS（headless 预留）推送，前端分区实时渲染
+- **全自动测试**：核心链路（wav → VAD → ASR → 事件 → 插件 → 前端行聚合）确定性可测，`scripts/run_tests.ps1` 一键全量
 
 ## 技术栈
 
@@ -29,8 +30,11 @@
 │   ├── talksage-core/        # 领域模型与事件（DomainEvent，传输无关）
 │   ├── talksage-config/      # 分层配置（默认 + talksage.toml + 环境变量）
 │   ├── talksage-asr/         # sherpa-onnx 流式引擎封装（双引擎）
-│   ├── talksage-audio/       # cpal 麦克风采集 + 重采样 + 分块
-│   ├── talksage-pipeline/    # 双流管道：VAD 分段 → 流式 ASR → 领域事件
+│   ├── talksage-audio/       # cpal 麦克风采集 + WASAPI 回环 + 重采样
+│   ├── talksage-pipeline/    # 双流管道：VAD 分段 → 流式 ASR → 插件 → 领域事件
+│   ├── talksage-llm/         # OpenAI 兼容 LLM Provider
+│   ├── talksage-knowledge/   # 本地知识库 Jaccard 检索
+│   ├── talksage-plugins/     # 术语解释 / 简报检索 / 翻译
 │   └── talksage-cli/         # launcher：web / listen / doctor / version
 ├── web/
 │   ├── src/                  # React SPA（转写分区、监听控制）
@@ -84,8 +88,9 @@ scripts\run_tests.ps1        # cargo test --workspace + vitest run（一键全�
 - ✅ M0 骨架（workspace + launcher + Tauri 壳 + IPC hello-world）
 - ✅ M1 实时转写闭环（采集 → VAD → 流式 ASR → 事件 → 前端）
 - ✅ M1b 双流 + WASAPI 系统回环采集（Windows；macOS ScreenCaptureKit 待接入）→ 视频会议客户流可用
-- ⏳ M2 会议辅助（术语解释 / 简报检索 / 翻译插件 + SQLite 会话）
-- ⏳ M3 产品化（纪要模板 / 导入重转写 / 打包分发）
+- ✅ M2 会议辅助核心（术语解释 / 简报检索 / 实时翻译插件 + 前端分区）
+- ⏳ M2 剩余（SQLite 会话落库 / 历史页 / 纪要模板化）
+- ⏳ M3 产品化（导入重转写 / 打包分发）
 - ⏳ M4 headless 服务（axum + capture-agent，多设备/团队）
 
 ## 隐私

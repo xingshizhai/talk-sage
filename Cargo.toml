@@ -7,6 +7,9 @@ members = [
     "crates/talksage-asr",
     "crates/talksage-audio",
     "crates/talksage-pipeline",
+    "crates/talksage-llm",
+    "crates/talksage-knowledge",
+    "crates/talksage-plugins",
     "web/src-tauri",
 ]
 

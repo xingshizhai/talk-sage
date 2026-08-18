@@ -1,0 +1,12 @@
+[package]
+name = "talksage-plugins"
+description = "TalkSage v2 meeting assistant plugins (term explainer / brief retriever / translator)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+talksage-core = { path = "../talksage-core" }
+talksage-knowledge = { path = "../talksage-knowledge" }
+talksage-llm = { path = "../talksage-llm" }
+anyhow = { workspace = true }

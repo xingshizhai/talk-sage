@@ -7,17 +7,18 @@
 //! 每条流独立 VAD 分段 + 流式 ASR（增量 partial → 段结束 final）。
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
 use talksage_asr::{EngineKind, SherpaStreamingEngine, StreamingASREngine};
 use talksage_audio::AudioHub;
-use talksage_core::{DomainEvent, StatusStage};
+use talksage_core::{DomainEvent, StatusStage, TranscriptSegment};
+use talksage_plugins::AnalyzerPlugin;
 
-/// 事件发射器（Tauri 侧桥接 app.emit；headless 侧桥接 WS）。
-pub type EventSink = Box<dyn Fn(DomainEvent) + Send + 'static>;
+/// 事件发射器（Tauri 侧桥接 app.emit；headless 侧桥接 WS）。Arc 共享，可跨线程。
+pub type EventSink = Arc<dyn Fn(DomainEvent) + Send + Sync>;
 
 /// 音频输入源。
 #[derive(Debug, Clone)]
@@ -46,7 +47,7 @@ pub struct StreamConfig {
 }
 
 /// 实时管道配置。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LivePipelineConfig {
     /// silero VAD 模型路径。
     pub vad_model: PathBuf,
@@ -58,17 +59,24 @@ pub struct LivePipelineConfig {
     pub user: StreamConfig,
     /// 客户流（英文，可选）。
     pub client: Option<StreamConfig>,
+    /// 会议辅助插件（final 段后触发）。
+    pub plugins: Vec<Arc<dyn AnalyzerPlugin>>,
+    /// 插件上下文（知识库/LLM 共享）。
+    pub plugin_ctx: talksage_plugins::PluginContext,
 }
 
 /// 实时管道：持有组件并在专用线程中运行事件循环。
 pub struct LivePipeline {
-    cfg: LivePipelineConfig,
+    cfg: Arc<LivePipelineConfig>,
     tx_stop: Option<mpsc::Sender<()>>,
 }
 
 impl LivePipeline {
     pub fn new(cfg: LivePipelineConfig) -> Self {
-        Self { cfg, tx_stop: None }
+        Self {
+            cfg: Arc::new(cfg),
+            tx_stop: None,
+        }
     }
 
     /// 在专用线程中启动管道；返回后可用 `stop()` 停止。
@@ -147,6 +155,8 @@ struct StreamWorker {
     chunk_interval: Duration,
     #[cfg(windows)]
     loopback: Option<talksage_audio::LoopbackCapture>,
+    /// final 段完成后的回调（插件触发）。
+    on_final: Option<Arc<dyn Fn(&TranscriptSegment) + Send + Sync>>,
 }
 
 impl StreamWorker {
@@ -194,6 +204,7 @@ impl StreamWorker {
             chunk_interval: Duration::from_millis(chunk_ms),
             #[cfg(windows)]
             loopback: None,
+            on_final: None,
         })
     }
 
@@ -299,13 +310,23 @@ impl StreamWorker {
         self.engine.finish();
         let final_text = self.engine.accept(&[]).unwrap_or_default().trim().to_string();
         if !final_text.is_empty() {
-            emit(DomainEvent::Segment {
+            let seg = TranscriptSegment {
                 speaker_id: self.speaker_id,
                 speaker_label: self.speaker_label.clone(),
                 text: final_text.clone(),
                 is_partial: false,
                 ts_ms: now_ms(),
+            };
+            emit(DomainEvent::Segment {
+                speaker_id: seg.speaker_id,
+                speaker_label: seg.speaker_label.clone(),
+                text: seg.text.clone(),
+                is_partial: false,
+                ts_ms: seg.ts_ms,
             });
+            if let Some(hook) = &self.on_final {
+                hook(&seg);
+            }
         }
         self.last_partial.clear();
         self.engine.reset();
@@ -328,7 +349,7 @@ impl StreamWorker {
     }
 }
 
-fn run_loop(cfg: LivePipelineConfig, rx_stop: mpsc::Receiver<()>, emit: EventSink) -> anyhow::Result<()> {
+fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: EventSink) -> anyhow::Result<()> {
     fn fire(emit: &EventSink, ev: DomainEvent) {
         emit(ev);
     }
@@ -346,7 +367,10 @@ fn run_loop(cfg: LivePipelineConfig, rx_stop: mpsc::Receiver<()>, emit: EventSin
         Ok(w)
     };
     match build(&cfg.user) {
-        Ok(w) => workers.push(w),
+        Ok(mut w) => {
+            w.on_final = Some(make_on_final(&cfg, &emit));
+            workers.push(w);
+        }
         Err(e) => {
             eprintln!("[talksage] 启动失败: {e}");
             fire(&emit, DomainEvent::Status {
@@ -358,7 +382,10 @@ fn run_loop(cfg: LivePipelineConfig, rx_stop: mpsc::Receiver<()>, emit: EventSin
     }
     if let Some(c) = &cfg.client {
         match build(c) {
-            Ok(w) => workers.push(w),
+            Ok(mut w) => {
+                w.on_final = Some(make_on_final(&cfg, &emit));
+                workers.push(w);
+            }
             Err(e) => {
                 eprintln!("[talksage] 客户流启动失败（降级为仅用户流）: {e}");
                 log::warn!("客户流启动失败（降级为仅用户流）: {e}");
@@ -403,4 +430,31 @@ fn run_loop(cfg: LivePipelineConfig, rx_stop: mpsc::Receiver<()>, emit: EventSin
         message: "已停止".into(),
     });
     Ok(())
+}
+
+/// 构造 final 段回调：骨架同步发，最终（LLM）在独立线程执行。
+fn make_on_final(cfg: &LivePipelineConfig, emit: &EventSink) -> Arc<dyn Fn(&TranscriptSegment) + Send + Sync> {
+    let cfg = cfg.clone();
+    let emit = emit.clone();
+    Arc::new(move |seg: &TranscriptSegment| {
+        for plugin in &cfg.plugins {
+            if !plugin.should_trigger(seg) {
+                continue;
+            }
+            // 骨架（本地即时）
+            if let Some(skel) = plugin.skeleton(seg) {
+                emit(skel);
+            }
+            // 最终（可能 LLM）：独立线程，不阻塞管道
+            let plugin = plugin.clone();
+            let ctx = cfg.plugin_ctx.clone();
+            let emit = emit.clone();
+            let seg = seg.clone();
+            std::thread::spawn(move || {
+                if let Some(ev) = plugin.run(&seg, &ctx) {
+                    emit(ev);
+                }
+            });
+        }
+    })
 }

@@ -45,6 +45,7 @@ pub struct Config {
     pub session: SessionConfig,
     pub privacy: PrivacyConfig,
     pub server: ServerConfig,
+    pub knowledge_base: KnowledgeBaseConfig,
 }
 
 impl Default for Config {
@@ -57,6 +58,24 @@ impl Default for Config {
             session: SessionConfig::default(),
             privacy: PrivacyConfig::default(),
             server: ServerConfig::default(),
+            knowledge_base: KnowledgeBaseConfig::default(),
+        }
+    }
+}
+
+/// 客户简报知识库配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KnowledgeBaseConfig {
+    pub enabled: bool,
+    pub folder: String,
+}
+
+impl Default for KnowledgeBaseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            folder: String::new(),
         }
     }
 }
@@ -387,6 +406,7 @@ fn merge_config(default: Config, user: Config) -> Config {
         session: user.session,
         privacy: user.privacy,
         server: user.server,
+        knowledge_base: user.knowledge_base,
     }
 }
 

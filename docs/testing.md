@@ -7,8 +7,8 @@ wav 文件确定性驱动，无需人工交互，适合 CI。
 
 | 层 | 工具 | 位置 | 内容 |
 |---|---|---|---|
-| Rust 单元测试 | cargo test | `crates/*/src` 内 `#[cfg(test)]` | 事件序列化、配置分层、引擎名解析、重采样/分块 |
-| Rust 集成测试 | cargo test | `crates/*/tests/` | **真实模型**加载 + 文件输入全链路事件断言 |
+| Rust 单元测试 | cargo test | `crates/*/src` 内 `#[cfg(test)]` | 事件序列化、配置分层、引擎名解析、重采样/分块、知识库检索、插件（缩写/骨架/翻译方向） |
+| Rust 集成测试 | cargo test | `crates/*/tests/` | **真实模型**加载 + 文件输入全链路事件断言、双流、插件事件 |
 | 前端单元测试 | Vitest | `web/src/**/*.test.ts` | 转写行聚合逻辑（partial/final/双说话人） |
 
 集成测试**依赖仓库内模型**（`models/`，见下）；模型缺失时自动跳过（打印提示，不失败）。
@@ -41,6 +41,12 @@ scripts/run_tests.ps1        # cargo test --workspace + vitest run
   - 文件输入 → 状态事件链（AsrLoading→AsrReady→Recording→Idle）+ final 转写非空
   - partial 增量事件存在且先于 final
   - **双流**：user（中文文件）+ client（英文文件）→ 两个 speaker 都产出 final
+  - **插件**：mock LLM + translator → 真实识别链路产生 Translation 事件
+
+### 插件测试（talksage-plugins，单元）
+- term_explainer：缩写提取、全大写输出忽略、非客户段忽略、骨架事件、run 后去重、mock LLM final
+- brief_retriever：知识库命中产出 Brief 事件、无命中返回 None
+- translator：EnZh / ZhEn 方向、无 LLM 不翻译
 
 ### 前端测试（Vitest）
 - `web/src/lib/transcript.test.ts`（6 用例）：

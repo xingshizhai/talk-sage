@@ -36,13 +36,16 @@ enum Command {
     },
     /// 实时转写验证：麦克风或 wav 文件 → VAD → 流式 ASR → 事件打印。
     Listen {
-        /// 用户流输入：mic | <wav 路径>
+        /// 用户流输入：mic | loopback | <wav 路径>
         #[arg(long, default_value = "mic")]
         input: String,
-        /// 客户流输入（英文 zipformer）：mic | <wav 路径>（可选）
+        /// 客户流输入（英文 zipformer）：mic | loopback | <wav 路径>（可选）
         #[arg(long)]
         client: Option<String>,
-        /// 运行秒数（0 = 直到手动停止；文件输入忽略）
+        /// 简报知识库文件夹（可选，启用 brief_retriever）
+        #[arg(long)]
+        kb: Option<String>,
+        /// 运行秒数（0 = 默认时长）
         #[arg(long, default_value_t = 0)]
         seconds: u64,
         /// 用户流引擎（paraformer-zh | zipformer-en）
@@ -76,7 +79,8 @@ fn main() -> ExitCode {
             seconds,
             engine,
             client,
-        } => cmd_listen(&input, seconds, &engine, client.as_deref()),
+            kb,
+        } => cmd_listen(&input, seconds, &engine, client.as_deref(), kb.as_deref()),
         Command::Import { path } => cmd_import(path),
         Command::Record => cmd_record(),
         Command::Doctor => cmd_doctor(),
@@ -102,7 +106,7 @@ fn cmd_serve(host: String, port: u16) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn cmd_listen(input: &str, seconds: u64, engine: &str, client_input: Option<&str>) -> ExitCode {
+fn cmd_listen(input: &str, seconds: u64, engine: &str, client_input: Option<&str>, kb_folder: Option<&str>) -> ExitCode {
     let kind = match EngineKind::from_name(engine) {
         Some(k) => k,
         None => {
@@ -181,6 +185,71 @@ fn cmd_listen(input: &str, seconds: u64, engine: &str, client_input: Option<&str
     };
 
     let is_file_input = matches!(user_input, AudioInput::File(_));
+
+    // 插件上下文：LLM（配置）+ 知识库（--kb 或配置）
+    let mgr = match talksage_config::ConfigManager::load(None, None) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("配置加载失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let snapshot = mgr.snapshot();
+    let llm: Option<std::sync::Arc<dyn talksage_llm::LLMProvider>> = {
+        let name = snapshot.llm.default.clone();
+        snapshot
+            .llm
+            .providers
+            .get(&name)
+            .filter(|p| !p.api_key.is_empty() || name == "ollama")
+            .map(|p| -> std::sync::Arc<dyn talksage_llm::LLMProvider> {
+                std::sync::Arc::new(talksage_llm::OpenAICompatProvider::new(
+                    p.api_key.clone(),
+                    p.model.clone(),
+                    p.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com/v1".to_string()),
+                ))
+            })
+    };
+    let kb: Option<std::sync::Arc<talksage_knowledge::KnowledgeBase>> = {
+        let folder = kb_folder
+            .map(|s| s.to_string())
+            .or_else(|| {
+                if snapshot.knowledge_base.enabled {
+                    Some(snapshot.knowledge_base.folder.clone())
+                } else {
+                    None
+                }
+            });
+        folder
+            .filter(|f| !f.is_empty())
+            .and_then(|f| {
+                let mut kb = talksage_knowledge::KnowledgeBase::new();
+                kb.index_folder(std::path::Path::new(&f));
+                if kb.chunk_count() > 0 {
+                    Some(std::sync::Arc::new(kb))
+                } else {
+                    eprintln!("知识库目录无 .md/.txt 内容: {f}");
+                    None
+                }
+            })
+    };
+    let mut plugins: Vec<std::sync::Arc<dyn talksage_plugins::AnalyzerPlugin>> = Vec::new();
+    if snapshot.plugins.term_explainer.enabled {
+        plugins.push(std::sync::Arc::new(talksage_plugins::term_explainer::TermExplainerPlugin::new(
+            snapshot.plugins.term_explainer.cooldown_seconds as f64,
+        )));
+    }
+    if snapshot.plugins.translator.enabled {
+        plugins.push(std::sync::Arc::new(talksage_plugins::translator::TranslatorPlugin::new()));
+    }
+    if snapshot.plugins.brief_retriever.enabled && kb.is_some() {
+        plugins.push(std::sync::Arc::new(talksage_plugins::brief_retriever::BriefRetrieverPlugin::new(
+            snapshot.plugins.brief_retriever.cooldown_seconds as f64,
+            0.05,
+        )));
+    }
+    let plugin_ctx = talksage_plugins::PluginContext { kb, llm };
+
     let cfg = LivePipelineConfig {
         vad_model,
         chunk_ms: 100,
@@ -193,11 +262,13 @@ fn cmd_listen(input: &str, seconds: u64, engine: &str, client_input: Option<&str
             speaker_label: "我".into(),
         },
         client: client_cfg,
+        plugins,
+        plugin_ctx,
     };
 
     let stop_after = seconds;
     let mut pipeline = LivePipeline::new(cfg);
-    let sink = Box::new(|ev: DomainEvent| match &ev {
+    let sink: std::sync::Arc<dyn Fn(DomainEvent) + Send + Sync> = std::sync::Arc::new(|ev: DomainEvent| match &ev {
         DomainEvent::Status { stage, message } => {
             println!("[status] {:?}: {}", stage, message);
         }

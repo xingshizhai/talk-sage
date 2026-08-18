@@ -22,3 +22,6 @@ talksage-config = { path = "../../crates/talksage-config" }
 talksage-asr = { path = "../../crates/talksage-asr" }
 talksage-audio = { path = "../../crates/talksage-audio" }
 talksage-pipeline = { path = "../../crates/talksage-pipeline" }
+talksage-llm = { path = "../../crates/talksage-llm" }
+talksage-knowledge = { path = "../../crates/talksage-knowledge" }
+talksage-plugins = { path = "../../crates/talksage-plugins" }

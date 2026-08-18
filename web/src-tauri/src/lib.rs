@@ -7,13 +7,15 @@
 //! 这是"可插拔传输适配器"之一；删除本 crate 即回到纯 headless（M4 预留 axum 适配器）。
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, Manager};
 use talksage_config::ConfigManager;
 use talksage_core::{DomainEvent, StatusStage};
 use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConfig};
 use talksage_asr::EngineKind;
+use talksage_llm::{LLMProvider, OpenAICompatProvider};
+use talksage_plugins::{brief_retriever::BriefRetrieverPlugin, term_explainer::TermExplainerPlugin, translator::TranslatorPlugin, PluginContext};
 
 /// 应用状态（Tauri managed state）。
 pub struct AppState {
@@ -105,10 +107,12 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
                 None
             }
         },
+        plugins: build_plugins(&state.config),
+        plugin_ctx: build_plugin_ctx(&state.config),
     };
 
     let mut pipeline = LivePipeline::new(cfg);
-    let sink = Box::new(move |ev: DomainEvent| {
+    let sink: Arc<dyn Fn(DomainEvent) + Send + Sync> = Arc::new(move |ev: DomainEvent| {
         let _ = app.emit("talksage://event", ev);
     });
     pipeline.start(sink).map_err(|e| e.to_string())?;
@@ -124,6 +128,60 @@ fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
         p.stop();
     }
     Ok(())
+}
+
+/// 根据配置构建 LLM Provider（OpenAI 兼容）。
+fn build_llm(config: &ConfigManager) -> Option<Arc<dyn LLMProvider>> {
+    let snapshot = config.snapshot();
+    let name = snapshot.llm.default.clone();
+    let provider = snapshot.llm.providers.get(&name)?;
+    if provider.api_key.is_empty() && name != "ollama" {
+        return None;
+    }
+    Some(Arc::new(OpenAICompatProvider::new(
+        provider.api_key.clone(),
+        provider.model.clone(),
+        provider.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com/v1".to_string()),
+    )))
+}
+
+/// 构建插件列表（按配置开关）。
+fn build_plugins(config: &ConfigManager) -> Vec<Arc<dyn talksage_plugins::AnalyzerPlugin>> {
+    let mut plugins: Vec<Arc<dyn talksage_plugins::AnalyzerPlugin>> = Vec::new();
+    let plugins_cfg = &config.snapshot().plugins;
+    if plugins_cfg.term_explainer.enabled {
+        plugins.push(Arc::new(TermExplainerPlugin::new(plugins_cfg.term_explainer.cooldown_seconds as f64)));
+    }
+    if plugins_cfg.translator.enabled {
+        plugins.push(Arc::new(TranslatorPlugin::new()));
+    }
+    if plugins_cfg.brief_retriever.enabled {
+        plugins.push(Arc::new(BriefRetrieverPlugin::new(
+            plugins_cfg.brief_retriever.cooldown_seconds as f64,
+            0.05,
+        )));
+    }
+    plugins
+}
+
+/// 构建插件上下文（知识库 + LLM）。
+fn build_plugin_ctx(config: &ConfigManager) -> PluginContext {
+    let llm = build_llm(config);
+    let kb = {
+        let kb_cfg = &config.snapshot().knowledge_base;
+        if kb_cfg.enabled && !kb_cfg.folder.is_empty() {
+            let mut kb = talksage_knowledge::KnowledgeBase::new();
+            kb.index_folder(std::path::Path::new(&kb_cfg.folder));
+            if kb.chunk_count() > 0 {
+                Some(Arc::new(kb))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    PluginContext { kb, llm }
 }
 
 /// 解析模型根目录：优先环境变量，其次相对可执行文件探测。
