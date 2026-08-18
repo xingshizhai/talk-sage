@@ -12,6 +12,10 @@ export interface AppConfig {
     user_engine: string;
     backend: string;
   };
+  llm: {
+    default: string;
+    providers: Record<string, { base_url: string | null; model: string; api_key: string }>;
+  };
   server: {
     enabled: boolean;
     host: string;
@@ -76,6 +80,8 @@ export interface NotesTemplate {
 export interface AppApi {
   getVersion(): Promise<string>;
   getConfig(): Promise<AppConfig>;
+  /** 保存配置（写入 talksage.toml / 服务端配置）。 */
+  saveConfig(updates: Record<string, unknown>): Promise<void>;
   ping(): Promise<void>;
   /** 开始实时监听（麦克风 → VAD → 本地 ASR → 事件推送）。 */
   startListen(): Promise<void>;

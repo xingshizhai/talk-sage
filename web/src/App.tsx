@@ -7,6 +7,7 @@ import TermsSection, { type TermItem } from "./sections/TermsSection";
 import TranslationSection, { type TranslationItem } from "./sections/TranslationSection";
 import BriefSection, { type BriefItem } from "./sections/BriefSection";
 import HistorySection from "./sections/HistorySection";
+import SettingsSection from "./sections/SettingsSection";
 import type { NotesTemplate, SegmentHit, SessionDetail, SessionRecord } from "./lib/api";
 
 const api = getApi();
@@ -23,6 +24,7 @@ export default function App() {
   const [rawEvents, setRawEvents] = useState<string[]>([]);
   const [pong, setPong] = useState<string>("");
   const [showHistory, setShowHistory] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [searchResults, setSearchResults] = useState<SegmentHit[] | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
@@ -185,8 +187,16 @@ export default function App() {
         >
           历史
         </button>
+        <button onClick={() => setShowSettings((v) => !v)}>设置</button>
         <span style={{ fontSize: 11, color: "#64748b", alignSelf: "center" }}>{pong}</span>
       </section>
+
+      {showSettings && (
+        <section style={{ marginTop: 12 }}>
+          <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>设置</h2>
+          <SettingsSection config={config} onSave={api.saveConfig} />
+        </section>
+      )}
 
       {showHistory && (
         <section style={{ marginTop: 12 }}>

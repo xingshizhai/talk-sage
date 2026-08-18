@@ -16,6 +16,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("解析配置文件失败: {0}")]
     Parse(#[from] toml::de::Error),
+    #[error("序列化配置失败: {0}")]
+    Ser(#[from] toml::ser::Error),
 }
 
 /// 用户数据根目录（`TALKSAGE_DATA_DIR` 优先，默认 `~/.talksage`）。
@@ -327,11 +329,10 @@ impl Default for ServerConfig {
     }
 }
 
-/// 配置管理器：负责分层加载与查询。
-#[derive(Debug, Clone)]
+/// 配置管理器：负责分层加载、运行时更新与持久化。
 pub struct ConfigManager {
     data_dir: PathBuf,
-    config: Config,
+    config: std::sync::RwLock<Config>,
 }
 
 impl ConfigManager {
@@ -350,22 +351,38 @@ impl ConfigManager {
             config = merge_config(config, user);
         }
         apply_env_overrides(&mut config);
-        Ok(Self { data_dir, config })
+        Ok(Self {
+            data_dir,
+            config: std::sync::RwLock::new(config),
+        })
     }
 
     /// 直接以自定义目录构建（测试 / headless 模式用）。
     pub fn from_config(config: Config, data_dir: PathBuf) -> Self {
-        Self { data_dir, config }
+        Self {
+            data_dir,
+            config: std::sync::RwLock::new(config),
+        }
     }
 
-    /// 完整配置快照。
-    pub fn snapshot(&self) -> &Config {
-        &self.config
+    /// 完整配置快照（克隆，线程安全）。
+    pub fn snapshot(&self) -> Config {
+        self.config.read().unwrap().clone()
     }
 
     /// 数据目录（会话、录音、数据库所在）。
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// 运行时更新配置（回调内修改），并立即持久化到 `talksage.toml`。
+    pub fn update<R>(&self, f: impl FnOnce(&mut Config) -> R) -> Result<R, ConfigError> {
+        let mut config = self.config.write().unwrap();
+        let result = f(&mut config);
+        let raw = toml::to_string(&*config)?;
+        std::fs::create_dir_all(&self.data_dir)?;
+        std::fs::write(self.data_dir.join("talksage.toml"), raw)?;
+        Ok(result)
     }
 }
 
@@ -506,5 +523,35 @@ port = 9090
         unsafe {
             std::env::remove_var("TALKSAGE_SERVER_PORT");
         }
+    }
+
+    #[test]
+    fn update_persists_and_reloads() {
+        let dir = std::env::temp_dir().join(format!("talksage-cfg-update-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = ConfigManager::load(Some(dir.clone()), None).unwrap();
+        mgr.update(|c| {
+            c.llm.default = "kimi".into();
+            c.plugins.translator.enabled = false;
+        })
+        .unwrap();
+
+        // 重新加载同一目录，应读到更新后的值
+        let reloaded = ConfigManager::load(Some(dir.clone()), None).unwrap();
+        assert_eq!(reloaded.snapshot().llm.default, "kimi");
+        assert!(!reloaded.snapshot().plugins.translator.enabled);
+        // 未修改字段保持默认
+        assert_eq!(reloaded.snapshot().asr.user_engine, "paraformer-zh");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn snapshot_returns_independent_clone() {
+        let dir = std::env::temp_dir().join(format!("talksage-cfg-snap-{}", std::process::id()));
+        let mgr = ConfigManager::from_config(Config::default(), dir.clone());
+        let mut snap = mgr.snapshot();
+        snap.server.port = 12345;
+        assert_eq!(mgr.snapshot().server.port, 8080);
+        std::fs::remove_dir_all(dir).ok();
     }
 }

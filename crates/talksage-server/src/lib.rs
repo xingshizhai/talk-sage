@@ -76,7 +76,7 @@ pub async fn run(host: &str, port: u16, token: &str, web_dist: &PathBuf) -> Resu
 pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
     let api = Router::new()
         .route("/health", get(health))
-        .route("/config", get(get_config_api))
+        .route("/config", get(get_config_api).post(save_config_api))
         .route("/sessions", get(list_sessions_api))
         .route("/search", get(search_api))
         .route("/session/{id}", get(get_session_api))
@@ -126,6 +126,84 @@ async fn get_config_api(State(state): State<ServerState>, headers: axum::http::H
         "server": { "host": cfg.server.host, "port": cfg.server.port },
     });
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// 保存配置（设置面板提交）。
+async fn save_config_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Json(updates): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    match state
+        .config
+        .update(|c| {
+            apply_config_updates(c, &updates);
+        }) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// 应用配置更新（与 Tauri 侧共享逻辑）。
+fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::Value) {
+    if let Some(llm) = updates.get("llm") {
+        if let Some(default) = llm.get("default").and_then(|v| v.as_str()) {
+            c.llm.default = default.to_string();
+        }
+        if let Some(providers) = llm.get("providers").and_then(|v| v.as_object()) {
+            for (name, p) in providers {
+                let entry = c.llm.providers.entry(name.clone()).or_default();
+                if let Some(k) = p.get("api_key").and_then(|v| v.as_str()) {
+                    entry.api_key = k.to_string();
+                }
+                if let Some(m) = p.get("model").and_then(|v| v.as_str()) {
+                    entry.model = m.to_string();
+                }
+                if let Some(b) = p.get("base_url").and_then(|v| v.as_str()) {
+                    entry.base_url = Some(b.to_string());
+                }
+            }
+        }
+    }
+    if let Some(plugins) = updates.get("plugins") {
+        if let Some(t) = plugins.get("term_explainer") {
+            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
+                c.plugins.term_explainer.enabled = e;
+            }
+        }
+        if let Some(t) = plugins.get("translator") {
+            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
+                c.plugins.translator.enabled = e;
+            }
+        }
+        if let Some(t) = plugins.get("brief_retriever") {
+            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
+                c.plugins.brief_retriever.enabled = e;
+            }
+        }
+    }
+    if let Some(kb) = updates.get("knowledge_base") {
+        if let Some(e) = kb.get("enabled").and_then(|v| v.as_bool()) {
+            c.knowledge_base.enabled = e;
+        }
+        if let Some(f) = kb.get("folder").and_then(|v| v.as_str()) {
+            c.knowledge_base.folder = f.to_string();
+        }
+    }
+    if let Some(asr) = updates.get("asr") {
+        if let Some(e) = asr.get("client_engine").and_then(|v| v.as_str()) {
+            c.asr.client_engine = e.to_string();
+        }
+        if let Some(e) = asr.get("user_engine").and_then(|v| v.as_str()) {
+            c.asr.user_engine = e.to_string();
+        }
+        if let Some(b) = asr.get("backend").and_then(|v| v.as_str()) {
+            c.asr.backend = b.to_string();
+        }
+    }
 }
 
 async fn list_sessions_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {

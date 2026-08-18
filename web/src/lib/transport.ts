@@ -42,6 +42,10 @@ export const ipcApi: AppApi = {
     return invoke<AppConfig>("get_config");
   },
 
+  async saveConfig(updates: Record<string, unknown>): Promise<void> {
+    await invoke("save_config", { updates });
+  },
+
   async ping(): Promise<void> {
     await invoke("ping");
   },
@@ -96,6 +100,14 @@ export const httpApi: AppApi = {
 
   async getConfig(): Promise<AppConfig> {
     return req<AppConfig>("/config");
+  },
+
+  async saveConfig(updates: Record<string, unknown>): Promise<void> {
+    await req("/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
   },
 
   async ping(): Promise<void> {

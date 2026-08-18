@@ -42,6 +42,80 @@ fn get_config(state: tauri::State<'_, AppState>) -> serde_json::Value {
     serde_json::to_value(state.config.snapshot()).unwrap_or(serde_json::Value::Null)
 }
 
+/// 保存配置（前端设置面板提交，写入 talksage.toml）。
+#[tauri::command]
+fn save_config(updates: serde_json::Value, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state
+        .config
+        .update(|c| {
+            apply_config_updates(c, &updates);
+        })
+        .map_err(|e| format!("保存配置失败: {e}"))?;
+    Ok(())
+}
+
+/// 把前端提交的更新应用到配置。
+fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::Value) {
+    if let Some(llm) = updates.get("llm") {
+        if let Some(default) = llm.get("default").and_then(|v| v.as_str()) {
+            c.llm.default = default.to_string();
+        }
+        if let Some(providers) = llm.get("providers").and_then(|v| v.as_object()) {
+            for (name, p) in providers {
+                let entry = c.llm.providers.entry(name.clone()).or_default();
+                if let Some(k) = p.get("api_key").and_then(|v| v.as_str()) {
+                    entry.api_key = k.to_string();
+                }
+                if let Some(m) = p.get("model").and_then(|v| v.as_str()) {
+                    entry.model = m.to_string();
+                }
+                if let Some(b) = p.get("base_url").and_then(|v| v.as_str()) {
+                    entry.base_url = Some(b.to_string());
+                }
+            }
+        }
+    }
+    if let Some(plugins) = updates.get("plugins") {
+        if let Some(t) = plugins.get("term_explainer") {
+            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
+                c.plugins.term_explainer.enabled = e;
+            }
+            if let Some(cd) = t.get("cooldown_seconds").and_then(|v| v.as_f64()) {
+                c.plugins.term_explainer.cooldown_seconds = cd as f32;
+            }
+        }
+        if let Some(t) = plugins.get("translator") {
+            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
+                c.plugins.translator.enabled = e;
+            }
+        }
+        if let Some(t) = plugins.get("brief_retriever") {
+            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
+                c.plugins.brief_retriever.enabled = e;
+            }
+        }
+    }
+    if let Some(kb) = updates.get("knowledge_base") {
+        if let Some(e) = kb.get("enabled").and_then(|v| v.as_bool()) {
+            c.knowledge_base.enabled = e;
+        }
+        if let Some(f) = kb.get("folder").and_then(|v| v.as_str()) {
+            c.knowledge_base.folder = f.to_string();
+        }
+    }
+    if let Some(asr) = updates.get("asr") {
+        if let Some(e) = asr.get("client_engine").and_then(|v| v.as_str()) {
+            c.asr.client_engine = e.to_string();
+        }
+        if let Some(e) = asr.get("user_engine").and_then(|v| v.as_str()) {
+            c.asr.user_engine = e.to_string();
+        }
+        if let Some(b) = asr.get("backend").and_then(|v| v.as_str()) {
+            c.asr.backend = b.to_string();
+        }
+    }
+}
+
 /// hello-world 事件：前端 ping → 后端推送领域事件。
 #[tauri::command]
 fn ping(app: tauri::AppHandle) -> Result<(), String> {
@@ -334,6 +408,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_version,
             get_config,
+            save_config,
             ping,
             start_listen,
             stop_listen,
