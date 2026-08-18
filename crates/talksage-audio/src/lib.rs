@@ -12,8 +12,14 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 /// 目标采样率（sherpa-onnx 模型统一 16kHz）。
 pub const TARGET_SAMPLE_RATE: u32 = 16000;
 
+#[cfg(windows)]
+mod loopback;
+
+#[cfg(windows)]
+pub use loopback::LoopbackCapture;
+
 /// 线性插值重采样器（f32 mono）。
-struct LinearResampler {
+pub(crate) struct LinearResampler {
     src_sr: u32,
     dst_sr: u32,
 }

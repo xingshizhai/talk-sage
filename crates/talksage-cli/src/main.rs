@@ -134,10 +134,12 @@ fn cmd_listen(input: &str, seconds: u64, engine: &str, client_input: Option<&str
     let parse_input = |s: &str| -> Result<talksage_pipeline::AudioInput, String> {
         if s.eq_ignore_ascii_case("mic") {
             Ok(talksage_pipeline::AudioInput::Mic(None))
+        } else if s.eq_ignore_ascii_case("loopback") {
+            Ok(talksage_pipeline::AudioInput::Loopback)
         } else {
             let p = std::path::PathBuf::from(s);
             if !p.is_file() {
-                Err(format!("wav 文件不存在: {s}"))
+                Err(format!("wav 文件不存在: {s}（或使用 mic / loopback）"))
             } else {
                 Ok(talksage_pipeline::AudioInput::File(p))
             }
@@ -225,8 +227,8 @@ fn cmd_listen(input: &str, seconds: u64, engine: &str, client_input: Option<&str
         // 文件模式：等 pipeline 自然结束（文件读完即停）
         std::thread::sleep(std::time::Duration::from_secs(60));
     } else {
-        // mic 模式：等待回车停止
-        let _ = std::io::stdin().read_line(&mut String::new());
+        // mic / loopback 模式：默认采集 30 秒（无终端环境 stdin 会立即 EOF）
+        std::thread::sleep(std::time::Duration::from_secs(30));
     }
     pipeline.stop();
     println!("\n已停止。");

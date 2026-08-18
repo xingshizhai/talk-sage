@@ -26,6 +26,8 @@ pub enum AudioInput {
     Mic(Option<String>),
     /// wav 文件（模拟麦克风，用于无 GUI 验证）。
     File(std::path::PathBuf),
+    /// 系统回环（WASAPI loopback，Windows；客户语音来源）。
+    Loopback,
 }
 
 /// 单条流配置。
@@ -120,11 +122,20 @@ fn create_vad(model: &PathBuf, min_silence_seconds: f32) -> anyhow::Result<Voice
         .ok_or_else(|| anyhow::anyhow!("创建 VAD 失败（模型路径错误？）"))
 }
 
+/// 输入模式（内部用）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputKind {
+    Mic,
+    File,
+    Loopback,
+}
+
 /// 单条流的运行时状态。
 struct StreamWorker {
     vad: VoiceActivityDetector,
     engine: SherpaStreamingEngine,
     mic_device: Option<String>,
+    input_kind: InputKind,
     hub: Option<AudioHub>,
     rx_audio: Option<mpsc::Receiver<Vec<f32>>>,
     file_chunks: Option<std::vec::IntoIter<Vec<f32>>>,
@@ -134,6 +145,8 @@ struct StreamWorker {
     speaker_label: String,
     done: bool,
     chunk_interval: Duration,
+    #[cfg(windows)]
+    loopback: Option<talksage_audio::LoopbackCapture>,
 }
 
 impl StreamWorker {
@@ -144,6 +157,12 @@ impl StreamWorker {
         let mic_device = match &cfg.input {
             AudioInput::Mic(d) => d.clone(),
             AudioInput::File(_) => None,
+            AudioInput::Loopback => None,
+        };
+        let input_kind = match &cfg.input {
+            AudioInput::Mic(_) => InputKind::Mic,
+            AudioInput::File(_) => InputKind::File,
+            AudioInput::Loopback => InputKind::Loopback,
         };
 
         // 文件模式：预读 wav 分块
@@ -163,6 +182,7 @@ impl StreamWorker {
             vad,
             engine,
             mic_device,
+            input_kind,
             hub: None,
             rx_audio: None,
             file_chunks,
@@ -172,16 +192,37 @@ impl StreamWorker {
             speaker_label: cfg.speaker_label.clone(),
             done: false,
             chunk_interval: Duration::from_millis(chunk_ms),
+            #[cfg(windows)]
+            loopback: None,
         })
     }
 
-    /// 启动音频输入（麦克风模式下创建采集流）。
+    /// 启动音频输入（麦克风/回环）。
     fn start_input(&mut self, chunk_ms: u64) -> anyhow::Result<()> {
-        if self.mic_device.is_some() || self.file_chunks.is_none() {
-            let (mut hub, rx) = AudioHub::new(chunk_ms);
-            hub.start(self.mic_device.as_deref())?;
-            self.hub = Some(hub);
-            self.rx_audio = Some(rx);
+        match &self.input_kind {
+            // 麦克风模式
+            InputKind::Mic => {
+                let (mut hub, rx) = AudioHub::new(chunk_ms);
+                hub.start(self.mic_device.as_deref())?;
+                self.hub = Some(hub);
+                self.rx_audio = Some(rx);
+            }
+            // 文件模式：无采集流（迭代分块）
+            InputKind::File => {}
+            // 回环模式
+            InputKind::Loopback => {
+                #[cfg(windows)]
+                {
+                    let (mut cap, rx) = talksage_audio::LoopbackCapture::new(chunk_ms);
+                    cap.start()?;
+                    self.loopback = Some(cap);
+                    self.rx_audio = Some(rx);
+                }
+                #[cfg(not(windows))]
+                {
+                    anyhow::bail!("系统回环采集当前仅支持 Windows");
+                }
+            }
         }
         Ok(())
     }
@@ -274,6 +315,10 @@ impl StreamWorker {
         if let Some(h) = &mut self.hub {
             h.stop();
         }
+        #[cfg(windows)]
+        if let Some(l) = &mut self.loopback {
+            l.stop();
+        }
     }
 
     /// 关闭流：收尾未完成的语音段（停止监听/输入结束时调用）。
@@ -293,12 +338,32 @@ fn run_loop(cfg: LivePipelineConfig, rx_stop: mpsc::Receiver<()>, emit: EventSin
         message: "ASR 加载中…".into(),
     });
 
-    // 构建各流
+    // 构建各流（client 流失败降级为仅 user 流，不影响主链路）
     let mut workers: Vec<StreamWorker> = Vec::new();
-    for sc in [Some(&cfg.user), cfg.client.as_ref()].into_iter().flatten() {
+    let build = |sc: &StreamConfig| -> anyhow::Result<StreamWorker> {
         let mut w = StreamWorker::new(sc, &cfg.vad_model, cfg.chunk_ms, cfg.min_silence_seconds)?;
         w.start_input(cfg.chunk_ms)?;
-        workers.push(w);
+        Ok(w)
+    };
+    match build(&cfg.user) {
+        Ok(w) => workers.push(w),
+        Err(e) => {
+            eprintln!("[talksage] 启动失败: {e}");
+            fire(&emit, DomainEvent::Status {
+                stage: StatusStage::Idle,
+                message: format!("启动失败: {e}"),
+            });
+            return Err(e);
+        }
+    }
+    if let Some(c) = &cfg.client {
+        match build(c) {
+            Ok(w) => workers.push(w),
+            Err(e) => {
+                eprintln!("[talksage] 客户流启动失败（降级为仅用户流）: {e}");
+                log::warn!("客户流启动失败（降级为仅用户流）: {e}");
+            }
+        }
     }
 
     fire(&emit, DomainEvent::Status {

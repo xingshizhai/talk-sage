@@ -20,7 +20,7 @@
 | 前端 | Vite + React + TypeScript |
 | ASR | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 1.13（streaming paraformer-zh + zipformer-en，静态链接预编译库） |
 | VAD | sherpa-onnx silero VAD（端点分段） |
-| 音频采集 | cpal（麦克风）；系统回环采集（WASAPI/ScreenCaptureKit）为 M1b 剩余项 |
+| 音频采集 | cpal（麦克风）；WASAPI loopback（系统回环，Windows） |
 
 ## 仓库结构
 
@@ -83,7 +83,7 @@ scripts\run_tests.ps1        # cargo test --workspace + vitest run（一键全�
 
 - ✅ M0 骨架（workspace + launcher + Tauri 壳 + IPC hello-world）
 - ✅ M1 实时转写闭环（采集 → VAD → 流式 ASR → 事件 → 前端）
-- 🔄 M1b 系统回环采集（WASAPI / ScreenCaptureKit）+ 客户流启用
+- ✅ M1b 双流 + WASAPI 系统回环采集（Windows；macOS ScreenCaptureKit 待接入）→ 视频会议客户流可用
 - ⏳ M2 会议辅助（术语解释 / 简报检索 / 翻译插件 + SQLite 会话）
 - ⏳ M3 产品化（纪要模板 / 导入重转写 / 打包分发）
 - ⏳ M4 headless 服务（axum + capture-agent，多设备/团队）

@@ -83,8 +83,28 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
             speaker_id: 0,
             speaker_label: "我".into(),
         },
-        // M1b：客户流（英文 + 系统回环采集）接入后启用
-        client: None,
+        // 客户流：系统回环采集（视频会议中客户语音）+ 英文引擎
+        client: {
+            let client_model = model_dir.join("sherpa-onnx-streaming-zipformer-en-2023-06-26");
+            if client_model.is_dir() {
+                #[cfg(windows)]
+                {
+                    Some(StreamConfig {
+                        engine_kind: EngineKind::ZipformerEn,
+                        model_dir: client_model,
+                        input: AudioInput::Loopback,
+                        speaker_id: 1,
+                        speaker_label: "客户".into(),
+                    })
+                }
+                #[cfg(not(windows))]
+                {
+                    None
+                }
+            } else {
+                None
+            }
+        },
     };
 
     let mut pipeline = LivePipeline::new(cfg);
