@@ -55,10 +55,16 @@ enum Command {
         #[arg(long)]
         save: bool,
     },
-    /// 导入音频离线转写（预留）。
+    /// 导入音频离线转写并保存为新会话。
     Import {
-        /// 音频文件路径（wav/mp3/flac/m4a/ogg）
+        /// 音频文件路径（16kHz mono wav）
         path: String,
+        /// 引擎（paraformer-zh | zipformer-en）
+        #[arg(long, default_value = "paraformer-zh")]
+        engine: String,
+        /// 说话人标签（默认 导入）
+        #[arg(long, default_value = "导入")]
+        speaker: String,
     },
     /// 录制会议（预留）。
     Record,
@@ -85,7 +91,7 @@ fn main() -> ExitCode {
             kb,
             save,
         } => cmd_listen(&input, seconds, &engine, client.as_deref(), kb.as_deref(), save),
-        Command::Import { path } => cmd_import(path),
+        Command::Import { path, engine, speaker } => cmd_import(&path, &engine, &speaker),
         Command::Record => cmd_record(),
         Command::Doctor => cmd_doctor(),
     }
@@ -103,11 +109,38 @@ fn cmd_web() -> ExitCode {
 }
 
 fn cmd_serve(host: String, port: u16) -> ExitCode {
-    println!(
-        "headless 服务模式（M4 预留，尚未实现）\n\
-         计划: axum 服务绑定 {host}:{port}，浏览器访问 http://{host}:{port}",
-    );
-    ExitCode::SUCCESS
+    // SPA 静态目录（web/dist）
+    let web_dist = match std::env::var("TALKSAGE_WEB_DIST") {
+        Ok(d) => std::path::PathBuf::from(d),
+        Err(_) => {
+            let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let candidates = [
+                here.join("../web/dist"),
+                here.join("../../web/dist"),
+                std::path::PathBuf::from("web/dist"),
+            ];
+            candidates.into_iter().find(|c| c.is_dir()).unwrap_or_else(|| std::path::PathBuf::from("web/dist"))
+        }
+    };
+    if !web_dist.is_dir() {
+        eprintln!("未找到前端构建产物（{web_dist:?}）。请先运行: cd web && npm run build");
+        return ExitCode::FAILURE;
+    }
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("tokio runtime 失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let token = std::env::var("TALKSAGE_SERVER_TOKEN").unwrap_or_default();
+    match rt.block_on(talksage_server::run(&host, port, &token, &web_dist)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("服务退出: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn cmd_listen(
@@ -386,8 +419,126 @@ fn cmd_listen(
     ExitCode::SUCCESS
 }
 
-fn cmd_import(path: String) -> ExitCode {
-    println!("导入转写（M3 预留，尚未实现）: {path}");
+fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
+    let kind = match EngineKind::from_name(engine) {
+        Some(k) => k,
+        None => {
+            eprintln!("未知引擎: {engine}（可选 paraformer-zh | zipformer-en）");
+            return ExitCode::FAILURE;
+        }
+    };
+    let model_dir = match resolve_models_dir() {
+        Some(d) => d,
+        None => {
+            eprintln!("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）");
+            return ExitCode::FAILURE;
+        }
+    };
+    let engine_dir = match kind {
+        EngineKind::ParaformerZh => model_dir.join("sherpa-onnx-streaming-paraformer-zh"),
+        EngineKind::ZipformerEn => model_dir.join("sherpa-onnx-streaming-zipformer-en-2023-06-26"),
+    };
+    let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
+    if !vad_model.is_file() || !engine_dir.is_dir() {
+        eprintln!("模型不完整（VAD 或 ASR 模型缺失），请先运行 scripts/download_models.py");
+        return ExitCode::FAILURE;
+    }
+    let audio_path = std::path::PathBuf::from(path);
+    if !audio_path.is_file() {
+        eprintln!("文件不存在: {path}");
+        return ExitCode::FAILURE;
+    }
+
+    println!("导入转写: {path}（{engine}）…");
+    let cfg = LivePipelineConfig {
+        vad_model,
+        chunk_ms: 100,
+        min_silence_seconds: 0.5,
+        user: StreamConfig {
+            engine_kind: kind,
+            model_dir: engine_dir,
+            input: AudioInput::File(audio_path),
+            speaker_id: 0,
+            speaker_label: speaker_label.to_string(),
+        },
+        client: None,
+        plugins: Vec::new(),
+        plugin_ctx: talksage_plugins::PluginContext::new(),
+    };
+
+    // 收集 final 段
+    let segments = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let segs_for_sink = segments.clone();
+    let done_for_sink = done.clone();
+    let sink: std::sync::Arc<dyn Fn(DomainEvent) + Send + Sync> = std::sync::Arc::new(move |ev| {
+        match &ev {
+            DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, .. } => {
+                segs_for_sink.lock().unwrap().push(talksage_core::TranscriptSegment {
+                    speaker_id: *speaker_id,
+                    speaker_label: speaker_label.clone(),
+                    text: text.clone(),
+                    is_partial: false,
+                    ts_ms: *ts_ms,
+                });
+            }
+            DomainEvent::Status { stage: talksage_core::StatusStage::Idle, .. } => {
+                done_for_sink.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            _ => {}
+        }
+    });
+
+    let mut pipeline = LivePipeline::new(cfg);
+    if let Err(e) = pipeline.start(sink) {
+        eprintln!("启动失败: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    // 等待完成（文件模式自然结束）
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    while !done.load(std::sync::atomic::Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    pipeline.stop();
+
+    let segs = segments.lock().unwrap();
+    if segs.is_empty() {
+        eprintln!("未识别到语音内容");
+        return ExitCode::FAILURE;
+    }
+
+    // 保存新会话
+    let data_dir = talksage_config::default_data_dir();
+    let store = match talksage_session::SessionStore::open(&data_dir.join("sessions.db").to_string_lossy()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("打开会话库失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    match store.start_session(now) {
+        Ok(sid) => {
+            for s in segs.iter() {
+                let _ = store.add_segment(sid, s);
+            }
+            let _ = store.end_session(sid, now);
+            println!("\n已保存会话 #{sid}（{} 段）", segs.len());
+        }
+        Err(e) => {
+            eprintln!("保存会话失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    println!("转写结果（{} 段）:", segs.len());
+    for s in segs.iter() {
+        println!("  [{}] {}", s.speaker_label, s.text);
+    }
     ExitCode::SUCCESS
 }
 

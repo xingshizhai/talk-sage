@@ -11,6 +11,8 @@
 - **会议辅助插件**：术语解释（英文缩写 → LLM 中文解释，冷却+去重+先骨架）、客户简报检索（本地知识库 Jaccard）、实时中英互译——独立线程执行不阻塞音频链路
 - **会话持久化**：监听自动落库 SQLite（`TALKSAGE_DATA_DIR`/`~/.talksage/sessions.db`），历史页可浏览/搜索/查看详情
 - **纪要模板化**：基于会话转写+术语按模板（标准会议/商务谈判/技术评审/每日站会）LLM 生成 Markdown 纪要，保存到会话
+- **导入转写**：`talksage import <wav>` 离线转写并保存为新会话
+- **Headless 服务（多设备）**：`talksage serve` 启动本地服务，**手机/平板浏览器**即可访问全部功能（同局域网需 `--host 0.0.0.0` + token）
 - **领域事件驱动**：转写/术语/翻译/简报/状态事件经 IPC（Tauri）或 WS（headless 预留）推送，前端分区实时渲染
 - **全自动测试**：核心链路（wav → VAD → ASR → 事件 → 插件 → 前端行聚合）确定性可测，`scripts/run_tests.ps1` 一键全量
 
@@ -39,7 +41,8 @@
 │   ├── talksage-plugins/     # 术语解释 / 简报检索 / 翻译
 │   ├── talksage-session/     # SQLite 会话存储（可检索历史）
 │   ├── talksage-notes/       # 模板化纪要生成（标准/谈判/评审/站会）
-│   └── talksage-cli/         # launcher：web / listen / doctor / version
+│   ├── talksage-server/      # headless 服务（axum API + WS + SPA 托管）
+│   └── talksage-cli/         # launcher：web / serve / import / listen / doctor
 ├── web/
 │   ├── src/                  # React SPA（转写分区、监听控制）
 │   └── src-tauri/            # Tauri 适配器（command + 事件桥接）
@@ -71,6 +74,29 @@ target\debug\talksage.exe doctor                        # 环境诊断
 target\debug\talksage.exe listen --input mic            # 真实麦克风实时转写
 target\debug\talksage.exe listen --input <中文16k.wav>  # 文件模拟（自动化验证）
 target\debug\talksage.exe listen --input <中文16k.wav> --client <英文16k.wav>   # 双流
+target\debug\talksage.exe listen --input <16k.wav> --save      # 落库
+target\debug\talksage.exe import <16k.wav>              # 导入转写 → 新会话
+```
+
+### Headless 服务（多设备/浏览器）
+
+```bash
+# 先构建前端
+cd web && npm run build && cd ..
+
+# 启动服务（默认 127.0.0.1:8080；浏览器打开 http://127.0.0.1:8080）
+target\debug\talksage.exe serve
+
+# 局域网/手机访问（需 token 保护）
+$env:TALKSAGE_SERVER_TOKEN = "mytoken"
+target\debug\talksage.exe serve --host 0.0.0.0 --port 8080
+# 浏览器访问 http://<本机IP>:8080/?token=mytoken
+```
+
+### 打包分发
+
+```bash
+cd web && npm run tauri build     # Windows → NSIS 安装包；macOS → dmg
 ```
 
 ## 测试
@@ -95,8 +121,10 @@ scripts\run_tests.ps1        # cargo test --workspace + vitest run（一键全�
 - ✅ M2 会议辅助核心（术语解释 / 简报检索 / 实时翻译插件 + 前端分区）
 - ✅ M2 会话持久化（SQLite 落库 + 历史页搜索/详情）
 - ✅ M3 纪要模板化（多模板 LLM 生成 + 保存会话）
-- ⏳ M3 剩余（导入重转写 / 打包分发）
-- ⏳ M4 headless 服务（axum + capture-agent，多设备/团队）
+- ✅ M3 导入转写（文件 → 离线 ASR → 新会话）
+- ✅ M4 headless 服务（axum API + WS 事件 + SPA 托管，多设备浏览器访问）
+- ⏳ 打包分发（NSIS/dmg，命令已就绪待 CI 构建）
+- ⏳ 未来：macOS 回环（ScreenCaptureKit）、浏览器麦克风直传（WS 上行）
 
 ## 隐私
 

@@ -1,0 +1,29 @@
+[package]
+name = "talksage-server"
+description = "TalkSage v2 headless HTTP/WS server (multi-device access)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+talksage-core = { path = "../talksage-core" }
+talksage-config = { path = "../talksage-config" }
+talksage-asr = { path = "../talksage-asr" }
+talksage-pipeline = { path = "../talksage-pipeline" }
+talksage-llm = { path = "../talksage-llm" }
+talksage-knowledge = { path = "../talksage-knowledge" }
+talksage-plugins = { path = "../talksage-plugins" }
+talksage-session = { path = "../talksage-session" }
+talksage-notes = { path = "../talksage-notes" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+futures-util = "0.3"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+talksage-config = { path = "../talksage-config" }
+talksage-session = { path = "../talksage-session" }

@@ -12,6 +12,7 @@ members = [
     "crates/talksage-plugins",
     "crates/talksage-session",
     "crates/talksage-notes",
+    "crates/talksage-server",
     "web/src-tauri",
 ]
 
