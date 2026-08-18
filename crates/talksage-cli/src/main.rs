@@ -51,6 +51,9 @@ enum Command {
         /// 用户流引擎（paraformer-zh | zipformer-en）
         #[arg(long, default_value = "paraformer-zh")]
         engine: String,
+        /// 落库到会话 SQLite（~/.talksage/sessions.db）
+        #[arg(long)]
+        save: bool,
     },
     /// 导入音频离线转写（预留）。
     Import {
@@ -80,7 +83,8 @@ fn main() -> ExitCode {
             engine,
             client,
             kb,
-        } => cmd_listen(&input, seconds, &engine, client.as_deref(), kb.as_deref()),
+            save,
+        } => cmd_listen(&input, seconds, &engine, client.as_deref(), kb.as_deref(), save),
         Command::Import { path } => cmd_import(path),
         Command::Record => cmd_record(),
         Command::Doctor => cmd_doctor(),
@@ -106,7 +110,14 @@ fn cmd_serve(host: String, port: u16) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn cmd_listen(input: &str, seconds: u64, engine: &str, client_input: Option<&str>, kb_folder: Option<&str>) -> ExitCode {
+fn cmd_listen(
+    input: &str,
+    seconds: u64,
+    engine: &str,
+    client_input: Option<&str>,
+    kb_folder: Option<&str>,
+    save: bool,
+) -> ExitCode {
     let kind = match EngineKind::from_name(engine) {
         Some(k) => k,
         None => {
@@ -268,23 +279,81 @@ fn cmd_listen(input: &str, seconds: u64, engine: &str, client_input: Option<&str
 
     let stop_after = seconds;
     let mut pipeline = LivePipeline::new(cfg);
-    let sink: std::sync::Arc<dyn Fn(DomainEvent) + Send + Sync> = std::sync::Arc::new(|ev: DomainEvent| match &ev {
-        DomainEvent::Status { stage, message } => {
-            println!("[status] {:?}: {}", stage, message);
-        }
-        DomainEvent::Segment {
-            speaker_label,
-            text,
-            is_partial,
-            ..
-        } => {
-            if *is_partial {
-                print!("\r[{speaker_label}] {text} ▍");
-            } else {
-                println!("\n[{speaker_label}] {text}");
+
+    // 可选会话落库
+    let session_store = if save {
+        let data_dir = talksage_config::default_data_dir();
+        let db_path = data_dir.join("sessions.db");
+        match talksage_session::SessionStore::open(&db_path.to_string_lossy()) {
+            Ok(s) => Some(std::sync::Arc::new(s)),
+            Err(e) => {
+                eprintln!("打开会话库失败（忽略落库）: {e}");
+                None
             }
         }
-        other => println!("[event] {other:?}"),
+    } else {
+        None
+    };
+    let current_session = std::sync::Arc::new(std::sync::Mutex::new(None));
+    if let Some(store) = &session_store {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        match store.start_session(now) {
+            Ok(sid) => *current_session.lock().unwrap() = Some(sid),
+            Err(e) => eprintln!("开启会话失败: {e}"),
+        }
+    }
+    let sessions_for_sink = session_store.clone();
+    let current_for_sink = current_session.clone();
+
+    let sink: std::sync::Arc<dyn Fn(DomainEvent) + Send + Sync> = std::sync::Arc::new(move |ev: DomainEvent| {
+        // 落库（可选）
+        if let (Some(store), Ok(guard)) = (&sessions_for_sink, current_for_sink.lock()) {
+            if let Some(sid) = *guard {
+                match &ev {
+                    DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, .. } => {
+                        let _ = store.add_segment(
+                            sid,
+                            &talksage_core::TranscriptSegment {
+                                speaker_id: *speaker_id,
+                                speaker_label: speaker_label.clone(),
+                                text: text.clone(),
+                                is_partial: false,
+                                ts_ms: *ts_ms,
+                            },
+                        );
+                    }
+                    DomainEvent::Term { status: talksage_core::ResultStatus::Final, content, .. } => {
+                        let _ = store.add_term(sid, content);
+                    }
+                    DomainEvent::Translation { content, .. } => {
+                        let _ = store.add_translation(sid, "translate", content);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // 打印
+        match &ev {
+            DomainEvent::Status { stage, message } => {
+                println!("[status] {:?}: {}", stage, message);
+            }
+            DomainEvent::Segment {
+                speaker_label,
+                text,
+                is_partial,
+                ..
+            } => {
+                if *is_partial {
+                    print!("\r[{speaker_label}] {text} ▍");
+                } else {
+                    println!("\n[{speaker_label}] {text}");
+                }
+            }
+            other => println!("[event] {other:?}"),
+        }
     });
     if let Err(e) = pipeline.start(sink) {
         eprintln!("启动失败: {e}");
@@ -302,6 +371,17 @@ fn cmd_listen(input: &str, seconds: u64, engine: &str, client_input: Option<&str
         std::thread::sleep(std::time::Duration::from_secs(30));
     }
     pipeline.stop();
+    // 结束会话
+    if let Some(store) = &session_store {
+        if let Some(sid) = current_session.lock().unwrap().take() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let _ = store.end_session(sid, now);
+            println!("会话 #{sid} 已保存");
+        }
+    }
     println!("\n已停止。");
     ExitCode::SUCCESS
 }

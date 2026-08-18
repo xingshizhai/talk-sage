@@ -18,8 +18,13 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
 }
 
-/// 用户数据根目录（默认 `~/.talksage`）。
+/// 用户数据根目录（`TALKSAGE_DATA_DIR` 优先，默认 `~/.talksage`）。
 pub fn default_data_dir() -> PathBuf {
+    if let Ok(d) = env::var("TALKSAGE_DATA_DIR") {
+        if !d.trim().is_empty() {
+            return PathBuf::from(d);
+        }
+    }
     dirs_home().join(".talksage")
 }
 

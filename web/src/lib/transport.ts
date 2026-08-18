@@ -26,6 +26,18 @@ export const ipcApi: AppApi = {
     await invoke("stop_listen");
   },
 
+  async listSessions(): Promise<import("./api").SessionRecord[]> {
+    return invoke("list_sessions");
+  },
+
+  async searchSessions(query: string): Promise<import("./api").SegmentHit[]> {
+    return invoke("search_sessions", { query });
+  },
+
+  async getSession(id: number): Promise<import("./api").SessionDetail> {
+    return invoke("get_session", { sessionId: id });
+  },
+
   onEvent(handler: (ev: DomainEvent) => void): () => void {
     let unlisten: (() => void) | undefined;
     listen<DomainEvent>("talksage://event", (e) => handler(e.payload))

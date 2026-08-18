@@ -37,6 +37,33 @@ export type DomainEvent =
   | { type: "status"; stage: string; message: string }
   | { type: "level"; mic_rms: number; loopback_rms: number };
 
+/** 会话概要（历史列表）。 */
+export interface SessionRecord {
+  id: number;
+  started_at: number;
+  ended_at: number | null;
+  segment_count: number;
+  term_count: number;
+}
+
+/** 搜索命中。 */
+export interface SegmentHit {
+  session_id: number;
+  speaker_label: string;
+  text: string;
+  ts_ms: number;
+}
+
+/** 会话详情。 */
+export interface SessionDetail {
+  id: number;
+  started_at: number;
+  ended_at: number | null;
+  segments: { speaker_id: number; speaker_label: string; text: string; ts_ms: number }[];
+  terms: string[];
+  translations: string[];
+}
+
 /** 应用 API 表面。 */
 export interface AppApi {
   getVersion(): Promise<string>;
@@ -46,6 +73,12 @@ export interface AppApi {
   startListen(): Promise<void>;
   /** 停止实时监听。 */
   stopListen(): Promise<void>;
+  /** 历史：会话列表。 */
+  listSessions(): Promise<SessionRecord[]>;
+  /** 历史：全文检索。 */
+  searchSessions(query: string): Promise<SegmentHit[]>;
+  /** 历史：会话详情。 */
+  getSession(id: number): Promise<SessionDetail>;
   /** 订阅领域事件流，返回取消函数。 */
   onEvent(handler: (ev: DomainEvent) => void): () => void;
   /** 传输载体标识（调试用）。 */

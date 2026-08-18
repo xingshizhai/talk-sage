@@ -8,20 +8,26 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{Emitter, Manager};
 use talksage_config::ConfigManager;
-use talksage_core::{DomainEvent, StatusStage};
+use talksage_core::{DomainEvent, ResultStatus, StatusStage};
 use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConfig};
 use talksage_asr::EngineKind;
 use talksage_llm::{LLMProvider, OpenAICompatProvider};
 use talksage_plugins::{brief_retriever::BriefRetrieverPlugin, term_explainer::TermExplainerPlugin, translator::TranslatorPlugin, PluginContext};
+use talksage_session::SessionStore;
 
 /// 应用状态（Tauri managed state）。
 pub struct AppState {
     config: ConfigManager,
     /// 当前监听管道（None = 未监听）。
     pipeline: Mutex<Option<LivePipeline>>,
+    /// 会话存储（常驻 SQLite）。
+    sessions: Arc<SessionStore>,
+    /// 当前会话 id（监听期间有效）。
+    current_session: Arc<Mutex<Option<i64>>>,
 }
 
 /// 版本。
@@ -112,10 +118,48 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
     };
 
     let mut pipeline = LivePipeline::new(cfg);
+    let sessions = state.sessions.clone();
+    let current_session = state.current_session.clone();
     let sink: Arc<dyn Fn(DomainEvent) + Send + Sync> = Arc::new(move |ev: DomainEvent| {
+        // 会话落库（监听期间）
+        if let Ok(guard) = current_session.lock() {
+            if let Some(sid) = *guard {
+                match &ev {
+                    DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, .. } => {
+                        let _ = sessions.add_segment(
+                            sid,
+                            &talksage_core::TranscriptSegment {
+                                speaker_id: *speaker_id,
+                                speaker_label: speaker_label.clone(),
+                                text: text.clone(),
+                                is_partial: false,
+                                ts_ms: *ts_ms,
+                            },
+                        );
+                    }
+                    DomainEvent::Term { status: ResultStatus::Final, content, .. } => {
+                        let _ = sessions.add_term(sid, content);
+                    }
+                    DomainEvent::Translation { content, .. } => {
+                        let _ = sessions.add_translation(sid, "translate", content);
+                    }
+                    _ => {}
+                }
+            }
+        }
         let _ = app.emit("talksage://event", ev);
     });
     pipeline.start(sink).map_err(|e| e.to_string())?;
+    // 开启会话
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let sid = state
+        .sessions
+        .start_session(now)
+        .map_err(|e| format!("开启会话失败: {e}"))?;
+    *state.current_session.lock().unwrap() = Some(sid);
     *guard = Some(pipeline);
     Ok(())
 }
@@ -127,7 +171,33 @@ fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
     if let Some(mut p) = guard.take() {
         p.stop();
     }
+    // 结束会话
+    if let Some(sid) = state.current_session.lock().unwrap().take() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let _ = state.sessions.end_session(sid, now);
+    }
     Ok(())
+}
+
+/// 会话列表（历史）。
+#[tauri::command]
+fn list_sessions(state: tauri::State<'_, AppState>) -> Result<Vec<talksage_session::SessionRecord>, String> {
+    state.sessions.list_sessions(100).map_err(|e| e.to_string())
+}
+
+/// 全文检索。
+#[tauri::command]
+fn search_sessions(query: String, state: tauri::State<'_, AppState>) -> Result<Vec<talksage_session::SegmentHit>, String> {
+    state.sessions.search(&query, 50).map_err(|e| e.to_string())
+}
+
+/// 会话详情。
+#[tauri::command]
+fn get_session(session_id: i64, state: tauri::State<'_, AppState>) -> Result<talksage_session::SessionDetail, String> {
+    state.sessions.get_session(session_id).map_err(|e| e.to_string())
 }
 
 /// 根据配置构建 LLM Provider（OpenAI 兼容）。
@@ -213,19 +283,27 @@ fn resolve_models_dir() -> PathBuf {
 pub fn run() {
     let config = ConfigManager::load(None, None).expect("加载配置失败");
     let data_dir = config.data_dir().to_path_buf();
+    let sessions = Arc::new(
+        SessionStore::open(&data_dir.join("sessions.db").to_string_lossy()).expect("打开会话库失败"),
+    );
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             config,
             pipeline: Mutex::new(None),
+            sessions,
+            current_session: Arc::new(Mutex::new(None)),
         })
         .invoke_handler(tauri::generate_handler![
             get_version,
             get_config,
             ping,
             start_listen,
-            stop_listen
+            stop_listen,
+            list_sessions,
+            search_sessions,
+            get_session
         ])
         .setup(move |app| {
             if let Err(e) = std::fs::create_dir_all(&data_dir) {

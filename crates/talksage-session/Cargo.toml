@@ -1,0 +1,12 @@
+[package]
+name = "talksage-session"
+description = "TalkSage v2 SQLite session storage (segments / terms / translations)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+talksage-core = { path = "../talksage-core" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+rusqlite = { version = "0.31", features = ["bundled"] }

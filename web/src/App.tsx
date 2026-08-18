@@ -6,6 +6,8 @@ import TranscriptSection from "./sections/TranscriptSection";
 import TermsSection, { type TermItem } from "./sections/TermsSection";
 import TranslationSection, { type TranslationItem } from "./sections/TranslationSection";
 import BriefSection, { type BriefItem } from "./sections/BriefSection";
+import HistorySection from "./sections/HistorySection";
+import type { SegmentHit, SessionDetail, SessionRecord } from "./lib/api";
 
 const api = getApi();
 
@@ -20,7 +22,44 @@ export default function App() {
   const [briefs, setBriefs] = useState<BriefItem[]>([]);
   const [rawEvents, setRawEvents] = useState<string[]>([]);
   const [pong, setPong] = useState<string>("");
+  const [showHistory, setShowHistory] = useState(false);
+  const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const [searchResults, setSearchResults] = useState<SegmentHit[] | null>(null);
+  const [detail, setDetail] = useState<SessionDetail | null>(null);
   const accumulatorRef = useRef(new TranscriptAccumulator());
+
+  const refreshHistory = useCallback(async () => {
+    try {
+      setSessions(await api.listSessions());
+    } catch (e) {
+      console.error("历史加载失败:", e);
+    }
+  }, []);
+
+  const handleHistorySearch = useCallback(async (q: string) => {
+    setDetail(null);
+    if (!q.trim()) {
+      setSearchResults(null);
+      return;
+    }
+    try {
+      setSearchResults(await api.searchSessions(q));
+    } catch (e) {
+      console.error("搜索失败:", e);
+    }
+  }, []);
+
+  const handleHistorySelect = useCallback(async (id: number) => {
+    if (id < 0) {
+      setDetail(null);
+      return;
+    }
+    try {
+      setDetail(await api.getSession(id));
+    } catch (e) {
+      console.error("会话详情失败:", e);
+    }
+  }, []);
 
   useEffect(() => {
     api.getVersion().then(setVersion).catch(console.error);
@@ -116,8 +155,30 @@ export default function App() {
           {listening ? "⏹ 停止监听" : "▶ 开始监听"}
         </button>
         <button onClick={handlePing}>ping</button>
+        <button
+          onClick={() => {
+            setShowHistory((v) => !v);
+            if (!showHistory) refreshHistory();
+          }}
+        >
+          历史
+        </button>
         <span style={{ fontSize: 11, color: "#64748b", alignSelf: "center" }}>{pong}</span>
       </section>
+
+      {showHistory && (
+        <section style={{ marginTop: 12 }}>
+          <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>历史会话</h2>
+          <HistorySection
+            sessions={sessions}
+            searchResults={searchResults}
+            detail={detail}
+            onSearch={handleHistorySearch}
+            onSelect={handleHistorySelect}
+            onRefresh={refreshHistory}
+          />
+        </section>
+      )}
 
       <section style={{ marginTop: 12 }}>
         <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>实时转写</h2>
