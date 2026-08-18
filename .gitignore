@@ -1,8 +1,29 @@
+# Python (legacy v1 — 已删除，保留条目防止残留)
 .venv/
 __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
 *.egg-info/
+
+# Rust (v2)
+target/
+.cargo-home/
+.tools/
+
+# Frontend (v2)
+node_modules/
+web/dist/
+web/src-tauri/gen/
+.npm-cache/
+
+# 模型与测试临时产物（由 scripts/download_models.py 下载）
+models/
+.pytest_tmp/
+
+# 分析用临时目录
+_meetily_src/
+
+# Misc
 dist/
 .env

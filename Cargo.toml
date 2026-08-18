@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/talksage-core",
+    "crates/talksage-config",
+    "crates/talksage-cli",
+    "crates/talksage-asr",
+    "crates/talksage-audio",
+    "crates/talksage-pipeline",
+    "web/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = ""
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+toml = "0.8"
+thiserror = "2"
+
+# Tauri 2
+tauri = { version = "2" }
+tauri-build = { version = "2" }
+tauri-plugin-opener = "2"

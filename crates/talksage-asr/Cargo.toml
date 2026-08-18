@@ -1,0 +1,11 @@
+[package]
+name = "talksage-asr"
+description = "TalkSage v2 streaming ASR engines (sherpa-onnx based)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+talksage-core = { path = "../talksage-core" }
+anyhow = { workspace = true }
+sherpa-onnx = "1.13"

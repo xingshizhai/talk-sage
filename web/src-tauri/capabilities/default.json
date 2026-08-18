@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "TalkSage 默认能力：主窗口 + 核心 API",
+  "windows": ["main"],
+  "permissions": ["core:default", "opener:default"]
+}

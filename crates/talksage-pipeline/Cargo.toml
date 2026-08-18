@@ -1,0 +1,14 @@
+[package]
+name = "talksage-pipeline"
+description = "TalkSage v2 live pipeline: audio -> VAD -> streaming ASR -> domain events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+talksage-core = { path = "../talksage-core" }
+talksage-audio = { path = "../talksage-audio" }
+talksage-asr = { path = "../talksage-asr" }
+anyhow = { workspace = true }
+sherpa-onnx = "1.13"
+log = "0.4"

@@ -1,0 +1,11 @@
+[package]
+name = "talksage-audio"
+description = "TalkSage v2 audio capture hub (cpal mic capture, resample, chunking)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+cpal = "0.15"
+log = "0.4"

@@ -1,0 +1,17 @@
+[package]
+name = "talksage-cli"
+description = "TalkSage v2 launcher (web / serve / import / record / doctor / version)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "talksage"
+path = "src/main.rs"
+
+[dependencies]
+talksage-core = { path = "../talksage-core" }
+talksage-config = { path = "../talksage-config" }
+talksage-asr = { path = "../talksage-asr" }
+talksage-pipeline = { path = "../talksage-pipeline" }
+clap = { version = "4", features = ["derive"] }

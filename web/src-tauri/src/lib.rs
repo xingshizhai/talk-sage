@@ -1,0 +1,168 @@
+//! TalkSage v2 — Tauri 适配器。
+//!
+//! 职责：把 Rust 核心域暴露给前端（React SPA）：
+//!   - command：get_version / get_config / ping / start_listen / stop_listen
+//!   - event：领域事件推送（talksage://event 通道，含实时转写）
+//!
+//! 这是"可插拔传输适配器"之一；删除本 crate 即回到纯 headless（M4 预留 axum 适配器）。
+
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use tauri::{Emitter, Manager};
+use talksage_config::ConfigManager;
+use talksage_core::{DomainEvent, StatusStage};
+use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConfig};
+use talksage_asr::EngineKind;
+
+/// 应用状态（Tauri managed state）。
+pub struct AppState {
+    config: ConfigManager,
+    /// 当前监听管道（None = 未监听）。
+    pipeline: Mutex<Option<LivePipeline>>,
+}
+
+/// 版本。
+#[tauri::command]
+fn get_version() -> String {
+    talksage_core::VERSION.to_string()
+}
+
+/// 配置快照。
+#[tauri::command]
+fn get_config(state: tauri::State<'_, AppState>) -> serde_json::Value {
+    serde_json::to_value(state.config.snapshot()).unwrap_or(serde_json::Value::Null)
+}
+
+/// hello-world 事件：前端 ping → 后端推送领域事件。
+#[tauri::command]
+fn ping(app: tauri::AppHandle) -> Result<(), String> {
+    app.emit(
+        "talksage://event",
+        DomainEvent::Status {
+            stage: StatusStage::Idle,
+            message: "pong from rust".into(),
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 开始实时监听（麦克风 → VAD → ASR → 事件推送）。
+#[tauri::command]
+fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.pipeline.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+    if guard.is_some() {
+        return Err("已在监听中".into());
+    }
+
+    let model_dir = resolve_models_dir();
+    let user_engine = EngineKind::from_name(&state.config.snapshot().asr.user_engine)
+        .unwrap_or(EngineKind::ParaformerZh);
+    let vad_model = model_dir
+        .join("silero-vad")
+        .join("silero_vad.onnx");
+    let user_model = model_dir.join(match user_engine {
+        EngineKind::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
+        EngineKind::ZipformerEn => "sherpa-onnx-streaming-zipformer-en-2023-06-26",
+    });
+    if !vad_model.is_file() {
+        return Err(format!("缺少 VAD 模型: {}", vad_model.display()));
+    }
+    if !user_model.is_dir() {
+        return Err(format!("缺少用户 ASR 模型目录: {}", user_model.display()));
+    }
+
+    let cfg = LivePipelineConfig {
+        vad_model,
+        chunk_ms: 100,
+        min_silence_seconds: 0.5,
+        user: StreamConfig {
+            engine_kind: user_engine,
+            model_dir: user_model,
+            input: AudioInput::Mic(None),
+            speaker_id: 0,
+            speaker_label: "我".into(),
+        },
+        // M1b：客户流（英文 + 系统回环采集）接入后启用
+        client: None,
+    };
+
+    let mut pipeline = LivePipeline::new(cfg);
+    let sink = Box::new(move |ev: DomainEvent| {
+        let _ = app.emit("talksage://event", ev);
+    });
+    pipeline.start(sink).map_err(|e| e.to_string())?;
+    *guard = Some(pipeline);
+    Ok(())
+}
+
+/// 停止实时监听。
+#[tauri::command]
+fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.pipeline.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+    if let Some(mut p) = guard.take() {
+        p.stop();
+    }
+    Ok(())
+}
+
+/// 解析模型根目录：优先环境变量，其次相对可执行文件探测。
+fn resolve_models_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
+        let p = PathBuf::from(d);
+        if p.is_dir() {
+            return p;
+        }
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(base) = exe.parent() {
+            candidates.push(base.join("../../models")); // target/debug → 仓库根/models
+            candidates.push(base.join("../../../models"));
+        }
+    }
+    candidates.push(PathBuf::from("models"));
+    candidates.push(PathBuf::from("../models"));
+    for c in candidates {
+        if c.is_dir() {
+            return c;
+        }
+    }
+    PathBuf::from("models")
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let config = ConfigManager::load(None, None).expect("加载配置失败");
+    let data_dir = config.data_dir().to_path_buf();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .manage(AppState {
+            config,
+            pipeline: Mutex::new(None),
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_version,
+            get_config,
+            ping,
+            start_listen,
+            stop_listen
+        ])
+        .setup(move |app| {
+            if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                eprintln!("创建数据目录失败 {}: {e}", data_dir.display());
+            }
+            let _ = app.emit(
+                "talksage://event",
+                DomainEvent::Status {
+                    stage: StatusStage::Starting,
+                    message: "TalkSage 已启动".into(),
+                },
+            );
+            let _ = app.get_webview_window("main");
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running TalkSage");
+}
