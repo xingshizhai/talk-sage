@@ -1,16 +1,37 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
-    "version": "0.2.0",
-    "configurations": [
-    
-        {
-            "name": "Python Debugger: Current File",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${file}",
-            "console": "integratedTerminal"
-        }
-    ]
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "talksage-cli (debug)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/talksage.exe",
+      "args": ["doctor"],
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        { "name": "CARGO_HOME", "value": "${workspaceFolder}/.cargo-home" },
+        { "name": "SHERPA_ONNX_ARCHIVE_DIR", "value": "${workspaceFolder}/.tools/sherpa-onnx-archives" }
+      ]
+    },
+    {
+      "name": "talksage listen (wav)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/talksage.exe",
+      "args": ["listen", "--input", "${input:audioFile}"],
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        { "name": "CARGO_HOME", "value": "${workspaceFolder}/.cargo-home" },
+        { "name": "SHERPA_ONNX_ARCHIVE_DIR", "value": "${workspaceFolder}/.tools/sherpa-onnx-archives" },
+        { "name": "TALKSAGE_DATA_DIR", "value": "${workspaceFolder}/.tools/data" }
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "audioFile",
+      "type": "promptString",
+      "description": "16kHz mono wav 路径"
+    }
+  ]
 }
