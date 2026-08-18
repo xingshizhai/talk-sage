@@ -112,6 +112,7 @@ scripts\run_tests.ps1        # cargo test --workspace + vitest run（一键全�
 - [架构设计](docs/architecture-v2.md)（双载体、延迟预算、模块划分）
 - [ASR PoC 报告](docs/poc-asr-report.md)（延迟实测）
 - [测试文档](docs/testing.md)
+- [编译与打包指南](docs/BUILDING.md)（环境准备 / 依赖下载 / 编译 / 测试 / 打包 / 故障排除）
 
 ## 里程碑
 
