@@ -39,6 +39,7 @@ pub struct SessionDetail {
     pub segments: Vec<TranscriptSegment>,
     pub terms: Vec<String>,
     pub translations: Vec<String>,
+    pub notes: Option<String>,
 }
 
 /// 会话存储（线程安全）。
@@ -89,6 +90,8 @@ impl SessionStore {
             CREATE INDEX IF NOT EXISTS idx_translations_session ON translations(session_id);
             ",
         )?;
+        // 迁移：sessions 加 notes 列（旧库）
+        let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN notes TEXT;");
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -137,6 +140,16 @@ impl SessionStore {
         conn.execute(
             "INSERT INTO translations (session_id, direction, content) VALUES (?1,?2,?3)",
             rusqlite::params![session_id, direction, content],
+        )?;
+        Ok(())
+    }
+
+    /// 保存纪要。
+    pub fn set_notes(&self, session_id: i64, notes: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET notes = ?2 WHERE id = ?1",
+            rusqlite::params![session_id, notes],
         )?;
         Ok(())
     }
@@ -190,13 +203,20 @@ impl SessionStore {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT id, started_at, ended_at FROM sessions WHERE id = ?1",
+                "SELECT id, started_at, ended_at, notes FROM sessions WHERE id = ?1",
                 [session_id],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| anyhow!("会话不存在: {session_id}"))?;
-        let (id, started_at, ended_at) = row;
+        let (id, started_at, ended_at, notes) = row;
 
         let segments = {
             let mut stmt = conn.prepare(
@@ -236,6 +256,7 @@ impl SessionStore {
             segments,
             terms,
             translations,
+            notes,
         })
     }
 }
@@ -299,5 +320,15 @@ mod tests {
     fn get_missing_session_errors() {
         let s = store();
         assert!(s.get_session(999).is_err());
+    }
+
+    #[test]
+    fn notes_save_and_retrieve() {
+        let s = store();
+        let id = s.start_session(1).unwrap();
+        s.add_segment(id, &seg(1, "客户", "hello")).unwrap();
+        s.set_notes(id, "# 会议纪要\n\n## 摘要\ntest").unwrap();
+        let detail = s.get_session(id).unwrap();
+        assert_eq!(detail.notes.as_deref(), Some("# 会议纪要\n\n## 摘要\ntest"));
     }
 }

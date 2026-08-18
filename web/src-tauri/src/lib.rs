@@ -200,6 +200,42 @@ fn get_session(session_id: i64, state: tauri::State<'_, AppState>) -> Result<tal
     state.sessions.get_session(session_id).map_err(|e| e.to_string())
 }
 
+/// 内置纪要模板列表。
+#[tauri::command]
+fn list_notes_templates() -> Vec<serde_json::Value> {
+    talksage_notes::builtin_templates()
+        .into_iter()
+        .map(|t| {
+            serde_json::json!({
+                "id": t.id,
+                "name": t.name,
+                "description": t.description,
+            })
+        })
+        .collect()
+}
+
+/// 按模板生成纪要并保存到会话。
+#[tauri::command]
+fn generate_notes(session_id: i64, template_id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let Some(llm) = build_llm(&state.config) else {
+        return Err("未配置 LLM（请设置 llm.providers.<provider>.api_key）".into());
+    };
+    let Some(template) = talksage_notes::get_template(&template_id) else {
+        return Err(format!("未知模板: {template_id}"));
+    };
+    let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
+    let gen = talksage_notes::NotesGenerator::new(llm);
+    let notes = gen
+        .generate(&detail.segments, &detail.terms, &detail.translations, &template)
+        .map_err(|e| format!("纪要生成失败: {e}"))?;
+    state
+        .sessions
+        .set_notes(session_id, &notes)
+        .map_err(|e| format!("保存纪要失败: {e}"))?;
+    Ok(notes)
+}
+
 /// 根据配置构建 LLM Provider（OpenAI 兼容）。
 fn build_llm(config: &ConfigManager) -> Option<Arc<dyn LLMProvider>> {
     let snapshot = config.snapshot();
@@ -303,7 +339,9 @@ pub fn run() {
             stop_listen,
             list_sessions,
             search_sessions,
-            get_session
+            get_session,
+            list_notes_templates,
+            generate_notes
         ])
         .setup(move |app| {
             if let Err(e) = std::fs::create_dir_all(&data_dir) {

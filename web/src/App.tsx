@@ -7,7 +7,7 @@ import TermsSection, { type TermItem } from "./sections/TermsSection";
 import TranslationSection, { type TranslationItem } from "./sections/TranslationSection";
 import BriefSection, { type BriefItem } from "./sections/BriefSection";
 import HistorySection from "./sections/HistorySection";
-import type { SegmentHit, SessionDetail, SessionRecord } from "./lib/api";
+import type { NotesTemplate, SegmentHit, SessionDetail, SessionRecord } from "./lib/api";
 
 const api = getApi();
 
@@ -26,6 +26,8 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [searchResults, setSearchResults] = useState<SegmentHit[] | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
+  const [templates, setTemplates] = useState<NotesTemplate[]>([]);
+  const [notesBusy, setNotesBusy] = useState(false);
   const accumulatorRef = useRef(new TranscriptAccumulator());
 
   const refreshHistory = useCallback(async () => {
@@ -56,10 +58,30 @@ export default function App() {
     }
     try {
       setDetail(await api.getSession(id));
+      if (templates.length === 0) {
+        setTemplates(await api.listNotesTemplates());
+      }
     } catch (e) {
       console.error("会话详情失败:", e);
     }
-  }, []);
+  }, [templates.length]);
+
+  const handleGenerateNotes = useCallback(
+    async (templateId: string) => {
+      if (!detail) return;
+      setNotesBusy(true);
+      try {
+        const notes = await api.generateNotes(detail.id, templateId);
+        setDetail({ ...detail, notes });
+      } catch (e) {
+        console.error("纪要生成失败:", e);
+        alert(`纪要生成失败: ${e}`);
+      } finally {
+        setNotesBusy(false);
+      }
+    },
+    [detail],
+  );
 
   useEffect(() => {
     api.getVersion().then(setVersion).catch(console.error);
@@ -173,9 +195,12 @@ export default function App() {
             sessions={sessions}
             searchResults={searchResults}
             detail={detail}
+            templates={templates}
             onSearch={handleHistorySearch}
             onSelect={handleHistorySelect}
             onRefresh={refreshHistory}
+            onGenerateNotes={handleGenerateNotes}
+            notesBusy={notesBusy}
           />
         </section>
       )}

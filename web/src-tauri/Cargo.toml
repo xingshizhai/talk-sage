@@ -26,3 +26,4 @@ talksage-llm = { path = "../../crates/talksage-llm" }
 talksage-knowledge = { path = "../../crates/talksage-knowledge" }
 talksage-plugins = { path = "../../crates/talksage-plugins" }
 talksage-session = { path = "../../crates/talksage-session" }
+talksage-notes = { path = "../../crates/talksage-notes" }

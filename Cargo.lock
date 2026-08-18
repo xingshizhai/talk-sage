@@ -3845,6 +3845,7 @@ dependencies = [
  "talksage-core",
  "talksage-knowledge",
  "talksage-llm",
+ "talksage-notes",
  "talksage-pipeline",
  "talksage-plugins",
  "talksage-session",
@@ -3916,6 +3917,15 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "talksage-notes"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "talksage-core",
+ "talksage-llm",
 ]
 
 [[package]]

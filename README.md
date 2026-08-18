@@ -10,6 +10,7 @@
 - **全本地处理**：sherpa-onnx 流式 ASR（CPU 推理，RTF ≈ 0.04，比实时快 20+ 倍）
 - **会议辅助插件**：术语解释（英文缩写 → LLM 中文解释，冷却+去重+先骨架）、客户简报检索（本地知识库 Jaccard）、实时中英互译——独立线程执行不阻塞音频链路
 - **会话持久化**：监听自动落库 SQLite（`TALKSAGE_DATA_DIR`/`~/.talksage/sessions.db`），历史页可浏览/搜索/查看详情
+- **纪要模板化**：基于会话转写+术语按模板（标准会议/商务谈判/技术评审/每日站会）LLM 生成 Markdown 纪要，保存到会话
 - **领域事件驱动**：转写/术语/翻译/简报/状态事件经 IPC（Tauri）或 WS（headless 预留）推送，前端分区实时渲染
 - **全自动测试**：核心链路（wav → VAD → ASR → 事件 → 插件 → 前端行聚合）确定性可测，`scripts/run_tests.ps1` 一键全量
 
@@ -37,6 +38,7 @@
 │   ├── talksage-knowledge/   # 本地知识库 Jaccard 检索
 │   ├── talksage-plugins/     # 术语解释 / 简报检索 / 翻译
 │   ├── talksage-session/     # SQLite 会话存储（可检索历史）
+│   ├── talksage-notes/       # 模板化纪要生成（标准/谈判/评审/站会）
 │   └── talksage-cli/         # launcher：web / listen / doctor / version
 ├── web/
 │   ├── src/                  # React SPA（转写分区、监听控制）
@@ -92,7 +94,8 @@ scripts\run_tests.ps1        # cargo test --workspace + vitest run（一键全�
 - ✅ M1b 双流 + WASAPI 系统回环采集（Windows；macOS ScreenCaptureKit 待接入）→ 视频会议客户流可用
 - ✅ M2 会议辅助核心（术语解释 / 简报检索 / 实时翻译插件 + 前端分区）
 - ✅ M2 会话持久化（SQLite 落库 + 历史页搜索/详情）
-- ⏳ M3 纪要模板化 / 导入重转写 / 打包分发
+- ✅ M3 纪要模板化（多模板 LLM 生成 + 保存会话）
+- ⏳ M3 剩余（导入重转写 / 打包分发）
 - ⏳ M4 headless 服务（axum + capture-agent，多设备/团队）
 
 ## 隐私

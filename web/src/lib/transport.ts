@@ -38,6 +38,14 @@ export const ipcApi: AppApi = {
     return invoke("get_session", { sessionId: id });
   },
 
+  async listNotesTemplates(): Promise<import("./api").NotesTemplate[]> {
+    return invoke("list_notes_templates");
+  },
+
+  async generateNotes(sessionId: number, templateId: string): Promise<string> {
+    return invoke("generate_notes", { sessionId, templateId });
+  },
+
   onEvent(handler: (ev: DomainEvent) => void): () => void {
     let unlisten: (() => void) | undefined;
     listen<DomainEvent>("talksage://event", (e) => handler(e.payload))

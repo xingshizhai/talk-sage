@@ -1,0 +1,11 @@
+[package]
+name = "talksage-notes"
+description = "TalkSage v2 templated meeting notes generation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+talksage-core = { path = "../talksage-core" }
+talksage-llm = { path = "../talksage-llm" }
+anyhow = { workspace = true }

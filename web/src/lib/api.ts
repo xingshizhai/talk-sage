@@ -62,6 +62,14 @@ export interface SessionDetail {
   segments: { speaker_id: number; speaker_label: string; text: string; ts_ms: number }[];
   terms: string[];
   translations: string[];
+  notes: string | null;
+}
+
+/** 纪要模板概要。 */
+export interface NotesTemplate {
+  id: string;
+  name: string;
+  description: string;
 }
 
 /** 应用 API 表面。 */
@@ -79,6 +87,10 @@ export interface AppApi {
   searchSessions(query: string): Promise<SegmentHit[]>;
   /** 历史：会话详情。 */
   getSession(id: number): Promise<SessionDetail>;
+  /** 纪要：模板列表。 */
+  listNotesTemplates(): Promise<NotesTemplate[]>;
+  /** 纪要：按模板生成并保存。 */
+  generateNotes(sessionId: number, templateId: string): Promise<string>;
   /** 订阅领域事件流，返回取消函数。 */
   onEvent(handler: (ev: DomainEvent) => void): () => void;
   /** 传输载体标识（调试用）。 */
