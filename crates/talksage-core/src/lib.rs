@@ -77,6 +77,9 @@ pub enum DomainEvent {
         avg_rms: f32,
         /// 峰值 RMS。
         max_rms: f32,
+        /// 非语音块平均 RMS（背景噪音水平，自动阈值用）。旧客户端缺省 0。
+        #[serde(default)]
+        non_speech_avg_rms: f32,
         /// 录音文件路径（若有录音）。
         recording: Option<String>,
         /// VAD 参数快照（回溯灵敏度配置）。

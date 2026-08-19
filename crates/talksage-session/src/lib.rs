@@ -62,9 +62,56 @@ pub struct StreamMeta {
     pub final_segments: usize,
     pub avg_rms: f32,
     pub max_rms: f32,
+    /// 非语音块平均 RMS（背景噪音水平）。
+    #[serde(default)]
+    pub non_speech_avg_rms: f32,
     pub recording: Option<String>,
     pub vad_preset: String,
     pub vad_threshold: f32,
+}
+
+/// 质量评估参数（阈值可配置；auto_detect 时能量阈值自动计算）。
+#[derive(Debug, Clone)]
+pub struct QualityParams {
+    /// 自动检测背景噪音（非语音块 RMS）并自动设置能量阈值。
+    pub auto_detect: bool,
+    /// 文本噪音评分阈值（0..1）。
+    pub text_noise_threshold: f32,
+    /// 静音判定：语音占比低于此值。
+    pub min_speech_ratio: f32,
+    /// 噪音判定：语音占比高于此值（几乎不停顿）。
+    pub max_speech_ratio: f32,
+    /// 静音能量阈值。
+    pub silence_rms: f32,
+    /// 高能量噪音阈值。
+    pub high_rms: f32,
+}
+
+impl Default for QualityParams {
+    fn default() -> Self {
+        Self {
+            auto_detect: true,
+            text_noise_threshold: 0.45,
+            min_speech_ratio: 0.15,
+            max_speech_ratio: 0.85,
+            silence_rms: 0.01,
+            high_rms: 0.5,
+        }
+    }
+}
+
+impl QualityParams {
+    /// 从 talksage-config 的 QualityConfig 构建。
+    pub fn from_config(c: &talksage_config::QualityConfig) -> Self {
+        Self {
+            auto_detect: c.auto_detect,
+            text_noise_threshold: c.text_noise_threshold,
+            min_speech_ratio: c.min_speech_ratio,
+            max_speech_ratio: c.max_speech_ratio,
+            silence_rms: c.silence_rms,
+            high_rms: c.high_rms,
+        }
+    }
 }
 
 /// 会话元数据：聚合统计 + 质量评估（存于 sessions.meta JSON）。
@@ -106,16 +153,19 @@ impl SessionMeta {
 
     /// 根据各流统计 + 段文本评估会话质量。
     ///
-    /// 规则（主用户流"我"为准）：
+    /// 规则（主用户流"我"为准，阈值来自 `params`）：
     /// - 时长 < 2s → low
-    /// - 无语音（speech_ms==0）：能量 < 0.01 → silent；有能量（环境噪音但 VAD 不认）→ noise
-    /// - 语音占比 < 0.15 → silent（有语音但极少）
-    /// - 语音占比 < 0.4 或平均 RMS > 0.5 → noise（语音少 / 环境能量大）
-    /// - 语音占比 > 0.85 → noise（几乎无停顿，持续有声：噪音/音乐/旁人说话，VAD 误判为语音）
-    /// - 文本噪音评分 > 0.45 → noise（VAD 认为是语音，但内容是重复/语气词噪音）
+    /// - 无语音（speech_ms==0）：能量 < silence_rms → silent；有能量（环境噪音但 VAD 不认）→ noise
+    /// - 语音占比 < min_speech_ratio → silent（有语音但极少）
+    /// - 语音占比 < 0.4 或平均 RMS > high_rms → noise（语音少 / 环境能量大）
+    /// - 语音占比 > max_speech_ratio → noise（几乎无停顿，持续有声：噪音/音乐/旁人说话，VAD 误判为语音）
+    /// - 文本噪音评分 > text_noise_threshold → noise（VAD 认为是语音，但内容是重复/语气词噪音）
     /// - 语音占比 < 0.6 → low（待复核）
     /// - 否则 → clean
-    pub fn evaluate(stats: Vec<StreamMeta>, segment_texts: &[String], now: i64) -> Self {
+    ///
+    /// `params.auto_detect = true` 时，silence_rms / high_rms 用会话中非语音块的
+    /// 背景噪音水平自动计算（覆盖手工设定值）。
+    pub fn evaluate(stats: Vec<StreamMeta>, segment_texts: &[String], now: i64, params: &QualityParams) -> Self {
         let main = stats
             .iter()
             .max_by_key(|s| s.total_ms)
@@ -127,6 +177,7 @@ impl SessionMeta {
                 final_segments: 0,
                 avg_rms: 0.0,
                 max_rms: 0.0,
+                non_speech_avg_rms: 0.0,
                 recording: None,
                 vad_preset: String::new(),
                 vad_threshold: 0.0,
@@ -146,18 +197,26 @@ impl SessionMeta {
                 / segment_texts.len() as f32
         };
 
+        // 自动检测背景噪音 → 自动能量阈值（背景之上 1.5 倍才算语音，5 倍背景/最低 0.2 算高能量）
+        let (silence_rms, high_rms) = if params.auto_detect {
+            let bg = main.non_speech_avg_rms.max(0.0);
+            ((bg * 1.5).max(0.001), (bg * 5.0).max(0.2))
+        } else {
+            (params.silence_rms, params.high_rms)
+        };
+
         let quality = if main.total_ms < 2000 {
             talksage_core::SessionQuality::Low
         } else if main.speech_ms == 0 {
             // 无语音：能量低 = 静音；有能量 = 环境噪音（VAD 不认为是语音）
-            if main.avg_rms < 0.01 {
+            if main.avg_rms < silence_rms {
                 talksage_core::SessionQuality::Silent
             } else {
                 talksage_core::SessionQuality::Noise
             }
-        } else if ratio < 0.15 {
+        } else if ratio < params.min_speech_ratio {
             talksage_core::SessionQuality::Silent
-        } else if ratio < 0.4 || main.avg_rms > 0.5 || ratio > 0.85 || text_noise > 0.45 {
+        } else if ratio < 0.4 || main.avg_rms > high_rms || ratio > params.max_speech_ratio || text_noise > params.text_noise_threshold {
             talksage_core::SessionQuality::Noise
         } else if ratio < 0.6 {
             talksage_core::SessionQuality::Low
@@ -539,12 +598,14 @@ mod tests {
                 final_segments: 2,
                 avg_rms: 0.12,
                 max_rms: 0.6,
+                non_speech_avg_rms: 0.02,
                 recording: Some("2026-08-19_05-57-20_我.wav".into()),
                 vad_preset: "standard".into(),
                 vad_threshold: 0.5,
             }],
             &["我们需要在周五之前拿到 NPI 样品".into(), "另外请确认交期".into()],
             12345,
+            &QualityParams::default(),
         );
         assert_eq!(meta.quality, "clean");
         assert!(!meta.skipped_analysis);
@@ -573,6 +634,7 @@ mod tests {
                 final_segments: 16,
                 avg_rms: 0.2,
                 max_rms: 0.8,
+                non_speech_avg_rms: 0.05,
                 recording: None,
                 vad_preset: "standard".into(),
                 vad_threshold: 0.5,
@@ -584,6 +646,7 @@ mod tests {
                 "嗯你看一下就会会会会有一个案".into(),
             ],
             12345,
+            &QualityParams::default(),
         );
         assert_eq!(meta.quality, "noise", "持续有声（ratio 高）应判噪音: {meta:?}");
         assert!(meta.skipped_analysis);
@@ -597,12 +660,14 @@ mod tests {
                 final_segments: 5,
                 avg_rms: 0.1,
                 max_rms: 0.4,
+                non_speech_avg_rms: 0.03,
                 recording: None,
                 vad_preset: "standard".into(),
                 vad_threshold: 0.5,
             }],
             &["嗯嗯嗯嗯嗯嗯嗯嗯嗯嗯".into(), "嗯嗯嗯对技术嗯嗯".into()],
             12345,
+            &QualityParams::default(),
         );
         assert_eq!(noisy_text.quality, "noise");
         assert!(noisy_text.text_noise > 0.45);
@@ -616,14 +681,112 @@ mod tests {
                 final_segments: 0,
                 avg_rms: 0.002,
                 max_rms: 0.01,
+                non_speech_avg_rms: 0.001,
                 recording: None,
                 vad_preset: "standard".into(),
                 vad_threshold: 0.5,
             }],
             &[],
             12345,
+            &QualityParams::default(),
         );
         assert_eq!(silent.quality, "silent");
         assert!(silent.skipped_analysis);
+    }
+
+    #[test]
+    fn quality_thresholds_are_configurable() {
+        // 阈值可配置：默认 0.45 判 noise 的文本，调高阈值后不再判 noise
+        let stats = vec![StreamMeta {
+            speaker_label: "我".into(),
+            total_ms: 60000,
+            speech_ms: 36000,
+            final_segments: 4,
+            avg_rms: 0.1,
+            max_rms: 0.4,
+            non_speech_avg_rms: 0.03,
+            recording: None,
+            vad_preset: "standard".into(),
+            vad_threshold: 0.5,
+        }];
+        let texts = &["嗯嗯嗯嗯嗯嗯嗯嗯嗯嗯".into(), "我们确认交期价格".into()];
+
+        let default_params = QualityParams::default();
+        let meta = SessionMeta::evaluate(stats.clone(), texts, 1, &default_params);
+        assert_eq!(meta.quality, "noise");
+
+        // 调高文本噪音阈值 → 不判 noise（ratio 0.583 → low）
+        let relaxed = QualityParams {
+            text_noise_threshold: 0.9,
+            ..QualityParams::default()
+        };
+        let stats_low = vec![StreamMeta {
+            speaker_label: "我".into(),
+            total_ms: 60000,
+            speech_ms: 35000,
+            final_segments: 4,
+            avg_rms: 0.1,
+            max_rms: 0.4,
+            non_speech_avg_rms: 0.03,
+            recording: None,
+            vad_preset: "standard".into(),
+            vad_threshold: 0.5,
+        }];
+        let meta2 = SessionMeta::evaluate(stats_low, texts, 1, &relaxed);
+        assert_eq!(meta2.quality, "low", "放宽阈值后不应再判噪音: {:?}", meta2.quality);
+
+        // 放宽 max_speech_ratio：持续有声（0.88）不再判 noise
+        let lenient = QualityParams {
+            max_speech_ratio: 0.95,
+            ..QualityParams::default()
+        };
+        let busy = SessionMeta::evaluate(
+            vec![StreamMeta {
+                speaker_label: "我".into(),
+                total_ms: 148000,
+                speech_ms: 130000,
+                final_segments: 16,
+                avg_rms: 0.2,
+                max_rms: 0.8,
+                non_speech_avg_rms: 0.05,
+                recording: None,
+                vad_preset: "standard".into(),
+                vad_threshold: 0.5,
+            }],
+            &["正常说话内容需要确认".into(), "我们再讨论一下方案".into()],
+            1,
+            &lenient,
+        );
+        assert_eq!(busy.quality, "clean", "max_speech_ratio 放宽后持续有声可判正常: {:?}", busy.quality);
+    }
+
+    #[test]
+    fn auto_detect_background_noise_adjusts_thresholds() {
+        // 背景噪音大的环境（非语音块 RMS 高）：auto_detect 提升静音/高能量阈值
+        let stats = vec![StreamMeta {
+            speaker_label: "我".into(),
+            total_ms: 60000,
+            speech_ms: 0,
+            final_segments: 0,
+            avg_rms: 0.02,
+            max_rms: 0.1,
+            non_speech_avg_rms: 0.02, // 背景噪音水平 0.02
+            recording: None,
+            vad_preset: "standard".into(),
+            vad_threshold: 0.5,
+        }];
+
+        // auto_detect=true：silence_rms = 0.02*1.5 = 0.03 > avg_rms 0.02 → 静音
+        let meta = SessionMeta::evaluate(stats.clone(), &[], 1, &QualityParams::default());
+        assert_eq!(meta.quality, "silent");
+
+        // auto_detect=false + 手工 silence_rms=0.01：avg_rms 0.02 > 0.01 → 有能量无语音 → noise
+        let manual = QualityParams {
+            auto_detect: false,
+            silence_rms: 0.01,
+            ..QualityParams::default()
+        };
+        let meta2 = SessionMeta::evaluate(stats.clone(), &[], 1, &manual);
+        assert_eq!(meta2.quality, "noise", "关闭自动检测时用固定阈值判定: {:?}", meta2.quality);
     }
 }

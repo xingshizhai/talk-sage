@@ -457,6 +457,7 @@ fn cmd_listen(
             final_segments,
             avg_rms,
             max_rms,
+            non_speech_avg_rms,
             recording,
             vad_preset,
             vad_threshold,
@@ -471,6 +472,7 @@ fn cmd_listen(
                     final_segments: *final_segments,
                     avg_rms: *avg_rms,
                     max_rms: *max_rms,
+                    non_speech_avg_rms: *non_speech_avg_rms,
                     recording: recording.clone(),
                     vad_preset: vad_preset.clone(),
                     vad_threshold: *vad_threshold,
@@ -539,7 +541,8 @@ fn cmd_listen(
             let stats = stats_for_sink.lock().unwrap().clone();
             let texts = texts_for_sink.lock().unwrap().clone();
             if !stats.is_empty() {
-                let meta = talksage_session::SessionMeta::evaluate(stats, &texts, now);
+                let params = talksage_session::QualityParams::from_config(&snapshot.quality);
+                let meta = talksage_session::SessionMeta::evaluate(stats, &texts, now, &params);
                 let _ = store.set_session_meta(sid, &meta);
                 println!(
                     "会话 #{sid} 质量: {}（时长 {}s，语音占比 {:.0}%，文本噪音 {:.2}，跳过下游分析={}）",
@@ -893,6 +896,9 @@ fn cmd_doctor() -> ExitCode {
         c.recording.enabled,
         rec_dir.display(),
         if rec_dir.is_dir() { format!("{} 个文件", count_wav(&rec_dir)) } else { "目录不存在".into() });
+    println!("quality      : auto_detect={} text_noise={} min_ratio={} max_ratio={} silence_rms={} high_rms={}",
+        c.quality.auto_detect, c.quality.text_noise_threshold, c.quality.min_speech_ratio,
+        c.quality.max_speech_ratio, c.quality.silence_rms, c.quality.high_rms);
 
     println!("\n模型检查:");
     match resolve_models_dir() {

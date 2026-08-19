@@ -51,6 +51,7 @@ pub struct Config {
     pub plugins: PluginsConfig,
     pub session: SessionConfig,
     pub recording: RecordingConfig,
+    pub quality: QualityConfig,
     pub privacy: PrivacyConfig,
     pub server: ServerConfig,
     pub knowledge_base: KnowledgeBaseConfig,
@@ -65,6 +66,7 @@ impl Default for Config {
             plugins: PluginsConfig::default(),
             session: SessionConfig::default(),
             recording: RecordingConfig::default(),
+            quality: QualityConfig::default(),
             privacy: PrivacyConfig::default(),
             server: ServerConfig::default(),
             knowledge_base: KnowledgeBaseConfig::default(),
@@ -410,6 +412,41 @@ impl RecordingConfig {
     }
 }
 
+/// 会话质量评估配置（噪音检测阈值）。
+///
+/// 用于判定"有效语音 / 噪音 / 静音"会话并决定是否跳过下游分析。
+/// `auto_detect = true` 时，能量类阈值（silence_rms / high_rms）会根据
+/// 会话中非语音块的背景噪音水平自动计算，覆盖手工设定值。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QualityConfig {
+    /// 自动检测背景噪音并自动设置能量阈值。
+    pub auto_detect: bool,
+    /// 文本噪音评分阈值（0..1）：段文本噪音分高于此值判噪音。默认 0.45。
+    pub text_noise_threshold: f32,
+    /// 静音判定：语音占比低于此值（0..1）。默认 0.15。
+    pub min_speech_ratio: f32,
+    /// 噪音判定：语音占比高于此值（0..1，几乎不停顿 = 持续噪音/旁人说话）。默认 0.85。
+    pub max_speech_ratio: f32,
+    /// 静音能量阈值（avg_rms 低于此值且无语音 → 静音）。默认 0.01。
+    pub silence_rms: f32,
+    /// 高能量噪音阈值（avg_rms 高于此值 → 环境噪音大）。默认 0.5。
+    pub high_rms: f32,
+}
+
+impl Default for QualityConfig {
+    fn default() -> Self {
+        Self {
+            auto_detect: true,
+            text_noise_threshold: 0.45,
+            min_speech_ratio: 0.15,
+            max_speech_ratio: 0.85,
+            silence_rms: 0.01,
+            high_rms: 0.5,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrivacyConfig {
@@ -552,6 +589,14 @@ fn merge_config(default: Config, user: Config) -> Config {
             enabled: user.recording.enabled,
             dir: take_or(user.recording.dir, default.recording.dir),
             clean_silence: user.recording.clean_silence,
+        },
+        quality: QualityConfig {
+            auto_detect: user.quality.auto_detect,
+            text_noise_threshold: user.quality.text_noise_threshold,
+            min_speech_ratio: user.quality.min_speech_ratio,
+            max_speech_ratio: user.quality.max_speech_ratio,
+            silence_rms: user.quality.silence_rms,
+            high_rms: user.quality.high_rms,
         },
         privacy: user.privacy,
         server: user.server,

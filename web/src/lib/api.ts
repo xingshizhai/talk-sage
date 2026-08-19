@@ -37,6 +37,15 @@ export interface AppConfig {
     dir: string;
     clean_silence: boolean;
   };
+  /** 会话质量评估（噪音检测阈值）。 */
+  quality: {
+    auto_detect: boolean;
+    text_noise_threshold: number;
+    min_speech_ratio: number;
+    max_speech_ratio: number;
+    silence_rms: number;
+    high_rms: number;
+  };
   [key: string]: unknown;
 }
 

@@ -224,6 +224,10 @@ struct StreamWorker {
     max_rms: f32,
     /// 最终段数量。
     final_segments: usize,
+    /// 非语音块能量平方和（背景噪音水平；质量评估自动阈值用）。
+    non_speech_rms_sum: f64,
+    /// 非语音块数。
+    non_speech_blocks: u64,
 }
 
 impl StreamWorker {
@@ -313,6 +317,8 @@ impl StreamWorker {
             rms_sum: 0.0,
             max_rms: 0.0,
             final_segments: 0,
+            non_speech_rms_sum: 0.0,
+            non_speech_blocks: 0,
         })
     }
 
@@ -389,6 +395,11 @@ impl StreamWorker {
             self.rms_sum += (block_rms as f64) * (block_rms as f64) * chunk.len() as f64;
             if block_rms > self.max_rms {
                 self.max_rms = block_rms;
+            }
+            // 非语音块（VAD 判定前 in_speech=false）→ 背景噪音水平
+            if !self.in_speech {
+                self.non_speech_blocks += 1;
+                self.non_speech_rms_sum += (block_rms as f64) * (block_rms as f64) * chunk.len() as f64;
             }
         }
 
@@ -495,7 +506,8 @@ impl StreamWorker {
     }
 
     /// 流级统计（会话结束回溯用）。
-    fn session_stats(&self) -> (u64, u64, usize, u64, f32, f32) {
+    /// 返回 (total_ms, speech_ms, final_segments, samples, avg_rms, max_rms, non_speech_avg_rms)
+    fn session_stats(&self) -> (u64, u64, usize, u64, f32, f32, f32) {
         let total_ms = self.total_samples * 1000 / talksage_audio::TARGET_SAMPLE_RATE as u64;
         let speech_ms = self.speech_samples * 1000 / talksage_audio::TARGET_SAMPLE_RATE as u64;
         let avg_rms = if self.total_samples > 0 {
@@ -503,7 +515,12 @@ impl StreamWorker {
         } else {
             0.0
         };
-        (total_ms, speech_ms, self.final_segments, self.total_samples, avg_rms, self.max_rms)
+        let non_speech_avg_rms = if self.non_speech_blocks > 0 {
+            (self.non_speech_rms_sum / (self.non_speech_blocks as u64 * 1600) as f64) as f32
+        } else {
+            avg_rms
+        };
+        (total_ms, speech_ms, self.final_segments, self.total_samples, avg_rms, self.max_rms, non_speech_avg_rms)
     }
 
     fn stop(&mut self) {
@@ -643,7 +660,7 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
     }
     // 会话统计事件（每条流一条）：质量评估 / 历史回溯的基础数据
     for w in &workers {
-        let (total_ms, speech_ms, final_segments, samples, avg_rms, max_rms) = w.session_stats();
+        let (total_ms, speech_ms, final_segments, samples, avg_rms, max_rms, non_speech_avg_rms) = w.session_stats();
         let (vad_threshold, ..) = cfg.vad.effective();
         fire(&emit, DomainEvent::SessionStats {
             speaker_label: w.speaker_label.clone(),
@@ -653,12 +670,13 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             samples,
             avg_rms,
             max_rms,
+            non_speech_avg_rms,
             recording: w.recording_path.as_ref().map(|p| p.display().to_string()),
             vad_preset: format!("{:?}", cfg.vad.preset).to_lowercase(),
             vad_threshold,
         });
         log::info!(
-            "会话统计[{}] total={}ms speech={}ms({:.0}%) segs={} avg_rms={:.4} max_rms={:.4} recording={:?}",
+            "会话统计[{}] total={}ms speech={}ms({:.0}%) segs={} avg_rms={:.4} max_rms={:.4} 背景噪音={:.4} recording={:?}",
             w.speaker_label,
             total_ms,
             speech_ms,
@@ -666,6 +684,7 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             final_segments,
             avg_rms,
             max_rms,
+            non_speech_avg_rms,
             w.recording_path,
         );
     }

@@ -4214,6 +4214,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "talksage-config",
  "talksage-core",
 ]
 

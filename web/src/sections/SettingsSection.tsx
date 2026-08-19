@@ -26,6 +26,12 @@ export default function SettingsSection({
   const [highpass, setHighpass] = useState(config?.audio?.denoise?.highpass ?? true);
   const [recEnabled, setRecEnabled] = useState(config?.recording?.enabled ?? true);
   const [recDir, setRecDir] = useState<string>(config?.recording?.dir ?? "");
+  const [qAutoDetect, setQAutoDetect] = useState(config?.quality?.auto_detect ?? true);
+  const [qTextNoise, setQTextNoise] = useState(config?.quality?.text_noise_threshold ?? 0.45);
+  const [qMinRatio, setQMinRatio] = useState(config?.quality?.min_speech_ratio ?? 0.15);
+  const [qMaxRatio, setQMaxRatio] = useState(config?.quality?.max_speech_ratio ?? 0.85);
+  const [qSilenceRms, setQSilenceRms] = useState(config?.quality?.silence_rms ?? 0.01);
+  const [qHighRms, setQHighRms] = useState(config?.quality?.high_rms ?? 0.5);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -66,11 +72,39 @@ export default function SettingsSection({
           enabled: recEnabled,
           dir: recDir.trim(),
         },
+        quality: {
+          auto_detect: qAutoDetect,
+          text_noise_threshold: qTextNoise,
+          min_speech_ratio: qMinRatio,
+          max_speech_ratio: qMaxRatio,
+          silence_rms: qSilenceRms,
+          high_rms: qHighRms,
+        },
       };
       await onSave(updates);
       setMessage("已保存（部分设置重启后生效）");
     } catch (e) {
       setMessage(`保存失败: ${e}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** 恢复噪音检测默认值（写入配置，不依赖表单状态）。 */
+  async function handleResetQuality() {
+    setSaving(true);
+    setMessage("");
+    try {
+      await onSave({ quality: null }); // Rust 侧：null → 恢复默认
+      setQAutoDetect(true);
+      setQTextNoise(0.45);
+      setQMinRatio(0.15);
+      setQMaxRatio(0.85);
+      setQSilenceRms(0.01);
+      setQHighRms(0.5);
+      setMessage("噪音检测阈值已恢复默认");
+    } catch (e) {
+      setMessage(`恢复默认失败: ${e}`);
     } finally {
       setSaving(false);
     }
@@ -174,9 +208,82 @@ export default function SettingsSection({
         录音用于测试闭环：<code style={{ color: "var(--term)" }}>talksage trim &lt;录音.wav&gt;</code> 去掉静音后，再回放验证转写。
       </div>
 
-      <button onClick={handleSave} disabled={saving} style={{ fontSize: 12, marginTop: 8 }}>
-        {saving ? "保存中…" : "保存设置"}
-      </button>
+      <h3 style={{ margin: "10px 0 6px", fontSize: 13 }}>噪音检测（会话质量评估）</h3>
+      <label style={{ display: "block", marginBottom: 6 }}>
+        <input type="checkbox" checked={qAutoDetect} onChange={(e) => setQAutoDetect(e.target.checked)} /> 自动检测背景噪音并自动设置阈值
+      </label>
+      {!qAutoDetect && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 6, fontSize: 12 }}>
+          <label>
+            文本噪音阈值（0~1，默认 0.45）：
+            <input
+              type="number"
+              min={0.05}
+              max={0.95}
+              step={0.05}
+              value={qTextNoise}
+              onChange={(e) => setQTextNoise(Number(e.target.value))}
+              style={{ width: 90, marginLeft: 8, padding: "3px 6px", borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)" }}
+            />
+          </label>
+          <label>
+            静音语音占比下限（默认 0.15）：
+            <input
+              type="number"
+              min={0.05}
+              max={0.5}
+              step={0.05}
+              value={qMinRatio}
+              onChange={(e) => setQMinRatio(Number(e.target.value))}
+              style={{ width: 90, marginLeft: 8, padding: "3px 6px", borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)" }}
+            />
+          </label>
+          <label>
+            持续噪音语音占比上限（默认 0.85）：
+            <input
+              type="number"
+              min={0.5}
+              max={0.98}
+              step={0.05}
+              value={qMaxRatio}
+              onChange={(e) => setQMaxRatio(Number(e.target.value))}
+              style={{ width: 90, marginLeft: 8, padding: "3px 6px", borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)" }}
+            />
+          </label>
+          <label>
+            静音能量阈值（RMS，默认 0.01）：
+            <input
+              type="number"
+              min={0.001}
+              max={0.1}
+              step={0.005}
+              value={qSilenceRms}
+              onChange={(e) => setQSilenceRms(Number(e.target.value))}
+              style={{ width: 90, marginLeft: 8, padding: "3px 6px", borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)" }}
+            />
+          </label>
+          <label>
+            高能量噪音阈值（RMS，默认 0.5）：
+            <input
+              type="number"
+              min={0.1}
+              max={1}
+              step={0.05}
+              value={qHighRms}
+              onChange={(e) => setQHighRms(Number(e.target.value))}
+              style={{ width: 90, marginLeft: 8, padding: "3px 6px", borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)" }}
+            />
+          </label>
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 2 }}>
+        <button onClick={handleSave} disabled={saving} style={{ fontSize: 12 }}>
+          {saving ? "保存中…" : "保存设置"}
+        </button>
+        <button onClick={handleResetQuality} disabled={saving} style={{ fontSize: 12 }}>
+          恢复噪音阈值默认
+        </button>
+      </div>
       {message && <div style={{ marginTop: 6, color: message.startsWith("失败") ? "var(--danger)" : "var(--live)" }}>{message}</div>}
     </div>
   );

@@ -157,6 +157,33 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
             c.recording.clean_silence = cs;
         }
     }
+    // quality：null → 恢复默认；否则按字段更新
+    match updates.get("quality") {
+        Some(serde_json::Value::Null) => {
+            c.quality = talksage_config::QualityConfig::default();
+        }
+        Some(q) => {
+            if let Some(a) = q.get("auto_detect").and_then(|v| v.as_bool()) {
+                c.quality.auto_detect = a;
+            }
+            if let Some(t) = q.get("text_noise_threshold").and_then(|v| v.as_f64()) {
+                c.quality.text_noise_threshold = t as f32;
+            }
+            if let Some(v) = q.get("min_speech_ratio").and_then(|v| v.as_f64()) {
+                c.quality.min_speech_ratio = v as f32;
+            }
+            if let Some(v) = q.get("max_speech_ratio").and_then(|v| v.as_f64()) {
+                c.quality.max_speech_ratio = v as f32;
+            }
+            if let Some(v) = q.get("silence_rms").and_then(|v| v.as_f64()) {
+                c.quality.silence_rms = v as f32;
+            }
+            if let Some(v) = q.get("high_rms").and_then(|v| v.as_f64()) {
+                c.quality.high_rms = v as f32;
+            }
+        }
+        None => {}
+    }
 }
 
 /// hello-world 事件：前端 ping → 后端推送领域事件。
@@ -299,6 +326,7 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
             samples: _,
             avg_rms,
             max_rms,
+            non_speech_avg_rms,
             recording,
             vad_preset,
             vad_threshold,
@@ -312,6 +340,7 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
                     final_segments: *final_segments,
                     avg_rms: *avg_rms,
                     max_rms: *max_rms,
+                    non_speech_avg_rms: *non_speech_avg_rms,
                     recording: recording.clone(),
                     vad_preset: vad_preset.clone(),
                     vad_threshold: *vad_threshold,
@@ -353,7 +382,8 @@ fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
         let stats = state.session_stats.lock().unwrap().clone();
         let texts = state.session_texts.lock().unwrap().clone();
         if !stats.is_empty() {
-            let meta = talksage_session::SessionMeta::evaluate(stats, &texts, now);
+            let params = talksage_session::QualityParams::from_config(&state.config.snapshot().quality);
+            let meta = talksage_session::SessionMeta::evaluate(stats, &texts, now, &params);
             if let Err(e) = state.sessions.set_session_meta(sid, &meta) {
                 log::warn!("保存会话元数据失败: {e}");
             }
