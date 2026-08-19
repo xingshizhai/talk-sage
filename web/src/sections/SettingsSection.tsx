@@ -21,6 +21,9 @@ export default function SettingsSection({
   const [kbEnabled, setKbEnabled] = useState(false);
   const [clientEngine, setClientEngine] = useState(config?.asr?.client_engine ?? "zipformer-en");
   const [userEngine, setUserEngine] = useState(config?.asr?.user_engine ?? "paraformer-zh");
+  const [vadPreset, setVadPreset] = useState<string>(config?.audio?.vad?.preset ?? "standard");
+  const [denoiseEnabled, setDenoiseEnabled] = useState(config?.audio?.denoise?.enabled ?? false);
+  const [highpass, setHighpass] = useState(config?.audio?.denoise?.highpass ?? true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -49,6 +52,13 @@ export default function SettingsSection({
         asr: {
           client_engine: clientEngine,
           user_engine: userEngine,
+        },
+        audio: {
+          vad: { preset: vadPreset },
+          denoise: {
+            enabled: denoiseEnabled,
+            highpass,
+          },
         },
       };
       await onSave(updates);
@@ -126,6 +136,25 @@ export default function SettingsSection({
           <option value="zipformer-en">我（中文）zipformer-en</option>
         </select>
       </div>
+
+      <h3 style={{ margin: "10px 0 6px", fontSize: 13 }}>识别灵敏度（VAD）</h3>
+      <select
+        value={vadPreset}
+        onChange={(e) => setVadPreset(e.target.value)}
+        style={{ fontSize: 12, padding: "3px 6px", borderRadius: 4, background: "#0f172a", color: "#e2e8f0", border: "1px solid #334155", width: "100%", boxSizing: "border-box", marginBottom: 4 }}
+      >
+        <option value="standard">标准（平衡灵敏度与抗噪）</option>
+        <option value="sensitive">灵敏（弱语音/快速问答，会议室轻声）</option>
+        <option value="strict">严格（抗背景噪音，长句稳定）</option>
+      </select>
+
+      <h3 style={{ margin: "10px 0 6px", fontSize: 13 }}>背景噪音处理</h3>
+      <label style={{ display: "block", marginBottom: 4 }}>
+        <input type="checkbox" checked={denoiseEnabled} onChange={(e) => setDenoiseEnabled(e.target.checked)} /> 启用降噪（噪声门 + 高通）
+      </label>
+      <label style={{ display: "block", marginBottom: 4, opacity: denoiseEnabled ? 1 : 0.5 }}>
+        <input type="checkbox" checked={highpass} disabled={!denoiseEnabled} onChange={(e) => setHighpass(e.target.checked)} /> 高通滤波（去低频轰鸣/空调声）
+      </label>
 
       <button onClick={handleSave} disabled={saving} style={{ fontSize: 12, marginTop: 4 }}>
         {saving ? "保存中…" : "保存设置"}

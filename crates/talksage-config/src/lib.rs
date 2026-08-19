@@ -115,6 +115,7 @@ pub struct AudioConfig {
     pub loopback_device: Option<i32>,
     pub ducking: DuckingConfig,
     pub vad: VadConfig,
+    pub denoise: DenoiseConfig,
 }
 
 impl Default for AudioConfig {
@@ -124,6 +125,103 @@ impl Default for AudioConfig {
             loopback_device: None,
             ducking: DuckingConfig::default(),
             vad: VadConfig::default(),
+            denoise: DenoiseConfig::default(),
+        }
+    }
+}
+
+/// 识别灵敏度预设。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VadPreset {
+    /// 标准：平衡灵敏度与抗噪。
+    Standard,
+    /// 灵敏：捕获弱语音/短句（会议室轻声、快速问答）。
+    Sensitive,
+    /// 严格：抗背景噪音，长段稳定。
+    Strict,
+}
+
+impl Default for VadPreset {
+    fn default() -> Self {
+        Self::Standard
+    }
+}
+
+impl VadPreset {
+    /// 预设参数 (threshold, min_speech_s, min_silence_s, window, max_speech_s)。
+    pub fn params(&self) -> (f32, f32, f32, i32, f32) {
+        match self {
+            VadPreset::Standard => (0.50, 0.25, 0.50, 512, 10.0),
+            VadPreset::Sensitive => (0.35, 0.15, 0.30, 512, 10.0),
+            VadPreset::Strict => (0.65, 0.35, 0.80, 512, 10.0),
+        }
+    }
+}
+
+/// 流式 VAD 参数（预设 + 可覆盖）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VadConfig {
+    /// 灵敏度预设。
+    pub preset: VadPreset,
+    /// 覆盖：检测阈值（None = 用预设）。
+    pub threshold: Option<f32>,
+    /// 覆盖：最小语音时长（秒）。
+    pub min_speech_ms: Option<u64>,
+    /// 覆盖：段结束静音（秒）。
+    pub min_silence_ms: Option<u64>,
+    /// 覆盖：最长语音（秒）。
+    pub max_speech_ms: Option<u64>,
+}
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            preset: VadPreset::Standard,
+            threshold: None,
+            min_speech_ms: None,
+            min_silence_ms: None,
+            max_speech_ms: None,
+        }
+    }
+}
+
+impl VadConfig {
+    /// 解析实际生效参数。
+    pub fn effective(&self) -> (f32, f32, f32, i32, f32) {
+        let (t, ms, msil, w, maxs) = self.preset.params();
+        (
+            self.threshold.unwrap_or(t),
+            self.min_speech_ms.map(|v| v as f32 / 1000.0).unwrap_or(ms),
+            self.min_silence_ms.map(|v| v as f32 / 1000.0).unwrap_or(msil),
+            w,
+            self.max_speech_ms.map(|v| v as f32 / 1000.0).unwrap_or(maxs),
+        )
+    }
+}
+
+/// 音频预处理（背景噪音处理）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DenoiseConfig {
+    /// 总开关。
+    pub enabled: bool,
+    /// 噪声门：低于该 RMS 的块视为静音（抑制稳态背景噪音）。
+    pub gate_threshold: f32,
+    /// 高通滤波开关（去除低频轰鸣/空调声）。
+    pub highpass: bool,
+    /// 高通截止频率（Hz）。
+    pub highpass_cutoff_hz: f32,
+}
+
+impl Default for DenoiseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            gate_threshold: 0.008,
+            highpass: true,
+            highpass_cutoff_hz: 100.0,
         }
     }
 }
@@ -142,27 +240,6 @@ impl Default for DuckingConfig {
             enabled: true,
             threshold: 0.04,
             factor: 0.35,
-        }
-    }
-}
-
-/// 流式 VAD 参数（参考 Meetily 调优经验）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct VadConfig {
-    pub redemption_ms: u64,
-    pub pre_pad_ms: u64,
-    pub post_pad_ms: u64,
-    pub min_speech_ms: u64,
-}
-
-impl Default for VadConfig {
-    fn default() -> Self {
-        Self {
-            redemption_ms: 2000,
-            pre_pad_ms: 300,
-            post_pad_ms: 400,
-            min_speech_ms: 250,
         }
     }
 }
@@ -403,10 +480,17 @@ fn merge_config(default: Config, user: Config) -> Config {
                 factor: user.audio.ducking.factor,
             },
             vad: VadConfig {
-                redemption_ms: user.audio.vad.redemption_ms,
-                pre_pad_ms: user.audio.vad.pre_pad_ms,
-                post_pad_ms: user.audio.vad.post_pad_ms,
-                min_speech_ms: user.audio.vad.min_speech_ms,
+                preset: user.audio.vad.preset,
+                threshold: user.audio.vad.threshold.or(default.audio.vad.threshold),
+                min_speech_ms: user.audio.vad.min_speech_ms.or(default.audio.vad.min_speech_ms),
+                min_silence_ms: user.audio.vad.min_silence_ms.or(default.audio.vad.min_silence_ms),
+                max_speech_ms: user.audio.vad.max_speech_ms.or(default.audio.vad.max_speech_ms),
+            },
+            denoise: DenoiseConfig {
+                enabled: user.audio.denoise.enabled,
+                gate_threshold: user.audio.denoise.gate_threshold,
+                highpass: user.audio.denoise.highpass,
+                highpass_cutoff_hz: user.audio.denoise.highpass_cutoff_hz,
             },
         },
         llm: LlmConfig {
@@ -483,7 +567,7 @@ mod tests {
         assert_eq!(c.asr.user_engine, "paraformer-zh");
         assert_eq!(c.server.host, "127.0.0.1");
         assert!(!c.server.enabled);
-        assert_eq!(c.audio.vad.redemption_ms, 2000);
+        assert_eq!(c.audio.vad.effective(), (0.50, 0.25, 0.50, 512, 10.0));
     }
 
     #[test]

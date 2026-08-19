@@ -18,6 +18,102 @@ mod loopback;
 #[cfg(windows)]
 pub use loopback::LoopbackCapture;
 
+/// 音频预处理（背景噪音处理）。
+///
+/// - 高通滤波：去除低频轰鸣/空调声（一阶 Butterworth 双二阶）。
+/// - 噪声门：块 RMS 低于阈值视为静音（抑制稳态背景噪音）。
+///
+/// 在 pipeline 每块进入 VAD/ASR 前调用。
+pub struct Preprocessor {
+    highpass: Option<HighPass>,
+    gate_threshold: f32,
+}
+
+impl Preprocessor {
+    /// `denoise_enabled`：总开关；`highpass`：高通开关；`cutoff_hz` 截止频率。
+    pub fn new(denoise_enabled: bool, highpass: bool, cutoff_hz: f32, gate_threshold: f32) -> Self {
+        Self {
+            highpass: if denoise_enabled && highpass {
+                Some(HighPass::new(cutoff_hz))
+            } else {
+                None
+            },
+            gate_threshold: if denoise_enabled { gate_threshold } else { 0.0 },
+        }
+    }
+
+    /// 就地处理一块音频（f32，任意长度）。
+    pub fn process(&mut self, samples: &mut [f32]) {
+        if let Some(hp) = &mut self.highpass {
+            hp.process(samples);
+        }
+        if self.gate_threshold > 0.0 {
+            // 块级噪声门：整块 RMS 低于阈值 → 静音（保守，避免切词）
+            let rms = if samples.is_empty() {
+                0.0
+            } else {
+                (samples.iter().map(|&x| x * x).sum::<f32>() / samples.len() as f32).sqrt()
+            };
+            if rms < self.gate_threshold {
+                samples.fill(0.0);
+            }
+        }
+    }
+}
+
+/// 一阶高通滤波器（双二阶，直接 I 型）。
+struct HighPass {
+    // 状态变量
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+    // 系数
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+}
+
+impl HighPass {
+    /// 16kHz 下按截止频率计算系数（一阶 Butterworth 高通）。
+    fn new(cutoff_hz: f32) -> Self {
+        let sample_rate = TARGET_SAMPLE_RATE as f32;
+        let w0 = 2.0 * std::f32::consts::PI * cutoff_hz / sample_rate;
+        let cos_w0 = w0.cos();
+        let alpha = (w0 / 2.0).sin();
+        // 一阶低通原型 → 高通系数
+        let b0 = (1.0 + cos_w0) / 2.0;
+        let b1 = -(1.0 + cos_w0);
+        let b2 = (1.0 + cos_w0) / 2.0;
+        let a0 = 1.0 + alpha;
+        Self {
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: (-2.0 * cos_w0) / a0,
+            a2: (1.0 - alpha) / a0,
+        }
+    }
+
+    fn process(&mut self, samples: &mut [f32]) {
+        for s in samples.iter_mut() {
+            let x = *s;
+            let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1 - self.a2 * self.y2;
+            self.x2 = self.x1;
+            self.x1 = x;
+            self.y2 = self.y1;
+            self.y1 = y;
+            *s = y;
+        }
+    }
+}
+
 /// 线性插值重采样器（f32 mono）。
 pub(crate) struct LinearResampler {
     src_sr: u32,
@@ -260,5 +356,59 @@ mod tests {
         collect_and_send(&data, 1, &mut resampler, &mut pending, 1600, &tx);
         assert!(rx.try_recv().is_err());
         assert_eq!(pending.len(), 1000);
+    }
+
+    #[test]
+    fn highpass_reduces_low_frequency_content() {
+        let mut hp = HighPass::new(100.0);
+        let sr = 16000.0;
+        let n = 1600; // 100ms
+        // 低频 50Hz 正弦（应被大幅衰减）+ 高频 2000Hz 正弦（应保留）
+        let mut samples: Vec<f32> = (0..n)
+            .map(|i| {
+                0.5 * (2.0 * std::f32::consts::PI * 50.0 * i as f32 / sr).sin()
+                    + 0.5 * (2.0 * std::f32::consts::PI * 2000.0 * i as f32 / sr).sin()
+            })
+            .collect();
+        hp.process(&mut samples);
+        // 稳定后（前 400 样本为暂态），计算 50Hz 与 2000Hz 段能量
+        let stable = &samples[400..];
+        let energy = |freq: f32| -> f32 {
+            // 逐点乘参考正弦并积分（粗略频域能量）
+            let mut acc = 0.0f32;
+            for (k, s) in stable.iter().enumerate() {
+                acc += s * (2.0 * std::f32::consts::PI * freq * (k as f32 + 400.0) / sr).sin();
+            }
+            acc.abs()
+        };
+        let e50 = energy(50.0);
+        let e2000 = energy(2000.0);
+        assert!(e50 < e2000, "50Hz 应被衰减: e50={e50} e2000={e2000}");
+        // 输入混合信号 50/2000 等幅，高通后高频占比应显著更高
+        assert!(e2000 > e50 * 2.0, "高频能量应显著高于低频: e50={e50} e2000={e2000}");
+    }
+
+    #[test]
+    fn noise_gate_silences_quiet_blocks() {
+        let mut p = Preprocessor::new(true, false, 100.0, 0.01);
+        let quiet: Vec<f32> = vec![0.001; 1600]; // RMS 0.001 < 0.01
+        let mut q = quiet.clone();
+        p.process(&mut q);
+        assert!(q.iter().all(|&s| s == 0.0), "低电平块应被静音");
+
+        let loud: Vec<f32> = vec![0.1; 1600]; // RMS 0.1 > 0.01
+        let mut l = loud.clone();
+        let mut p2 = Preprocessor::new(true, false, 100.0, 0.01);
+        p2.process(&mut l);
+        assert!(l.iter().any(|&s| s != 0.0), "高电平块应保留");
+    }
+
+    #[test]
+    fn preprocessor_disabled_passthrough() {
+        let mut p = Preprocessor::new(false, true, 100.0, 0.01);
+        let src: Vec<f32> = vec![0.5, -0.5, 0.25];
+        let mut out = src.clone();
+        p.process(&mut out);
+        assert_eq!(out, src, "关闭时不应改动");
     }
 }

@@ -27,6 +27,10 @@ export interface AppConfig {
     translator: { enabled: boolean; cooldown_seconds: number };
     brief_retriever: { enabled: boolean; cooldown_seconds: number };
   };
+  audio: {
+    vad: { preset: "standard" | "sensitive" | "strict"; threshold: number | null };
+    denoise: { enabled: boolean; gate_threshold: number; highpass: boolean };
+  };
   [key: string]: unknown;
 }
 

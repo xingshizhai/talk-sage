@@ -312,7 +312,9 @@ fn cmd_listen(
     let cfg = LivePipelineConfig {
         vad_model,
         chunk_ms: 100,
-        min_silence_seconds: 0.5,
+        vad: snapshot.audio.vad.clone(),
+        denoise: snapshot.audio.denoise.clone(),
+        asr_threads: 4,
         user: StreamConfig {
             engine_kind: kind,
             model_dir: engine_dir,
@@ -468,7 +470,9 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
     let cfg = LivePipelineConfig {
         vad_model,
         chunk_ms: 100,
-        min_silence_seconds: 0.5,
+        vad: talksage_config::VadConfig::default(),
+        denoise: talksage_config::DenoiseConfig::default(),
+        asr_threads: 4,
         user: StreamConfig {
             engine_kind: kind,
             model_dir: engine_dir,

@@ -114,6 +114,31 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
             c.asr.backend = b.to_string();
         }
     }
+    if let Some(audio) = updates.get("audio") {
+        if let Some(vad) = audio.get("vad") {
+            if let Some(p) = vad.get("preset").and_then(|v| v.as_str()) {
+                c.audio.vad.preset = match p {
+                    "sensitive" => talksage_config::VadPreset::Sensitive,
+                    "strict" => talksage_config::VadPreset::Strict,
+                    _ => talksage_config::VadPreset::Standard,
+                };
+            }
+            if let Some(t) = vad.get("threshold").and_then(|v| v.as_f64()) {
+                c.audio.vad.threshold = Some(t as f32);
+            }
+        }
+        if let Some(d) = audio.get("denoise") {
+            if let Some(e) = d.get("enabled").and_then(|v| v.as_bool()) {
+                c.audio.denoise.enabled = e;
+            }
+            if let Some(g) = d.get("gate_threshold").and_then(|v| v.as_f64()) {
+                c.audio.denoise.gate_threshold = g as f32;
+            }
+            if let Some(h) = d.get("highpass").and_then(|v| v.as_bool()) {
+                c.audio.denoise.highpass = h;
+            }
+        }
+    }
 }
 
 /// hello-world 事件：前端 ping → 后端推送领域事件。
@@ -154,10 +179,13 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
         return Err(format!("缺少用户 ASR 模型目录: {}", user_model.display()));
     }
 
+    let snapshot = state.config.snapshot();
     let cfg = LivePipelineConfig {
         vad_model,
         chunk_ms: 100,
-        min_silence_seconds: 0.5,
+        vad: snapshot.audio.vad.clone(),
+        denoise: snapshot.audio.denoise.clone(),
+        asr_threads: 4,
         user: StreamConfig {
             engine_kind: user_engine,
             model_dir: user_model,

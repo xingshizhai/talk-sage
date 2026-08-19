@@ -13,7 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
 use talksage_asr::{EngineKind, SherpaStreamingEngine, StreamingASREngine};
-use talksage_audio::AudioHub;
+use talksage_audio::{AudioHub, Preprocessor};
+use talksage_config::{DenoiseConfig, VadConfig};
 use talksage_core::{DomainEvent, StatusStage, TranscriptSegment};
 use talksage_plugins::AnalyzerPlugin;
 
@@ -53,8 +54,12 @@ pub struct LivePipelineConfig {
     pub vad_model: PathBuf,
     /// 音频分块毫秒。
     pub chunk_ms: u64,
-    /// VAD 静音结束一段的时长（秒）。
-    pub min_silence_seconds: f32,
+    /// VAD 参数（灵敏度预设 + 覆盖）。
+    pub vad: VadConfig,
+    /// 音频预处理（背景噪音处理）。
+    pub denoise: DenoiseConfig,
+    /// ASR 推理线程数。
+    pub asr_threads: usize,
     /// 用户流（中文）。
     pub user: StreamConfig,
     /// 客户流（英文，可选）。
@@ -109,16 +114,23 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 创建 silero VAD（pipeline 级统一模型路径）。
-fn create_vad(model: &PathBuf, min_silence_seconds: f32) -> anyhow::Result<VoiceActivityDetector> {
+/// 创建 silero VAD（参数化：灵敏度由配置决定）。
+fn create_vad(
+    model: &PathBuf,
+    threshold: f32,
+    min_speech: f32,
+    min_silence: f32,
+    window: i32,
+    max_speech: f32,
+) -> anyhow::Result<VoiceActivityDetector> {
     let vad_cfg = VadModelConfig {
         silero_vad: SileroVadModelConfig {
             model: Some(model.to_string_lossy().into()),
-            threshold: 0.5,
-            min_silence_duration: min_silence_seconds,
-            min_speech_duration: 0.25,
-            window_size: 512,
-            max_speech_duration: 10.0,
+            threshold,
+            min_silence_duration: min_silence,
+            min_speech_duration: min_speech,
+            window_size: window,
+            max_speech_duration: max_speech,
         },
         ten_vad: Default::default(),
         sample_rate: 16000,
@@ -142,6 +154,7 @@ enum InputKind {
 struct StreamWorker {
     vad: VoiceActivityDetector,
     engine: SherpaStreamingEngine,
+    preprocessor: Preprocessor,
     mic_device: Option<String>,
     input_kind: InputKind,
     hub: Option<AudioHub>,
@@ -160,9 +173,28 @@ struct StreamWorker {
 }
 
 impl StreamWorker {
-    fn new(cfg: &StreamConfig, vad_model: &PathBuf, chunk_ms: u64, min_silence_seconds: f32) -> anyhow::Result<Self> {
-        let vad = create_vad(vad_model, min_silence_seconds)?;
-        let engine = SherpaStreamingEngine::new(cfg.engine_kind, &cfg.model_dir, 2)?;
+    fn new(
+        cfg: &StreamConfig,
+        vad_cfg: &VadConfig,
+        denoise: &DenoiseConfig,
+        asr_threads: usize,
+        vad_model: &PathBuf,
+        chunk_ms: u64,
+    ) -> anyhow::Result<Self> {
+        let (threshold, min_speech, min_silence, window, max_speech) = vad_cfg.effective();
+        log::info!(
+            "流[{}] VAD 参数: preset={:?} threshold={threshold} min_speech={min_speech}s min_silence={min_silence}s window={window} max_speech={max_speech}s",
+            cfg.speaker_label,
+            vad_cfg.preset,
+        );
+        let vad = create_vad(vad_model, threshold, min_speech, min_silence, window, max_speech)?;
+        let engine = SherpaStreamingEngine::new(cfg.engine_kind, &cfg.model_dir, asr_threads.max(1) as i32)?;
+        let preprocessor = Preprocessor::new(
+            denoise.enabled,
+            denoise.highpass,
+            denoise.highpass_cutoff_hz,
+            denoise.gate_threshold,
+        );
 
         let mic_device = match &cfg.input {
             AudioInput::Mic(d) => d.clone(),
@@ -191,6 +223,7 @@ impl StreamWorker {
         Ok(Self {
             vad,
             engine,
+            preprocessor,
             mic_device,
             input_kind,
             hub: None,
@@ -262,13 +295,16 @@ impl StreamWorker {
             None
         };
 
-        let Some(chunk) = chunk else {
+        let Some(mut chunk) = chunk else {
             // 无数据（输入结束）：若语音未收尾，强制 flush 当前段
             if self.done && self.in_speech {
                 self.finish_speech(emit);
             }
             return Ok(false);
         };
+
+        // 背景噪音预处理（高通/噪声门），再进 VAD/ASR
+        self.preprocessor.process(&mut chunk);
 
         self.vad.accept_waveform(&chunk);
 
@@ -363,7 +399,7 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
     let mut workers: Vec<StreamWorker> = Vec::new();
     let build = |sc: &StreamConfig| -> anyhow::Result<StreamWorker> {
         let t0 = std::time::Instant::now();
-        let mut w = StreamWorker::new(sc, &cfg.vad_model, cfg.chunk_ms, cfg.min_silence_seconds)?;
+        let mut w = StreamWorker::new(sc, &cfg.vad, &cfg.denoise, cfg.asr_threads, &cfg.vad_model, cfg.chunk_ms)?;
         w.start_input(cfg.chunk_ms)?;
         log::info!(
             "流[{}] 就绪: engine={} model={} 加载耗时={:?}",

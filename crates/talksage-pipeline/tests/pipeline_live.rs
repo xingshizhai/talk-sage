@@ -75,7 +75,9 @@ fn zh_file_pipeline(root: &Path, wav: &Path) -> LivePipelineConfig {
     LivePipelineConfig {
         vad_model: vad_model(root),
         chunk_ms: 100,
-        min_silence_seconds: 0.5,
+        vad: talksage_config::VadConfig::default(),
+        denoise: talksage_config::DenoiseConfig::default(),
+        asr_threads: 2,
         user: StreamConfig {
             engine_kind: EngineKind::ParaformerZh,
             model_dir: zh_model_dir(root),
@@ -228,7 +230,9 @@ fn plugins_emit_term_and_translation_events() {
     let cfg = LivePipelineConfig {
         vad_model: vad_model(&root),
         chunk_ms: 100,
-        min_silence_seconds: 0.5,
+        vad: talksage_config::VadConfig::default(),
+        denoise: talksage_config::DenoiseConfig::default(),
+        asr_threads: 2,
         user: StreamConfig {
             engine_kind: EngineKind::ZipformerEn,
             model_dir: en_model,
