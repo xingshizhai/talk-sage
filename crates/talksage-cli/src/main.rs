@@ -13,9 +13,10 @@ use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConf
 
 #[derive(Parser)]
 #[command(
-    name = "talksage",
+    name = "拓思者",
+    bin_name = "talksage",
     version = talksage_core::VERSION,
-    about = "TalkSage v2 — 实时个人 AI 会议助理",
+    about = "拓思者（TalkSage）— AI 会议助理：实时转写 · 说话人识别 · 纪要分析",
     subcommand_required = true,
     arg_required_else_help = true
 )]
@@ -124,7 +125,7 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Version => {
-            println!("talksage {}", talksage_core::VERSION);
+            println!("拓思者（TalkSage）{}", talksage_core::VERSION);
             ExitCode::SUCCESS
         }
         Command::Web => cmd_web(),
@@ -153,7 +154,7 @@ fn main() -> ExitCode {
 
 fn cmd_web() -> ExitCode {
     println!(
-        "talk-sage {} — 桌面模式\n\
+        "拓思者（TalkSage）{} — 桌面模式\n\
          \n\
          开发期请使用: pnpm --dir web tauri dev\n\
          构建后: 直接运行桌面应用安装包。",
@@ -891,7 +892,7 @@ fn cmd_record_mic(path: &std::path::Path, seconds: u64) -> ExitCode {
 }
 
 fn cmd_doctor() -> ExitCode {
-    println!("== TalkSage doctor ==");
+    println!("== 拓思者（TalkSage）doctor ==");
     println!("version      : {}", talksage_core::VERSION);
 
     let data_dir = talksage_config::default_data_dir();

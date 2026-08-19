@@ -53,7 +53,8 @@ export default function SideNav({
       {/* 品牌 */}
       <div style={{ padding: "14px 14px 8px", display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ width: 9, height: 9, borderRadius: 3, background: "var(--live)" }} />
-        <b style={{ fontSize: 14 }}>TalkSage</b>
+        <b style={{ fontSize: 14 }}>拓思者</b>
+        <span style={{ fontSize: 9, color: "var(--muted)", fontFamily: "monospace" }}>TalkSage</span>
         <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>
           {theme === "dark" ? "深色" : "浅色"}
         </span>

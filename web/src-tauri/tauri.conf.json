@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "TalkSage",
+  "productName": "拓思者",
   "version": "0.1.0",
   "identifier": "ai.talksage.app",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "TalkSage",
+        "title": "拓思者 · AI 会议助理",
         "width": 1100,
         "height": 760,
         "minWidth": 800,
