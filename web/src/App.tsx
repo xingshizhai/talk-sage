@@ -304,21 +304,23 @@ export default function App() {
         )}
       </div>
 
-      {/* 右栏（可折叠，折叠偏好持久化） */}
-      <AsidePanel
-        collapsed={asideCollapsed}
-        onToggleCollapsed={() =>
-          setAsideCollapsed((c) => {
-            const next = !c;
-            saveAsideCollapsed(next);
-            return next;
-          })
-        }
-        terms={terms}
-        briefs={briefs}
-        expandedTerms={expandedTerms}
-        onToggleTerm={(id) => setExpandedTerms((prev) => ({ ...prev, [id]: !prev[id] }))}
-      />
+      {/* 右栏：术语/简报属于实时转写上下文，仅转写页显示（历史/设置页右侧为设置内容） */}
+      {navPage === "transcript" && (
+        <AsidePanel
+          collapsed={asideCollapsed}
+          onToggleCollapsed={() =>
+            setAsideCollapsed((c) => {
+              const next = !c;
+              saveAsideCollapsed(next);
+              return next;
+            })
+          }
+          terms={terms}
+          briefs={briefs}
+          expandedTerms={expandedTerms}
+          onToggleTerm={(id) => setExpandedTerms((prev) => ({ ...prev, [id]: !prev[id] }))}
+        />
+      )}
 
       {showDebug && <DebugWindow events={rawEvents} readLogs={api.readLogs} onClose={() => setShowDebug(false)} />}
     </div>
