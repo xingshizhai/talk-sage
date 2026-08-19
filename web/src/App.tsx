@@ -4,6 +4,7 @@ import type { AppConfig, DomainEvent, NotesTemplate, SegmentHit, SessionDetail, 
 import { TranscriptAccumulator } from "./lib/transcript";
 import { KeyPointAggregator, type KeyPoint } from "./lib/highlights";
 import { cssVars, type Theme } from "./lib/theme";
+import { loadTheme, saveTheme, loadTranscriptMode, saveTranscriptMode } from "./lib/prefs";
 import SideNav, { type HealthRow, type NavItem } from "./components/SideNav";
 import TranscriptCard, { type TimelineLine, type TranscriptMode } from "./components/TranscriptCard";
 import KeyPointsCard from "./components/KeyPointsCard";
@@ -28,13 +29,14 @@ const SPEAKER_STYLE: Record<string, { color: string; engine: string }> = {
 };
 
 export default function App() {
-  const [theme, setTheme] = useState<Theme>("dark");
+  // 主题 / 转写模式从持久化偏好恢复
+  const [theme, setTheme] = useState<Theme>(() => loadTheme());
   const [version, setVersion] = useState<string>("—");
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [listening, setListening] = useState(false);
   const [status, setStatus] = useState<string>("待机");
   const [navPage, setNavPage] = useState<string>("transcript");
-  const [mode, setMode] = useState<TranscriptMode>("timeline");
+  const [mode, setMode] = useState<TranscriptMode>(() => loadTranscriptMode());
   const [lines, setLines] = useState<TimelineLine[]>([]);
   const [points, setPoints] = useState<readonly KeyPoint[]>([]);
   const [terms, setTerms] = useState<TermItem[]>([]);
@@ -213,7 +215,13 @@ export default function App() {
     <div style={pageStyle}>
       <SideNav
         theme={theme}
-        onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+        onToggleTheme={() =>
+          setTheme((t) => {
+            const next = t === "dark" ? "light" : "dark";
+            saveTheme(next);
+            return next;
+          })
+        }
         navItems={navItems}
         healthRows={healthRows}
         listening={listening}
@@ -246,7 +254,15 @@ export default function App() {
 
         {navPage === "transcript" && (
           <>
-            <TranscriptCard mode={mode} setMode={setMode} meta={`${lines.length} 段 · ${mode === "timeline" ? "时间线" : mode === "focus" ? "专注" : "密集"}`} lines={lines} />
+            <TranscriptCard
+              mode={mode}
+              setMode={(m) => {
+                setMode(m);
+                saveTranscriptMode(m);
+              }}
+              meta={`${lines.length} 段 · ${mode === "timeline" ? "时间线" : mode === "focus" ? "专注" : "密集"}`}
+              lines={lines}
+            />
             <KeyPointsCard points={points} />
           </>
         )}
