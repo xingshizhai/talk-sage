@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+      # 不下载运行期模型：真实模型集成测试在 models/ 缺失时自动跳过
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: web
+        run: npm ci
+
+      - name: Frontend build (tsc + vite)
+        working-directory: web
+        run: npm run build
+
+      - name: Frontend tests (vitest)
+        working-directory: web
+        run: npx vitest run
+
+      - name: Rust build (workspace)
+        run: cargo build --workspace
+
+      - name: Rust tests (unit + real-model, auto-skip without models/)
+        run: cargo test --workspace
+
+      - name: CLI smoke test
+        run: cargo run -p talksage-cli -- version
