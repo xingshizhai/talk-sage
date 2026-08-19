@@ -84,7 +84,7 @@ pub struct LivePipelineConfig {
     pub plugin_ctx: talksage_plugins::PluginContext,
     /// 录音目录（Some 时监听期间把每条流的原始音频保存为 `{ts}_{speaker_label}.wav`）。
     pub recording_dir: Option<PathBuf>,
-    /// 运行时噪音电平（f32 bits，0 = 不启用）：监听中可实时调节。
+    /// 运行时噪音电平阈值（f32 bits，0 = 不启用）：监听中可实时调节。
     /// 块 RMS 低于该值的音频在进入 VAD/ASR 前被静音（抑制背景噪音）。
     pub noise_level: Arc<AtomicU32>,
     /// 说话人识别（可选；None = 无声纹/模型，保持流默认标签）。
@@ -96,7 +96,7 @@ pub struct LivePipeline {
     cfg: Arc<LivePipelineConfig>,
     tx_stop: Option<mpsc::Sender<()>>,
     handle: Option<std::thread::JoinHandle<()>>,
-    /// 运行时噪音电平（f32 bits；与 cfg 共享，`set_noise_level` 实时更新）。
+    /// 运行时噪音电平阈值（f32 bits；与 cfg 共享，`set_noise_level` 实时更新）。
     noise_level: Arc<AtomicU32>,
 }
 
@@ -111,15 +111,15 @@ impl LivePipeline {
         }
     }
 
-    /// 实时调节噪音电平（0 = 关闭；0..0.1 常用范围）。
+    /// 实时调节噪音电平阈值（0 = 关闭；0..0.1 常用范围）。
     /// 无需停止监听，下一音频块即生效。
     pub fn set_noise_level(&self, level: f32) {
         let level = level.clamp(0.0, 0.5);
         self.noise_level.store(level.to_bits(), Ordering::Relaxed);
-        log::info!("运行时噪音电平已更新: {level:.4}");
+        log::info!("运行时噪音电平阈值已更新: {level:.4}");
     }
 
-    /// 当前噪音电平。
+    /// 当前噪音电平阈值。
     pub fn noise_level(&self) -> f32 {
         f32::from_bits(self.noise_level.load(Ordering::Relaxed))
     }
@@ -264,7 +264,7 @@ struct StreamWorker {
     non_speech_rms_sum: f64,
     /// 非语音块数。
     non_speech_blocks: u64,
-    /// 运行时噪音电平（f32 bits；0 = 不启用）。
+    /// 运行时噪音电平阈值（f32 bits；0 = 不启用）。
     noise_level: Arc<AtomicU32>,
     /// 说话人识别器（共享；None = 未启用）。
     speaker: Option<speaker::SharedSpeaker>,
@@ -459,10 +459,10 @@ impl StreamWorker {
             let _ = rec.write(&chunk);
         }
 
-        // 运行时噪音电平（监听中可调，无需重启）：块能量低于门槛 → 静音（抑制背景噪音）
+        // 运行时噪音电平阈值（监听中可调，无需重启）：块能量低于门槛 → 静音（抑制背景噪音）
         let nl = f32::from_bits(self.noise_level.load(Ordering::Relaxed));
         if nl > 0.0 && block_rms < nl {
-            log::debug!("噪音电平={nl:.5} 静音块 RMS={block_rms:.5}");
+            log::debug!("噪音电平阈值={nl:.5} 静音块 RMS={block_rms:.5}");
             chunk.fill(0.0);
         }
 

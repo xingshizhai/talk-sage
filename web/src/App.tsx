@@ -151,7 +151,7 @@ export default function App() {
     }
   }, []);
 
-  // 噪音电平：监听中防抖同步到后端（0..100 → 0..0.1 RMS 门限），无需停止监听
+  // 噪音电平阈值：监听中防抖同步到后端（0..100 → 0..0.1 RMS 门限），无需停止监听
   useEffect(() => {
     if (!listening) return;
     const t = setTimeout(() => {
@@ -159,12 +159,12 @@ export default function App() {
       prevNoiseRef.current = noiseLevel;
       api
         .setNoiseLevel((noiseLevel / 100) * 0.1)
-        .catch((e) => console.error("设置噪音电平失败:", e));
+        .catch((e) => console.error("设置噪音电平阈值失败:", e));
     }, 150);
     return () => clearTimeout(t);
   }, [noiseLevel, listening]);
 
-  // 停止监听后重置噪音电平（新会话默认关闭）
+  // 停止监听后重置噪音电平阈值（新会话默认关闭）
   useEffect(() => {
     if (!listening) {
       setNoiseLevel(0);

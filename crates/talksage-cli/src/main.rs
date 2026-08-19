@@ -65,7 +65,7 @@ enum Command {
         /// 不保存录音（默认按配置 recording.enabled 决定）
         #[arg(long)]
         no_record: bool,
-        /// 运行时噪音电平（0 = 关闭；0.005~0.05 常用），监听中可实时调节
+        /// 运行时噪音电平阈值（0 = 关闭；0.005~0.05 常用），监听中可实时调节
         #[arg(long, default_value_t = 0.0)]
         noise_level: f32,
     },

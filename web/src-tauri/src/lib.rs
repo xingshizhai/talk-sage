@@ -419,7 +419,7 @@ fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// 实时调节噪音电平（0 = 关闭；无需停止监听，下一音频块即生效）。
+/// 实时调节噪音电平阈值（0 = 关闭；无需停止监听，下一音频块即生效）。
 #[tauri::command]
 fn set_noise_level(level: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let guard = state.pipeline.lock().map_err(|_| "pipeline 锁失败".to_string())?;

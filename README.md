@@ -101,7 +101,7 @@ talksage serve --host 127.0.0.1 --port 8080
 |---|---|
 | Start listening | Left panel ▶ 开始监听 (jumps to live transcript) |
 | Register your voice | Settings → 声音标识 → 录制我的声音 (6 s) |
-| Tune mic level / noise gate | Left panel while listening: 麦克风电平 meter + 噪音电平 slider (live, no restart) |
+| Tune mic level / noise gate | Left panel while listening: 麦克风电平 meter + noise-gate threshold slider (live, no restart) |
 | Trim silence from a recording | `talksage trim rec.wav [-o out.wav] [--preset sensitive\|standard\|strict]` |
 | Record raw audio only | `talksage record --seconds 60 [--input loopback]` |
 | Import audio offline | `talksage import audio.wav` |

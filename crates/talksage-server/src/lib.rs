@@ -427,7 +427,7 @@ async fn stop_listen_api(State(state): State<ServerState>, headers: axum::http::
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
-/// 实时调节噪音电平（headless 版）。
+/// 实时调节噪音电平阈值（headless 版）。
 async fn set_noise_level_api(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,

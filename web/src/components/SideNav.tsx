@@ -112,7 +112,7 @@ export default function SideNav({
         ))}
       </div>
 
-      {/* 音频控制（麦克风电平 + 噪音电平，监听中实时可用） */}
+      {/* 音频控制（麦克风电平 + 噪音电平阈值，监听中实时可用） */}
       {listening && (
         <div style={{ margin: "0 10px 10px", padding: "10px 11px", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
           <div style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 700, marginBottom: 7 }}>音频控制</div>
@@ -149,10 +149,10 @@ export default function SideNav({
           {/* 分隔线 */}
           <div style={{ borderTop: "1px solid var(--border)", margin: "2px 0 9px" }} />
 
-          {/* 噪音电平 */}
+          {/* 噪音电平阈值 */}
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-              <span style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 700 }}>噪音电平</span>
+              <span style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 700 }}>噪音电平阈值</span>
               <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--live)", fontFamily: "monospace", fontWeight: 600 }}>
                 {noiseLevel}%
               </span>
@@ -164,7 +164,7 @@ export default function SideNav({
               step={1}
               value={noiseLevel}
               onChange={(e) => onNoiseLevel(Number(e.target.value))}
-              title="实时调节噪音电平：调高抑制背景噪音（轻声也可能被压），调低更灵敏"
+              title="实时调节噪音电平阈值：调高抑制背景噪音（轻声也可能被压），调低更灵敏"
               style={{ width: "100%", accentColor: "var(--live)", cursor: "pointer" }}
             />
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", fontFamily: "monospace", marginTop: 2 }}>

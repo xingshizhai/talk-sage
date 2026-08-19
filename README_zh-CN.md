@@ -29,7 +29,7 @@
 - **会议纪要**：内置模板 + 任意 OpenAI 兼容 LLM（DeepSeek / Kimi / Ollama / Claude…）
 - **录音与测试闭环**：每次监听按流保存原始 wav；`talksage trim` 用同一套 VAD 去掉静音；`scripts/recording_loop.ps1` 一键裁剪 + 回放验证
 - **会话质量评估**：自动判定会话为 正常/噪音/静音/待复核（阈值可配置 + 自动检测背景噪音校准）；噪音会话自动跳过要点聚合等下游分析
-- **运行时噪音控制**：监听中从左侧面板实时调节噪音电平（麦克风电平表 + 滑块），无需停止或重启
+- **运行时噪音控制**：监听中从左侧面板实时调节噪音电平阈值（麦克风电平表 + 滑块），无需停止或重启
 - **历史会话**：SQLite 存档，全文搜索、逐段时长/能量统计、质量徽章
 - **双载体**：Tauri 2 桌面应用（IPC）与 headless HTTP/WS 服务（浏览器访问，Token 鉴权）
 
@@ -101,7 +101,7 @@ talksage serve --host 127.0.0.1 --port 8080
 |---|---|
 | 开始监听 | 左侧 ▶ 开始监听（自动跳转实时转写页） |
 | 注册你的声音 | 设置 → 声音标识 → 录制我的声音（6 秒） |
-| 麦克风电平 / 噪音调节 | 监听中左侧面板：麦克风电平表 + 噪音电平滑块（实时生效，无需重启） |
+| 麦克风电平 / 噪音调节 | 监听中左侧面板：麦克风电平表 + 噪音电平阈值滑块（实时生效，无需重启） |
 | 录音去静音 | `talksage trim rec.wav [-o out.wav] [--preset sensitive\|standard\|strict]` |
 | 纯录音 | `talksage record --seconds 60 [--input loopback]` |
 | 离线导入 | `talksage import audio.wav` |
@@ -135,7 +135,7 @@ AudioHub（cpal / WASAPI 回环）→ Preprocessor（降噪/高通/噪声门）
 | `talksage-core` | 领域事件、会话质量、文本噪音评分 |
 | `talksage-audio` | 麦克风/回环采集、重采样、降噪、wav 读写、静音裁剪 |
 | `talksage-asr` | sherpa-onnx 流式引擎封装 |
-| `talksage-pipeline` | VAD 分段、双流、录音、运行时噪音电平、说话人识别 |
+| `talksage-pipeline` | VAD 分段、双流、录音、运行时噪音电平阈值、说话人识别 |
 | `talksage-plugins` | 术语解释 / 翻译 / 简报检索 |
 | `talksage-session` | SQLite 存储 + 质量评估 |
 | `talksage-notes` | 纪要模板 + 生成器 |
