@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn triggers_and_emits_skeleton() {
-        let mut p = TermExplainerPlugin::new(0.0);
+        let p = TermExplainerPlugin::new(0.0);
         assert!(p.should_trigger(&seg(1, "We need NPI samples")));
         let skel = p.skeleton(&seg(1, "We need NPI samples")).expect("应有骨架");
         match skel {

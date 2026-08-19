@@ -1,7 +1,5 @@
 //! logging 集成测试：验证日志文件写出（JSON lines）与级别控制。
 
-use std::path::PathBuf;
-
 #[test]
 fn init_writes_json_lines_to_log_file() {
     // 用 workspace target 下临时日志目录（避免系统 temp 权限问题）

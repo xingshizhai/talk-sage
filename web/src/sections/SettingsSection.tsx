@@ -73,12 +73,10 @@ export default function SettingsSection({
   return (
     <div
       style={{
-        border: "1px solid rgba(255,255,255,0.08)",
+        border: "1px solid var(--border)",
         borderRadius: 8,
         padding: 10,
         fontSize: 12,
-        maxHeight: 420,
-        overflowY: "auto",
       }}
     >
       <h3 style={{ margin: "0 0 8px", fontSize: 13 }}>LLM</h3>
@@ -86,7 +84,7 @@ export default function SettingsSection({
         <select
           value={defaultProvider}
           onChange={(e) => setDefaultProvider(e.target.value)}
-          style={{ fontSize: 12, padding: "3px 6px", borderRadius: 4, background: "#0f172a", color: "#e2e8f0", border: "1px solid #334155" }}
+          style={{ fontSize: 12, padding: "3px 6px", borderRadius: 4, background: "var(--surface-2)", color: "var(--text)", border: "1px solid var(--border)" }}
         >
           {PROVIDERS.map((p) => (
             <option key={p} value={p}>
@@ -99,7 +97,7 @@ export default function SettingsSection({
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
           placeholder={`${defaultProvider} API Key（Ollama 可留空）`}
-          style={{ flex: 1, padding: "4px 8px", fontSize: 12, borderRadius: 4, border: "1px solid #334155", background: "#0f172a", color: "#e2e8f0" }}
+          style={{ flex: 1, padding: "4px 8px", fontSize: 12, borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)" }}
         />
       </div>
 
@@ -122,16 +120,16 @@ export default function SettingsSection({
         value={kbFolder}
         onChange={(e) => setKbFolder(e.target.value)}
         placeholder="简报 .md/.txt 文件夹路径"
-        style={{ width: "100%", padding: "4px 8px", fontSize: 12, borderRadius: 4, border: "1px solid #334155", background: "#0f172a", color: "#e2e8f0", boxSizing: "border-box" }}
+        style={{ width: "100%", padding: "4px 8px", fontSize: 12, borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)", boxSizing: "border-box" }}
       />
 
       <h3 style={{ margin: "10px 0 6px", fontSize: 13 }}>ASR</h3>
       <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-        <select value={clientEngine} onChange={(e) => setClientEngine(e.target.value)} style={{ fontSize: 12, padding: "3px 6px", borderRadius: 4, background: "#0f172a", color: "#e2e8f0", border: "1px solid #334155" }}>
+        <select value={clientEngine} onChange={(e) => setClientEngine(e.target.value)} style={{ fontSize: 12, padding: "3px 6px", borderRadius: 4, background: "var(--surface-2)", color: "var(--text)", border: "1px solid var(--border)" }}>
           <option value="zipformer-en">客户（英文）zipformer-en</option>
           <option value="paraformer-zh">客户（英文）paraformer-zh</option>
         </select>
-        <select value={userEngine} onChange={(e) => setUserEngine(e.target.value)} style={{ fontSize: 12, padding: "3px 6px", borderRadius: 4, background: "#0f172a", color: "#e2e8f0", border: "1px solid #334155" }}>
+        <select value={userEngine} onChange={(e) => setUserEngine(e.target.value)} style={{ fontSize: 12, padding: "3px 6px", borderRadius: 4, background: "var(--surface-2)", color: "var(--text)", border: "1px solid var(--border)" }}>
           <option value="paraformer-zh">我（中文）paraformer-zh</option>
           <option value="zipformer-en">我（中文）zipformer-en</option>
         </select>
@@ -141,7 +139,7 @@ export default function SettingsSection({
       <select
         value={vadPreset}
         onChange={(e) => setVadPreset(e.target.value)}
-        style={{ fontSize: 12, padding: "3px 6px", borderRadius: 4, background: "#0f172a", color: "#e2e8f0", border: "1px solid #334155", width: "100%", boxSizing: "border-box", marginBottom: 4 }}
+        style={{ fontSize: 12, padding: "3px 6px", borderRadius: 4, background: "var(--surface-2)", color: "var(--text)", border: "1px solid var(--border)", width: "100%", boxSizing: "border-box", marginBottom: 4 }}
       >
         <option value="standard">标准（平衡灵敏度与抗噪）</option>
         <option value="sensitive">灵敏（弱语音/快速问答，会议室轻声）</option>
@@ -159,7 +157,7 @@ export default function SettingsSection({
       <button onClick={handleSave} disabled={saving} style={{ fontSize: 12, marginTop: 4 }}>
         {saving ? "保存中…" : "保存设置"}
       </button>
-      {message && <div style={{ marginTop: 6, color: message.startsWith("失败") ? "#f87171" : "#34d399" }}>{message}</div>}
+      {message && <div style={{ marginTop: 6, color: message.startsWith("失败") ? "var(--danger)" : "var(--live)" }}>{message}</div>}
     </div>
   );
 }

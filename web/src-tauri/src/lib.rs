@@ -7,10 +7,11 @@
 //! 这是"可插拔传输适配器"之一；删除本 crate 即回到纯 headless（M4 预留 axum 适配器）。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, WindowEvent};
 use talksage_config::ConfigManager;
 use talksage_core::{DomainEvent, ResultStatus, StatusStage};
 use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConfig};
@@ -18,6 +19,8 @@ use talksage_asr::EngineKind;
 use talksage_llm::{LLMProvider, OpenAICompatProvider};
 use talksage_plugins::{brief_retriever::BriefRetrieverPlugin, term_explainer::TermExplainerPlugin, translator::TranslatorPlugin, PluginContext};
 use talksage_session::SessionStore;
+
+mod window_state;
 
 /// 应用状态（Tauri managed state）。
 pub struct AppState {
@@ -473,6 +476,42 @@ pub fn run() {
             if let Err(e) = std::fs::create_dir_all(&data_dir) {
                 eprintln!("创建数据目录失败 {}: {e}", data_dir.display());
             }
+            // 窗口偏好：恢复上次的位置/尺寸，并在拖动/缩放时持久化（节流 1s）。
+            let win_path = data_dir.join("window.json");
+            if let Some(window) = app.get_webview_window("main") {
+                if let Some(ws) = window_state::load(&win_path) {
+                    let _ = window.set_position(tauri::LogicalPosition::new(ws.x as f64, ws.y as f64));
+                    let _ = window.set_size(tauri::LogicalSize::new(ws.width as f64, ws.height as f64));
+                }
+                let win = window.clone();
+                static LAST_SAVE: AtomicU64 = AtomicU64::new(0);
+                window.on_window_event(move |event| {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    if now.saturating_sub(LAST_SAVE.load(Ordering::Relaxed)) < 1 {
+                        return; // 节流：每秒最多写一次
+                    }
+                    let (pos, size) = match event {
+                        WindowEvent::Resized(s) => (win.outer_position().ok(), Some(*s)),
+                        WindowEvent::Moved(p) => (Some(*p), win.outer_size().ok()),
+                        _ => (None, None),
+                    };
+                    if let (Some(p), Some(s)) = (pos, size) {
+                        let ws = window_state::WindowState {
+                            x: p.x,
+                            y: p.y,
+                            width: s.width,
+                            height: s.height,
+                        };
+                        if ws.is_valid() {
+                            let _ = window_state::save(&win_path, &ws);
+                            LAST_SAVE.store(now, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
             let _ = app.emit(
                 "talksage://event",
                 DomainEvent::Status {
@@ -480,7 +519,6 @@ pub fn run() {
                     message: "TalkSage 已启动".into(),
                 },
             );
-            let _ = app.get_webview_window("main");
             Ok(())
         })
         .run(tauri::generate_context!())

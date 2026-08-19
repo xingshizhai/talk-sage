@@ -35,11 +35,9 @@ export default function HistorySection({
   return (
     <div
       style={{
-        border: "1px solid rgba(255,255,255,0.08)",
+        border: "1px solid var(--border)",
         borderRadius: 8,
         padding: 8,
-        maxHeight: 420,
-        overflowY: "auto",
         fontSize: 12,
       }}
     >
@@ -54,9 +52,9 @@ export default function HistorySection({
             padding: "4px 8px",
             fontSize: 12,
             borderRadius: 4,
-            border: "1px solid #334155",
-            background: "#0f172a",
-            color: "#e2e8f0",
+            border: "1px solid var(--border)",
+            background: "var(--surface-2)",
+            color: "var(--text)",
           }}
         />
         <button onClick={() => onSearch(query)} style={{ fontSize: 12 }}>
@@ -75,7 +73,7 @@ export default function HistorySection({
               ← 返回
             </button>
           </div>
-          <div style={{ color: "#64748b" }}>
+          <div style={{ color: "var(--muted)" }}>
             {formatTime(detail.started_at)}（{detail.segments.length} 段）
           </div>
 
@@ -88,9 +86,9 @@ export default function HistorySection({
                 fontSize: 12,
                 padding: "3px 6px",
                 borderRadius: 4,
-                background: "#0f172a",
-                color: "#e2e8f0",
-                border: "1px solid #334155",
+                background: "var(--surface-2)",
+                color: "var(--text)",
+                border: "1px solid var(--border)",
               }}
             >
               {templates.map((t) => (
@@ -107,12 +105,12 @@ export default function HistorySection({
             <pre
               style={{
                 whiteSpace: "pre-wrap",
-                background: "rgba(255,255,255,0.04)",
+                background: "var(--surface-2)",
                 borderRadius: 6,
                 padding: 8,
                 fontSize: 11,
                 margin: "4px 0",
-                color: "#e2e8f0",
+                color: "var(--text)",
               }}
             >
               {detail.notes}
@@ -122,12 +120,12 @@ export default function HistorySection({
           <div style={{ marginTop: 6 }}>
             {detail.segments.map((s, i) => (
               <div key={i} style={{ marginBottom: 4, wordBreak: "break-word" }}>
-                <b style={{ color: s.speaker_id === 1 ? "#2dd4bf" : "#818cf8" }}>[{s.speaker_label}]</b> {s.text}
+                <b style={{ color: s.speaker_id === 1 ? "var(--client)" : "var(--me)" }}>[{s.speaker_label}]</b> {s.text}
               </div>
             ))}
           </div>
           {detail.terms.length > 0 && (
-            <div style={{ marginTop: 6, color: "#94a3b8" }}>
+            <div style={{ marginTop: 6, color: "var(--text-2)" }}>
               <b>术语：</b>
               {detail.terms.join("；")}
             </div>
@@ -135,21 +133,21 @@ export default function HistorySection({
         </div>
       ) : searchResults ? (
         <div>
-          {searchResults.length === 0 && <div style={{ color: "#64748b" }}>无匹配</div>}
+          {searchResults.length === 0 && <div style={{ color: "var(--muted)" }}>无匹配</div>}
           {searchResults.map((h, i) => (
             <div
               key={i}
               style={{ marginBottom: 4, wordBreak: "break-word", cursor: "pointer" }}
               onClick={() => onSelect(h.session_id)}
             >
-              <span style={{ color: "#64748b" }}>#{h.session_id}</span>{" "}
-              <b style={{ color: h.speaker_label === "客户" ? "#2dd4bf" : "#818cf8" }}>{h.speaker_label}</b> {h.text}
+              <span style={{ color: "var(--muted)" }}>#{h.session_id}</span>{" "}
+              <b style={{ color: h.speaker_label === "客户" ? "var(--client)" : "var(--me)" }}>{h.speaker_label}</b> {h.text}
             </div>
           ))}
         </div>
       ) : (
         <div>
-          {sessions.length === 0 && <div style={{ color: "#64748b" }}>暂无历史会话</div>}
+          {sessions.length === 0 && <div style={{ color: "var(--muted)" }}>暂无历史会话</div>}
           {sessions.map((s) => (
             <div
               key={s.id}
@@ -158,14 +156,14 @@ export default function HistorySection({
                 padding: "4px 6px",
                 borderRadius: 4,
                 cursor: "pointer",
-                background: "rgba(255,255,255,0.03)",
+                background: "var(--surface-2)",
               }}
               onClick={() => onSelect(s.id)}
             >
               <div>
                 #{s.id} · {formatTime(s.started_at)}
               </div>
-              <div style={{ color: "#64748b" }}>
+              <div style={{ color: "var(--muted)" }}>
                 {s.segment_count} 段 · {s.term_count} 术语
               </div>
             </div>

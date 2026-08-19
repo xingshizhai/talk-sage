@@ -4,7 +4,7 @@ import type { AppConfig, DomainEvent, NotesTemplate, SegmentHit, SessionDetail, 
 import { TranscriptAccumulator } from "./lib/transcript";
 import { KeyPointAggregator, type KeyPoint } from "./lib/highlights";
 import { cssVars, type Theme } from "./lib/theme";
-import { loadTheme, saveTheme, loadTranscriptMode, saveTranscriptMode } from "./lib/prefs";
+import { loadTheme, saveTheme, loadTranscriptMode, saveTranscriptMode, loadNavPage, saveNavPage, loadAsideCollapsed, saveAsideCollapsed } from "./lib/prefs";
 import SideNav, { type HealthRow, type NavItem } from "./components/SideNav";
 import TranscriptCard, { type TimelineLine, type TranscriptMode } from "./components/TranscriptCard";
 import KeyPointsCard from "./components/KeyPointsCard";
@@ -35,7 +35,8 @@ export default function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [listening, setListening] = useState(false);
   const [status, setStatus] = useState<string>("待机");
-  const [navPage, setNavPage] = useState<string>("transcript");
+  const [navPage, setNavPage] = useState<string>(() => loadNavPage());
+  const [asideCollapsed, setAsideCollapsed] = useState<boolean>(() => loadAsideCollapsed());
   const [mode, setMode] = useState<TranscriptMode>(() => loadTranscriptMode());
   const [lines, setLines] = useState<TimelineLine[]>([]);
   const [points, setPoints] = useState<readonly KeyPoint[]>([]);
@@ -56,6 +57,8 @@ export default function App() {
   useEffect(() => {
     api.getVersion().then(setVersion).catch(console.error);
     api.getConfig().then(setConfig).catch(console.error);
+    // 启动时若恢复的是历史页，先刷新会话列表
+    if (navPage === "history") refreshHistory();
     const off = api.onEvent((ev: DomainEvent) => {
       if (ev.type === "status") {
         setStatus(ev.message);
@@ -196,6 +199,7 @@ export default function App() {
   const handleNavigate = useCallback(
     (key: string) => {
       setNavPage(key);
+      saveNavPage(key);
       if (key === "history") refreshHistory();
     },
     [refreshHistory],
@@ -230,8 +234,8 @@ export default function App() {
         onNavigate={handleNavigate}
       />
 
-      {/* 主区 */}
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", padding: 14, gap: 12, overflowY: "auto" }}>
+      {/* 主区：不滚动，滚动交给内部子区域（转写/要点/历史/设置各自 flex+overflow） */}
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", padding: 14, gap: 12, overflow: "hidden" }}>
         {/* 页头 */}
         <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
           <h1 style={{ fontSize: 18, margin: 0 }}>会议辅助</h1>
@@ -268,11 +272,11 @@ export default function App() {
         )}
 
         {navPage === "history" && (
-          <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
             <div style={{ padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
               <b style={{ fontSize: 13 }}>历史会话</b>
             </div>
-            <div style={{ padding: "var(--pad)" }}>
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--pad)" }}>
               <HistorySection
                 sessions={sessions}
                 searchResults={searchResults}
@@ -289,19 +293,27 @@ export default function App() {
         )}
 
         {navPage === "settings" && (
-          <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
             <div style={{ padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
               <b style={{ fontSize: 13 }}>设置</b>
             </div>
-            <div style={{ padding: "var(--pad)" }}>
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--pad)" }}>
               <SettingsSection config={config} onSave={api.saveConfig} />
             </div>
           </section>
         )}
       </div>
 
-      {/* 右栏 */}
+      {/* 右栏（可折叠，折叠偏好持久化） */}
       <AsidePanel
+        collapsed={asideCollapsed}
+        onToggleCollapsed={() =>
+          setAsideCollapsed((c) => {
+            const next = !c;
+            saveAsideCollapsed(next);
+            return next;
+          })
+        }
         terms={terms}
         briefs={briefs}
         expandedTerms={expandedTerms}

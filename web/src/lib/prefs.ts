@@ -6,6 +6,8 @@ import type { TranscriptMode } from "../components/TranscriptCard";
 
 const KEY_THEME = "talksage_theme";
 const KEY_MODE = "talksage_transcript_mode";
+const KEY_NAV = "talksage_nav_page";
+const KEY_ASIDE = "talksage_aside_collapsed";
 
 function read(key: string): string | null {
   try {
@@ -43,4 +45,25 @@ export function loadTranscriptMode(): TranscriptMode {
 /** 保存转写视图模式偏好。 */
 export function saveTranscriptMode(m: TranscriptMode): void {
   write(KEY_MODE, m);
+}
+
+/** 读取导航页偏好（默认实时转写）。 */
+export function loadNavPage(): string {
+  const v = read(KEY_NAV);
+  return v === "history" || v === "settings" ? v : "transcript";
+}
+
+/** 保存导航页偏好。 */
+export function saveNavPage(p: string): void {
+  write(KEY_NAV, p);
+}
+
+/** 读取右栏折叠偏好（默认展开）。 */
+export function loadAsideCollapsed(): boolean {
+  return read(KEY_ASIDE) === "1";
+}
+
+/** 保存右栏折叠偏好。 */
+export function saveAsideCollapsed(collapsed: boolean): void {
+  write(KEY_ASIDE, collapsed ? "1" : "0");
 }
