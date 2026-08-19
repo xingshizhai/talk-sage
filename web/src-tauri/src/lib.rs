@@ -500,12 +500,19 @@ pub fn run() {
             if let Err(e) = std::fs::create_dir_all(&data_dir) {
                 eprintln!("创建数据目录失败 {}: {e}", data_dir.display());
             }
-            // 窗口偏好：恢复上次的位置/尺寸，并在拖动/缩放时持久化（节流 1s）。
+            // 窗口偏好：恢复上次的位置/尺寸（物理像素），并在拖动/缩放时持久化（节流 1s）。
+            // 注意：保存/恢复均为物理单位，避免高 DPI 下逻辑→物理转换导致窗口巨大。
             let win_path = data_dir.join("window.json");
             if let Some(window) = app.get_webview_window("main") {
-                if let Some(ws) = window_state::load(&win_path) {
-                    let _ = window.set_position(tauri::LogicalPosition::new(ws.x as f64, ws.y as f64));
-                    let _ = window.set_size(tauri::LogicalSize::new(ws.width as f64, ws.height as f64));
+                if let Some(mut ws) = window_state::load(&win_path) {
+                    // 钳制到主显示器工作区（防止异常保存值/DPI 变化导致窗口超出屏幕）
+                    if let Ok(Some(m)) = app.primary_monitor() {
+                        let size = m.size();
+                        let pos = m.position();
+                        window_state::clamp_to_work_area(&mut ws, (size.width, size.height), (pos.x, pos.y));
+                    }
+                    let _ = window.set_position(tauri::PhysicalPosition::new(ws.x, ws.y));
+                    let _ = window.set_size(tauri::PhysicalSize::new(ws.width, ws.height));
                 }
                 let win = window.clone();
                 static LAST_SAVE: AtomicU64 = AtomicU64::new(0);
@@ -517,19 +524,29 @@ pub fn run() {
                     if now.saturating_sub(LAST_SAVE.load(Ordering::Relaxed)) < 1 {
                         return; // 节流：每秒最多写一次
                     }
+                    // 最大化/全屏状态不保存：保持上次的正常窗口尺寸
+                    if win.is_maximized().unwrap_or(false) || win.is_fullscreen().unwrap_or(false) {
+                        return;
+                    }
                     let (pos, size) = match event {
                         WindowEvent::Resized(s) => (win.outer_position().ok(), Some(*s)),
                         WindowEvent::Moved(p) => (Some(*p), win.outer_size().ok()),
                         _ => (None, None),
                     };
                     if let (Some(p), Some(s)) = (pos, size) {
-                        let ws = window_state::WindowState {
+                        let mut ws = window_state::WindowState {
                             x: p.x,
                             y: p.y,
                             width: s.width,
                             height: s.height,
                         };
                         if ws.is_valid() {
+                            // 钳制到当前显示器工作区（防止保存到屏幕外/超大的值）
+                            if let Ok(Some(m)) = win.current_monitor() {
+                                let msize = m.size();
+                                let mpos = m.position();
+                                window_state::clamp_to_work_area(&mut ws, (msize.width, msize.height), (mpos.x, mpos.y));
+                            }
                             let _ = window_state::save(&win_path, &ws);
                             LAST_SAVE.store(now, Ordering::Relaxed);
                         }
