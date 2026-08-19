@@ -84,6 +84,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/session/{id}", get(get_session_api))
         .route("/templates", get(list_templates_api))
         .route("/session/{id}/notes", axum::routing::post(generate_notes_api))
+        .route("/logs", get(read_logs_api))
         .route("/listen/start", axum::routing::post(start_listen_api))
         .route("/listen/stop", axum::routing::post(stop_listen_api))
         .route("/ws", get(ws_handler))
@@ -265,6 +266,36 @@ async fn list_templates_api(State(state): State<ServerState>, headers: axum::htt
 #[derive(Deserialize)]
 struct NotesBody {
     template_id: String,
+}
+
+/// 读取最近日志（调试窗口用）。
+async fn read_logs_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let dir = talksage_logging::log_dir(Some(&state.config.data_dir().to_path_buf()));
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return (StatusCode::OK, Json(serde_json::json!({ "logs": "" }))).into_response();
+    };
+    let mut files: Vec<_> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("talksage.log"))
+        .collect();
+    if files.is_empty() {
+        return (StatusCode::OK, Json(serde_json::json!({ "logs": "" }))).into_response();
+    }
+    files.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH));
+    let Some(latest) = files.last() else {
+        return (StatusCode::OK, Json(serde_json::json!({ "logs": "" }))).into_response();
+    };
+    match std::fs::read_to_string(latest.path()) {
+        Ok(content) => {
+            let tail: Vec<&str> = content.lines().rev().take(200).collect();
+            let joined = tail.iter().rev().copied().collect::<Vec<_>>().join("\n");
+            (StatusCode::OK, Json(serde_json::json!({ "logs": joined }))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
 }
 
 async fn generate_notes_api(

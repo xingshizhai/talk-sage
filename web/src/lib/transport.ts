@@ -78,6 +78,10 @@ export const ipcApi: AppApi = {
     return invoke("generate_notes", { sessionId, templateId });
   },
 
+  async readLogs(lines?: number): Promise<string> {
+    return invoke("read_logs", { lines });
+  },
+
   onEvent(handler: (ev: DomainEvent) => void): () => void {
     let unlisten: (() => void) | undefined;
     listen<DomainEvent>("talksage://event", (e) => handler(e.payload))
@@ -145,6 +149,11 @@ export const httpApi: AppApi = {
       body: JSON.stringify({ template_id: templateId }),
     });
     return r.notes;
+  },
+
+  async readLogs(_lines?: number): Promise<string> {
+    const r = await req<{ logs: string }>("/logs");
+    return r.logs;
   },
 
   onEvent(handler: (ev: DomainEvent) => void): () => void {

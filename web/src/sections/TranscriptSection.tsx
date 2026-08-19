@@ -1,4 +1,7 @@
 // 实时转写分区：纯展示组件（行聚合在 App 事件处理器中完成）。
+// 内容变化时自动滚动到底部（最新信息始终可见）。
+
+import { useEffect, useRef } from "react";
 
 export interface TranscriptLine {
   key: number;
@@ -13,17 +16,30 @@ const SPEAKER_STYLE: Record<string, { color: string; bg: string }> = {
 };
 
 export default function TranscriptSection({ lines }: { lines: TranscriptLine[] }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // 内容变化 → 滚动到底部（最新转写可见）
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [lines]);
+
   return (
     <div
+      ref={scrollRef}
       style={{
         border: "1px solid rgba(255,255,255,0.08)",
         borderRadius: 8,
         background: "rgba(255,255,255,0.02)",
         padding: 8,
-        maxHeight: 260,
+        height: "100%",
+        minHeight: 240,
         overflowY: "auto",
-        fontSize: 12,
-        lineHeight: 1.6,
+        fontSize: 13,
+        lineHeight: 1.7,
+        boxSizing: "border-box",
       }}
     >
       {lines.length === 0 && (
@@ -35,7 +51,7 @@ export default function TranscriptSection({ lines }: { lines: TranscriptLine[] }
           bg: "rgba(148,163,184,0.1)",
         };
         return (
-          <div key={l.key} style={{ marginBottom: 4, wordBreak: "break-word" }}>
+          <div key={l.key} style={{ marginBottom: 6, wordBreak: "break-word" }}>
             <span
               style={{
                 display: "inline-block",

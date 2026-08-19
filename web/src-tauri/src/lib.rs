@@ -274,6 +274,26 @@ fn get_session(session_id: i64, state: tauri::State<'_, AppState>) -> Result<tal
     state.sessions.get_session(session_id).map_err(|e| e.to_string())
 }
 
+/// 读取最近日志（调试窗口用）。
+#[tauri::command]
+fn read_logs(state: tauri::State<'_, AppState>, lines: Option<usize>) -> Result<String, String> {
+    let n = lines.unwrap_or(200);
+    let dir = talksage_logging::log_dir(Some(&state.config.data_dir().to_path_buf()));
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("读取日志目录失败: {e}"))?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("talksage.log"))
+        .collect();
+    if files.is_empty() {
+        return Ok("（暂无日志）".to_string());
+    }
+    files.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH));
+    let latest = files.last().ok_or("无日志文件")?;
+    let content = std::fs::read_to_string(latest.path()).map_err(|e| format!("读取日志失败: {e}"))?;
+    let tail: Vec<&str> = content.lines().rev().take(n).collect();
+    Ok(tail.iter().rev().copied().collect::<Vec<_>>().join("\n"))
+}
+
 /// 内置纪要模板列表。
 #[tauri::command]
 fn list_notes_templates() -> Vec<serde_json::Value> {
@@ -418,7 +438,8 @@ pub fn run() {
             search_sessions,
             get_session,
             list_notes_templates,
-            generate_notes
+            generate_notes,
+            read_logs
         ])
         .setup(move |app| {
             if let Err(e) = std::fs::create_dir_all(&data_dir) {

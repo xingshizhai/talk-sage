@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { getApi } from "./lib/transport";
 import type { AppConfig, DomainEvent } from "./lib/api";
 import { TranscriptAccumulator, type TranscriptLine } from "./lib/transcript";
@@ -8,9 +8,18 @@ import TranslationSection, { type TranslationItem } from "./sections/Translation
 import BriefSection, { type BriefItem } from "./sections/BriefSection";
 import HistorySection from "./sections/HistorySection";
 import SettingsSection from "./sections/SettingsSection";
+import DebugWindow from "./sections/DebugWindow";
 import type { NotesTemplate, SegmentHit, SessionDetail, SessionRecord } from "./lib/api";
 
 const api = getApi();
+
+const PANEL_STYLE: CSSProperties = {
+  border: "1px solid rgba(255,255,255,0.1)",
+  borderRadius: 10,
+  background: "rgba(255,255,255,0.02)",
+  padding: 10,
+  marginBottom: 12,
+};
 
 export default function App() {
   const [version, setVersion] = useState<string>("—");
@@ -21,16 +30,56 @@ export default function App() {
   const [terms, setTerms] = useState<TermItem[]>([]);
   const [translations, setTranslations] = useState<TranslationItem[]>([]);
   const [briefs, setBriefs] = useState<BriefItem[]>([]);
-  const [rawEvents, setRawEvents] = useState<string[]>([]);
-  const [pong, setPong] = useState<string>("");
+  const [rawEvents, setRawEvents] = useState<DomainEvent[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [searchResults, setSearchResults] = useState<SegmentHit[] | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [templates, setTemplates] = useState<NotesTemplate[]>([]);
   const [notesBusy, setNotesBusy] = useState(false);
   const accumulatorRef = useRef(new TranscriptAccumulator());
+
+  useEffect(() => {
+    api.getVersion().then(setVersion).catch(console.error);
+    api.getConfig().then(setConfig).catch(console.error);
+    const off = api.onEvent((ev: DomainEvent) => {
+      if (ev.type === "status") {
+        setStatus(ev.message);
+        if (ev.stage === "recording") setListening(true);
+        if (ev.stage === "idle" || ev.stage === "asr_ready") setListening(false);
+      }
+      if (ev.type === "segment") {
+        const acc = accumulatorRef.current;
+        acc.push(ev);
+        setLines([...acc.getLines()]);
+      }
+      if (ev.type === "term") {
+        setTerms((prev) => {
+          const idx = prev.findIndex((t) => t.resultId === ev.result_id);
+          if (idx >= 0) {
+            const next = [...prev];
+            next[idx] = { resultId: ev.result_id, content: ev.content, isFinal: ev.status === "final" };
+            return next;
+          }
+          return [...prev, { resultId: ev.result_id, content: ev.content, isFinal: ev.status === "final" }];
+        });
+      }
+      if (ev.type === "translation") {
+        setTranslations((prev) => [
+          ...prev,
+          { resultId: ev.result_id, direction: ev.direction, content: ev.content },
+        ]);
+      }
+      if (ev.type === "brief") {
+        setBriefs((prev) => [...prev, { source: ev.source, text: ev.text }]);
+      }
+      // 调试窗口：保留最近 200 条事件
+      setRawEvents((prev) => [...prev.slice(-199), ev]);
+    });
+    return off;
+  }, []);
 
   const refreshHistory = useCallback(async () => {
     try {
@@ -53,20 +102,23 @@ export default function App() {
     }
   }, []);
 
-  const handleHistorySelect = useCallback(async (id: number) => {
-    if (id < 0) {
-      setDetail(null);
-      return;
-    }
-    try {
-      setDetail(await api.getSession(id));
-      if (templates.length === 0) {
-        setTemplates(await api.listNotesTemplates());
+  const handleHistorySelect = useCallback(
+    async (id: number) => {
+      if (id < 0) {
+        setDetail(null);
+        return;
       }
-    } catch (e) {
-      console.error("会话详情失败:", e);
-    }
-  }, [templates.length]);
+      try {
+        setDetail(await api.getSession(id));
+        if (templates.length === 0) {
+          setTemplates(await api.listNotesTemplates());
+        }
+      } catch (e) {
+        console.error("会话详情失败:", e);
+      }
+    },
+    [templates.length],
+  );
 
   const handleGenerateNotes = useCallback(
     async (templateId: string) => {
@@ -85,51 +137,6 @@ export default function App() {
     [detail],
   );
 
-  useEffect(() => {
-    api.getVersion().then(setVersion).catch(console.error);
-    api.getConfig().then(setConfig).catch(console.error);
-    const off = api.onEvent((ev: DomainEvent) => {
-      // 状态事件
-      if (ev.type === "status") {
-        setStatus(ev.message);
-        if (ev.stage === "recording") setListening(true);
-        if (ev.stage === "idle" || ev.stage === "asr_ready") setListening(false);
-      }
-      // 转写事件 → 聚合行
-      if (ev.type === "segment") {
-        const acc = accumulatorRef.current;
-        acc.push(ev);
-        setLines([...acc.getLines()]);
-      }
-      // 术语：骨架插入，final 按 result_id 原地更新
-      if (ev.type === "term") {
-        setTerms((prev) => {
-          const idx = prev.findIndex((t) => t.resultId === ev.result_id);
-          if (idx >= 0) {
-            const next = [...prev];
-            next[idx] = { resultId: ev.result_id, content: ev.content, isFinal: ev.status === "final" };
-            return next;
-          }
-          return [...prev, { resultId: ev.result_id, content: ev.content, isFinal: ev.status === "final" }];
-        });
-      }
-      // 翻译
-      if (ev.type === "translation") {
-        setTranslations((prev) => [
-          ...prev,
-          { resultId: ev.result_id, direction: ev.direction, content: ev.content },
-        ]);
-      }
-      // 简报
-      if (ev.type === "brief") {
-        setBriefs((prev) => [...prev, { source: ev.source, text: ev.text }]);
-      }
-      // 调试事件流
-      setRawEvents((prev) => [...prev.slice(-19), `${ev.type}: ${JSON.stringify(ev).slice(0, 100)}`]);
-    });
-    return off;
-  }, []);
-
   const handleListen = useCallback(async () => {
     try {
       if (listening) {
@@ -139,108 +146,137 @@ export default function App() {
       } else {
         setStatus("启动中…");
         await api.startListen();
-        // 状态由事件流更新（asr_loading → asr_ready → recording）
       }
     } catch (e) {
       setStatus(`错误: ${e}`);
     }
   }, [listening]);
 
-  async function handlePing() {
-    try {
-      await api.ping();
-      setPong("已发送 ping（Rust 侧应推送事件）");
-    } catch (e) {
-      setPong(`ping 失败: ${e}`);
-    }
-  }
+  const handleToggleHistory = useCallback(() => {
+    setShowHistory((v) => !v);
+    if (!showHistory) refreshHistory();
+  }, [showHistory, refreshHistory]);
 
   return (
-    <main style={{ padding: 16, fontFamily: "system-ui, sans-serif", maxWidth: 460 }}>
-      <h1 style={{ fontSize: 18 }}>TalkSage v2 — M1</h1>
-      <p style={{ color: "#666" }}>
-        载体: <b>{api.transport}</b> · 版本: <b>{version}</b> · 状态: <b>{status}</b>
-      </p>
-
-      <section style={{ marginTop: 12, display: "flex", gap: 8 }}>
+    <div style={{ height: "100vh", display: "flex", flexDirection: "column", fontFamily: "system-ui, sans-serif", overflow: "hidden" }}>
+      {/* 顶栏 */}
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "10px 14px",
+          borderBottom: "1px solid rgba(255,255,255,0.1)",
+          background: "rgba(255,255,255,0.02)",
+        }}
+      >
+        <b style={{ fontSize: 15 }}>TalkSage</b>
+        <span style={{ fontSize: 11, color: "#64748b" }}>
+          v{version} · {api.transport}
+        </span>
+        <span
+          style={{
+            fontSize: 11,
+            padding: "2px 8px",
+            borderRadius: 10,
+            background: listening ? "rgba(52,211,153,0.15)" : "rgba(100,116,139,0.15)",
+            color: listening ? "#34d399" : "#94a3b8",
+          }}
+        >
+          {listening ? "● 监听中" : status}
+        </span>
+        <div style={{ flex: 1 }} />
         <button
           onClick={handleListen}
           style={{
-            flex: 1,
-            padding: "10px 0",
-            background: listening ? "#ef4444" : "#10b981",
-            color: "#fff",
-            border: "none",
+            padding: "7px 18px",
             borderRadius: 8,
+            border: "none",
             fontWeight: 600,
             cursor: "pointer",
+            background: listening ? "#ef4444" : "#10b981",
+            color: "#fff",
           }}
         >
           {listening ? "⏹ 停止监听" : "▶ 开始监听"}
         </button>
-        <button onClick={handlePing}>ping</button>
         <button
-          onClick={() => {
-            setShowHistory((v) => !v);
-            if (!showHistory) refreshHistory();
-          }}
+          onClick={handleToggleHistory}
+          style={{ padding: "7px 12px", borderRadius: 8, cursor: "pointer", background: showHistory ? "#2563eb" : "#1e293b", color: "#e2e8f0", border: "none" }}
         >
           历史
         </button>
-        <button onClick={() => setShowSettings((v) => !v)}>设置</button>
-        <span style={{ fontSize: 11, color: "#64748b", alignSelf: "center" }}>{pong}</span>
-      </section>
+        <button
+          onClick={() => setShowSettings((v) => !v)}
+          style={{ padding: "7px 12px", borderRadius: 8, cursor: "pointer", background: showSettings ? "#2563eb" : "#1e293b", color: "#e2e8f0", border: "none" }}
+        >
+          设置
+        </button>
+        <button
+          onClick={() => setShowDebug(true)}
+          style={{ padding: "7px 12px", borderRadius: 8, cursor: "pointer", background: "#1e293b", color: "#e2e8f0", border: "none" }}
+        >
+          调试
+        </button>
+      </header>
 
-      {showSettings && (
-        <section style={{ marginTop: 12 }}>
-          <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>设置</h2>
-          <SettingsSection config={config} onSave={api.saveConfig} />
-        </section>
+      {/* 主体：左右双栏 */}
+      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+        {/* 左栏：实时转写 + 实时翻译 */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: 12, minWidth: 0 }}>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, ...PANEL_STYLE, marginBottom: 10 }}>
+            <h2 style={{ fontSize: 13, margin: "0 0 8px", color: "#94a3b8" }}>实时转写</h2>
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <TranscriptSection lines={lines} />
+            </div>
+          </div>
+          <div style={{ ...PANEL_STYLE, marginBottom: 0 }}>
+            <h2 style={{ fontSize: 13, margin: "0 0 8px", color: "#94a3b8" }}>实时翻译</h2>
+            <TranslationSection items={translations} />
+          </div>
+        </div>
+
+        {/* 右栏：术语 / 简报 / 历史 / 设置 */}
+        <div style={{ width: 360, borderLeft: "1px solid rgba(255,255,255,0.1)", padding: 12, overflowY: "auto" }}>
+          <div style={{ ...PANEL_STYLE }}>
+            <h2 style={{ fontSize: 13, margin: "0 0 8px", color: "#94a3b8" }}>术语</h2>
+            <TermsSection items={terms} />
+          </div>
+          <div style={{ ...PANEL_STYLE }}>
+            <h2 style={{ fontSize: 13, margin: "0 0 8px", color: "#94a3b8" }}>简报</h2>
+            <BriefSection items={briefs} />
+          </div>
+
+          {showHistory && (
+            <div style={PANEL_STYLE}>
+              <h2 style={{ fontSize: 13, margin: "0 0 8px", color: "#94a3b8" }}>历史会话</h2>
+              <HistorySection
+                sessions={sessions}
+                searchResults={searchResults}
+                detail={detail}
+                templates={templates}
+                onSearch={handleHistorySearch}
+                onSelect={handleHistorySelect}
+                onRefresh={refreshHistory}
+                onGenerateNotes={handleGenerateNotes}
+                notesBusy={notesBusy}
+              />
+            </div>
+          )}
+
+          {showSettings && (
+            <div style={PANEL_STYLE}>
+              <h2 style={{ fontSize: 13, margin: "0 0 8px", color: "#94a3b8" }}>设置</h2>
+              <SettingsSection config={config} onSave={api.saveConfig} />
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 调试窗口（模态） */}
+      {showDebug && (
+        <DebugWindow events={rawEvents} readLogs={api.readLogs} onClose={() => setShowDebug(false)} />
       )}
-
-      {showHistory && (
-        <section style={{ marginTop: 12 }}>
-          <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>历史会话</h2>
-          <HistorySection
-            sessions={sessions}
-            searchResults={searchResults}
-            detail={detail}
-            templates={templates}
-            onSearch={handleHistorySearch}
-            onSelect={handleHistorySelect}
-            onRefresh={refreshHistory}
-            onGenerateNotes={handleGenerateNotes}
-            notesBusy={notesBusy}
-          />
-        </section>
-      )}
-
-      <section style={{ marginTop: 12 }}>
-        <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>实时转写</h2>
-        <TranscriptSection lines={lines} />
-      </section>
-
-      <section style={{ marginTop: 12 }}>
-        <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>术语</h2>
-        <TermsSection items={terms} />
-      </section>
-
-      <section style={{ marginTop: 12 }}>
-        <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>实时翻译</h2>
-        <TranslationSection items={translations} />
-      </section>
-
-      <section style={{ marginTop: 12 }}>
-        <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>简报</h2>
-        <BriefSection items={briefs} />
-      </section>
-
-      <section style={{ marginTop: 12 }}>
-        <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>事件流（调试）</h2>
-        <ul style={{ fontSize: 11, maxHeight: 140, overflow: "auto", paddingLeft: 20 }}>
-          {rawEvents.length === 0 ? <li style={{ color: "#999" }}>暂无事件</li> : rawEvents.map((e, i) => <li key={i}>{e}</li>)}
-        </ul>
-      </section>
-    </main>
+    </div>
   );
 }

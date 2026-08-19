@@ -97,6 +97,8 @@ export interface AppApi {
   listNotesTemplates(): Promise<NotesTemplate[]>;
   /** 纪要：按模板生成并保存。 */
   generateNotes(sessionId: number, templateId: string): Promise<string>;
+  /** 调试：读取最近日志（尾部 N 行）。 */
+  readLogs(lines?: number): Promise<string>;
   /** 订阅领域事件流，返回取消函数。 */
   onEvent(handler: (ev: DomainEvent) => void): () => void;
   /** 传输载体标识（调试用）。 */
