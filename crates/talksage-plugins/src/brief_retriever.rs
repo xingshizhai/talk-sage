@@ -94,6 +94,8 @@ mod tests {
             text: text.into(),
             is_partial: false,
             ts_ms: 0,
+            duration_ms: 500,
+            rms: 0.2,
         }
     }
 

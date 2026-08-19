@@ -9,4 +9,5 @@ license.workspace = true
 talksage-core = { path = "../talksage-core" }
 anyhow = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 rusqlite = { version = "0.31", features = ["bundled"] }

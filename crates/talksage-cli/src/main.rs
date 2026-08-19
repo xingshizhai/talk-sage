@@ -411,13 +411,21 @@ fn cmd_listen(
     }
     let sessions_for_sink = session_store.clone();
     let current_for_sink = current_session.clone();
+    // 会话统计收集（质量评估；save 模式落库）
+    let stats_for_sink: std::sync::Arc<std::sync::Mutex<Vec<talksage_session::StreamMeta>>> = Default::default();
+    let texts_for_sink: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let stats_sink = stats_for_sink.clone();
+    let texts_sink = texts_for_sink.clone();
 
     let sink: std::sync::Arc<dyn Fn(DomainEvent) + Send + Sync> = std::sync::Arc::new(move |ev: DomainEvent| {
         // 落库（可选）
         if let (Some(store), Ok(guard)) = (&sessions_for_sink, current_for_sink.lock()) {
             if let Some(sid) = *guard {
                 match &ev {
-                    DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, .. } => {
+                    DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, duration_ms, rms, .. } => {
+                        if let Ok(mut t) = texts_sink.lock() {
+                            t.push(text.clone());
+                        }
                         let _ = store.add_segment(
                             sid,
                             &talksage_core::TranscriptSegment {
@@ -426,6 +434,8 @@ fn cmd_listen(
                                 text: text.clone(),
                                 is_partial: false,
                                 ts_ms: *ts_ms,
+                                duration_ms: *duration_ms,
+                                rms: *rms,
                             },
                         );
                     }
@@ -437,6 +447,34 @@ fn cmd_listen(
                     }
                     _ => {}
                 }
+            }
+        }
+        // 统计收集
+        if let DomainEvent::SessionStats {
+            speaker_label,
+            total_ms,
+            speech_ms,
+            final_segments,
+            avg_rms,
+            max_rms,
+            recording,
+            vad_preset,
+            vad_threshold,
+            ..
+        } = &ev
+        {
+            if let Ok(mut sm) = stats_sink.lock() {
+                sm.push(talksage_session::StreamMeta {
+                    speaker_label: speaker_label.clone(),
+                    total_ms: *total_ms,
+                    speech_ms: *speech_ms,
+                    final_segments: *final_segments,
+                    avg_rms: *avg_rms,
+                    max_rms: *max_rms,
+                    recording: recording.clone(),
+                    vad_preset: vad_preset.clone(),
+                    vad_threshold: *vad_threshold,
+                });
             }
         }
         // 打印
@@ -455,6 +493,21 @@ fn cmd_listen(
                 } else {
                     println!("\n[{speaker_label}] {text}");
                 }
+            }
+            DomainEvent::SessionStats {
+                speaker_label,
+                total_ms,
+                speech_ms,
+                final_segments,
+                avg_rms,
+                max_rms,
+                recording,
+                ..
+            } => {
+                println!(
+                    "\n[stats] [{speaker_label}] total={total_ms}ms speech={speech_ms}ms({:.0}%) segs={final_segments} avg_rms={avg_rms:.4} max_rms={max_rms:.4} recording={recording:?}",
+                    if *total_ms > 0 { *speech_ms as f64 / *total_ms as f64 * 100.0 } else { 0.0 },
+                );
             }
             other => println!("[event] {other:?}"),
         }
@@ -475,7 +528,7 @@ fn cmd_listen(
         std::thread::sleep(std::time::Duration::from_secs(30));
     }
     pipeline.stop();
-    // 结束会话
+    // 结束会话 + 质量评估落库
     if let Some(store) = &session_store {
         if let Some(sid) = current_session.lock().unwrap().take() {
             let now = std::time::SystemTime::now()
@@ -483,6 +536,20 @@ fn cmd_listen(
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             let _ = store.end_session(sid, now);
+            let stats = stats_for_sink.lock().unwrap().clone();
+            let texts = texts_for_sink.lock().unwrap().clone();
+            if !stats.is_empty() {
+                let meta = talksage_session::SessionMeta::evaluate(stats, &texts, now);
+                let _ = store.set_session_meta(sid, &meta);
+                println!(
+                    "会话 #{sid} 质量: {}（时长 {}s，语音占比 {:.0}%，文本噪音 {:.2}，跳过下游分析={}）",
+                    meta.quality_label(),
+                    meta.duration_ms / 1000,
+                    meta.speech_ratio * 100.0,
+                    meta.text_noise,
+                    meta.skipped_analysis,
+                );
+            }
             println!("会话 #{sid} 已保存");
         }
     }
@@ -547,13 +614,15 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
     let done_for_sink = done.clone();
     let sink: std::sync::Arc<dyn Fn(DomainEvent) + Send + Sync> = std::sync::Arc::new(move |ev| {
         match &ev {
-            DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, .. } => {
+            DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, duration_ms, rms, .. } => {
                 segs_for_sink.lock().unwrap().push(talksage_core::TranscriptSegment {
                     speaker_id: *speaker_id,
                     speaker_label: speaker_label.clone(),
                     text: text.clone(),
                     is_partial: false,
                     ts_ms: *ts_ms,
+                    duration_ms: *duration_ms,
+                    rms: *rms,
                 });
             }
             DomainEvent::Status { stage: talksage_core::StatusStage::Idle, .. } => {

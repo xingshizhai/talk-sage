@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { KeyPointAggregator, extractKeyPoint } from "./highlights";
+import { KeyPointAggregator, extractKeyPoint, textNoiseScore } from "./highlights";
+
+describe("textNoiseScore", () => {
+  it("scores clean speech low", () => {
+    expect(textNoiseScore("我们需要在周五之前拿到 NPI 样品")).toBeLessThan(0.3);
+  });
+
+  it("scores repeated filler noise high", () => {
+    expect(textNoiseScore("嗯嗯嗯嗯对嗯嗯嗯")).toBeGreaterThan(0.45);
+    expect(textNoiseScore("嗯嗯嗯嗯嗯嗯嗯嗯")).toBeGreaterThan(0.7);
+    expect(textNoiseScore("那个个那个个那个个那个个")).toBeGreaterThan(0.45);
+  });
+});
 
 describe("extractKeyPoint", () => {
   it("classifies questions", () => {
@@ -27,10 +39,20 @@ describe("extractKeyPoint", () => {
     expect(extractKeyPoint("好的", 1000)).toBeNull();
   });
 
+  it("rejects noisy segments even if they match keywords", () => {
+    // 重复/语气词密集的噪音文本即使含"技术"也不应聚合
+    const noisy = extractKeyPoint("嗯嗯嗯对那个技术嗯嗯嗯", 1000);
+    expect(noisy).toBeNull();
+    const noisyAgg = new KeyPointAggregator();
+    noisyAgg.push("嗯嗯嗯要求嗯嗯嗯嗯", 1);
+    expect(noisyAgg.getItems()).toHaveLength(0);
+  });
+
   it("truncates long text", () => {
-    const long = "A".repeat(200);
+    const long = "我们需要确认交期并讨论技术方案的兼容性性能延迟并发部署迁移规范。".repeat(8);
     const kp = extractKeyPoint(long, 1);
-    expect(kp?.text.length).toBeLessThanOrEqual(121);
+    expect(kp).not.toBeNull();
+    expect(kp!.text.length).toBeLessThanOrEqual(121);
   });
 });
 

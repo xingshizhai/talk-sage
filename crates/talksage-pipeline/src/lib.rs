@@ -207,6 +207,23 @@ struct StreamWorker {
     recorder: Option<talksage_audio::wav::WavRecorder>,
     /// 录音输出路径（收尾时记录日志）。
     recording_path: Option<PathBuf>,
+    // ── 统计（质量评估 / 历史回溯） ──
+    /// 当前语音段开始时刻（now_ms）。
+    seg_start_ms: u64,
+    /// 当前语音段样本数。
+    seg_samples: u64,
+    /// 当前语音段能量平方和。
+    seg_rms_acc: f64,
+    /// 该流总样本数。
+    total_samples: u64,
+    /// 语音段样本数。
+    speech_samples: u64,
+    /// 能量平方和（avg_rms = sqrt(sum/total)）。
+    rms_sum: f64,
+    /// 峰值块 RMS。
+    max_rms: f32,
+    /// 最终段数量。
+    final_segments: usize,
 }
 
 impl StreamWorker {
@@ -288,6 +305,14 @@ impl StreamWorker {
             on_final: None,
             recorder,
             recording_path,
+            seg_start_ms: 0,
+            seg_samples: 0,
+            seg_rms_acc: 0.0,
+            total_samples: 0,
+            speech_samples: 0,
+            rms_sum: 0.0,
+            max_rms: 0.0,
+            final_segments: 0,
         })
     }
 
@@ -353,6 +378,20 @@ impl StreamWorker {
             return Ok(false);
         };
 
+        // 统计：原始块能量（预处理前，反映环境噪音真实水平）
+        {
+            let block_rms = if chunk.is_empty() {
+                0.0
+            } else {
+                (chunk.iter().map(|&x| x * x).sum::<f32>() / chunk.len() as f32).sqrt()
+            };
+            self.total_samples += chunk.len() as u64;
+            self.rms_sum += (block_rms as f64) * (block_rms as f64) * chunk.len() as f64;
+            if block_rms > self.max_rms {
+                self.max_rms = block_rms;
+            }
+        }
+
         // 录音：原始 PCM（预处理前），方便后续裁剪/降噪对比
         if let Some(rec) = &mut self.recorder {
             let _ = rec.write(&chunk);
@@ -367,9 +406,15 @@ impl StreamWorker {
             self.in_speech = true;
             self.last_partial.clear();
             self.engine.reset();
+            self.seg_start_ms = now_ms();
+            self.seg_samples = 0;
+            self.seg_rms_acc = 0.0;
         }
 
         if self.in_speech {
+            self.seg_samples += chunk.len() as u64;
+            self.speech_samples += chunk.len() as u64;
+            self.seg_rms_acc += chunk.iter().map(|&x| x * x).sum::<f32>() as f64;
             if let Some(text) = self.engine.accept(&chunk) {
                 let text = text.trim().to_string();
                 if !text.is_empty() && text != self.last_partial {
@@ -380,6 +425,8 @@ impl StreamWorker {
                         text,
                         is_partial: true,
                         ts_ms: now_ms(),
+                        duration_ms: 0,
+                        rms: 0.0,
                     });
                 }
             }
@@ -401,19 +448,43 @@ impl StreamWorker {
         self.engine.finish();
         let final_text = self.engine.accept(&[]).unwrap_or_default().trim().to_string();
         if !final_text.is_empty() {
+            // 段统计：时长（VAD 起点到当前）+ 段能量 RMS
+            let duration_ms = if self.seg_start_ms > 0 {
+                now_ms().saturating_sub(self.seg_start_ms)
+            } else {
+                self.seg_samples * 1000 / talksage_audio::TARGET_SAMPLE_RATE as u64
+            };
+            let rms = if self.seg_samples > 0 {
+                (self.seg_rms_acc / self.seg_samples as f64) as f32
+            } else {
+                0.0
+            };
+            log::info!(
+                "段完成[{}] 时长={}ms rms={:.4} 字数={} 文本={}",
+                self.speaker_label,
+                duration_ms,
+                rms,
+                final_text.chars().count(),
+                final_text.chars().take(60).collect::<String>(),
+            );
             let seg = TranscriptSegment {
                 speaker_id: self.speaker_id,
                 speaker_label: self.speaker_label.clone(),
                 text: final_text.clone(),
                 is_partial: false,
                 ts_ms: now_ms(),
+                duration_ms,
+                rms,
             };
+            self.final_segments += 1;
             emit(DomainEvent::Segment {
                 speaker_id: seg.speaker_id,
                 speaker_label: seg.speaker_label.clone(),
                 text: seg.text.clone(),
                 is_partial: false,
                 ts_ms: seg.ts_ms,
+                duration_ms: seg.duration_ms,
+                rms: seg.rms,
             });
             if let Some(hook) = &self.on_final {
                 hook(&seg);
@@ -421,6 +492,18 @@ impl StreamWorker {
         }
         self.last_partial.clear();
         self.engine.reset();
+    }
+
+    /// 流级统计（会话结束回溯用）。
+    fn session_stats(&self) -> (u64, u64, usize, u64, f32, f32) {
+        let total_ms = self.total_samples * 1000 / talksage_audio::TARGET_SAMPLE_RATE as u64;
+        let speech_ms = self.speech_samples * 1000 / talksage_audio::TARGET_SAMPLE_RATE as u64;
+        let avg_rms = if self.total_samples > 0 {
+            (self.rms_sum / self.total_samples as f64) as f32
+        } else {
+            0.0
+        };
+        (total_ms, speech_ms, self.final_segments, self.total_samples, avg_rms, self.max_rms)
     }
 
     fn stop(&mut self) {
@@ -557,6 +640,34 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
 
     for w in workers.iter_mut() {
         w.shutdown(&emit);
+    }
+    // 会话统计事件（每条流一条）：质量评估 / 历史回溯的基础数据
+    for w in &workers {
+        let (total_ms, speech_ms, final_segments, samples, avg_rms, max_rms) = w.session_stats();
+        let (vad_threshold, ..) = cfg.vad.effective();
+        fire(&emit, DomainEvent::SessionStats {
+            speaker_label: w.speaker_label.clone(),
+            total_ms,
+            speech_ms,
+            final_segments,
+            samples,
+            avg_rms,
+            max_rms,
+            recording: w.recording_path.as_ref().map(|p| p.display().to_string()),
+            vad_preset: format!("{:?}", cfg.vad.preset).to_lowercase(),
+            vad_threshold,
+        });
+        log::info!(
+            "会话统计[{}] total={}ms speech={}ms({:.0}%) segs={} avg_rms={:.4} max_rms={:.4} recording={:?}",
+            w.speaker_label,
+            total_ms,
+            speech_ms,
+            if total_ms > 0 { speech_ms as f64 / total_ms as f64 * 100.0 } else { 0.0 },
+            final_segments,
+            avg_rms,
+            max_rms,
+            w.recording_path,
+        );
     }
     fire(&emit, DomainEvent::Status {
         stage: StatusStage::Idle,

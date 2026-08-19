@@ -42,14 +42,36 @@ export interface AppConfig {
 
 /** 领域事件（与 Rust 侧 DomainEvent 对应，tag = type）。 */
 export type DomainEvent =
-  | { type: "segment"; speaker_id: number; speaker_label: string; text: string; is_partial: boolean; ts_ms: number }
+  | {
+      type: "segment";
+      speaker_id: number;
+      speaker_label: string;
+      text: string;
+      is_partial: boolean;
+      ts_ms: number;
+      duration_ms?: number;
+      rms?: number;
+    }
   | { type: "term"; result_id: string; status: "skeleton" | "final"; content: string }
   | { type: "translation"; result_id: string; status: "skeleton" | "final"; direction: "zh_en" | "en_zh"; content: string }
   | { type: "key_point"; result_id: string; status: "skeleton" | "final"; category: string; content: string }
   | { type: "brief"; source: string; text: string }
   | { type: "state"; topic: string; open_questions: string[]; recent_decisions: string[] }
   | { type: "status"; stage: string; message: string }
-  | { type: "level"; mic_rms: number; loopback_rms: number };
+  | { type: "level"; mic_rms: number; loopback_rms: number }
+  | {
+      type: "session_stats";
+      speaker_label: string;
+      total_ms: number;
+      speech_ms: number;
+      final_segments: number;
+      samples: number;
+      avg_rms: number;
+      max_rms: number;
+      recording: string | null;
+      vad_preset: string;
+      vad_threshold: number;
+    };
 
 /** 会话概要（历史列表）。 */
 export interface SessionRecord {
@@ -58,6 +80,38 @@ export interface SessionRecord {
   ended_at: number | null;
   segment_count: number;
   term_count: number;
+  /** 会话质量：clean / noise / silent / low（老数据为 undefined）。 */
+  quality?: string;
+  /** 会话时长（ms）。 */
+  duration_ms?: number;
+  /** 语音占比（0..1）。 */
+  speech_ratio?: number;
+}
+
+/** 会话元数据（统计 + 质量评估）。 */
+export interface StreamMeta {
+  speaker_label: string;
+  total_ms: number;
+  speech_ms: number;
+  final_segments: number;
+  avg_rms: number;
+  max_rms: number;
+  recording: string | null;
+  vad_preset: string;
+  vad_threshold: number;
+}
+
+export interface SessionMeta {
+  quality: string;
+  skipped_analysis: boolean;
+  duration_ms: number;
+  speech_ms: number;
+  speech_ratio: number;
+  avg_rms: number;
+  max_rms: number;
+  text_noise: number;
+  streams: StreamMeta[];
+  evaluated_at: number;
 }
 
 /** 搜索命中。 */
@@ -73,10 +127,11 @@ export interface SessionDetail {
   id: number;
   started_at: number;
   ended_at: number | null;
-  segments: { speaker_id: number; speaker_label: string; text: string; ts_ms: number }[];
+  segments: { speaker_id: number; speaker_label: string; text: string; ts_ms: number; duration_ms?: number; rms?: number }[];
   terms: string[];
   translations: string[];
   notes: string | null;
+  meta?: SessionMeta | null;
 }
 
 /** 纪要模板概要。 */

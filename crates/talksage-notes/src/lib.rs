@@ -312,8 +312,8 @@ mod tests {
         let mock = MockProvider { response: "# 会议纪要\n\n## 摘要\n讨论了 NPI 项目进度。\n\n## 关键决策\n- 确认方案 A".into() };
         let gen = NotesGenerator::new(Arc::new(mock));
         let segs = vec![
-            TranscriptSegment { speaker_id: 1, speaker_label: "客户".into(), text: "We need NPI samples by Friday.".into(), is_partial: false, ts_ms: 0 },
-            TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), text: "我们确认可以安排。".into(), is_partial: false, ts_ms: 1 },
+            TranscriptSegment { speaker_id: 1, speaker_label: "客户".into(), text: "We need NPI samples by Friday.".into(), is_partial: false, ts_ms: 0, duration_ms: 500, rms: 0.2 },
+            TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), text: "我们确认可以安排。".into(), is_partial: false, ts_ms: 1, duration_ms: 400, rms: 0.15 },
         ];
         let t = get_template("standard_meeting").unwrap();
         let notes = gen.generate(&segs, &["NPI = 新产品导入".into()], &[], &t).unwrap();

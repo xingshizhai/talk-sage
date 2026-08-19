@@ -365,7 +365,7 @@ async fn start_listen_api(State(state): State<ServerState>, headers: axum::http:
         if let Ok(guard) = current_session.lock() {
             if let Some(sid) = *guard {
                 match &ev {
-                    DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, .. } => {
+                    DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, duration_ms, rms, .. } => {
                         let _ = sessions.add_segment(
                             sid,
                             &talksage_core::TranscriptSegment {
@@ -374,6 +374,8 @@ async fn start_listen_api(State(state): State<ServerState>, headers: axum::http:
                                 text: text.clone(),
                                 is_partial: false,
                                 ts_ms: *ts_ms,
+                                duration_ms: *duration_ms,
+                                rms: *rms,
                             },
                         );
                     }

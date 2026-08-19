@@ -31,6 +31,10 @@ pub struct AppState {
     sessions: Arc<SessionStore>,
     /// 当前会话 id（监听期间有效）。
     current_session: Arc<Mutex<Option<i64>>>,
+    /// 当前会话的流统计（SessionStats 事件收集，stop 时评估质量落库）。
+    session_stats: Arc<Mutex<Vec<talksage_session::StreamMeta>>>,
+    /// 当前会话 final 段文本（质量评估用）。
+    session_texts: Arc<Mutex<Vec<String>>>,
 }
 
 /// 版本。
@@ -249,12 +253,20 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
     let mut pipeline = LivePipeline::new(cfg);
     let sessions = state.sessions.clone();
     let current_session = state.current_session.clone();
+    // 统计收集（会话质量评估）
+    *state.session_stats.lock().unwrap() = Vec::new();
+    *state.session_texts.lock().unwrap() = Vec::new();
+    let session_stats = state.session_stats.clone();
+    let session_texts = state.session_texts.clone();
     let sink: Arc<dyn Fn(DomainEvent) + Send + Sync> = Arc::new(move |ev: DomainEvent| {
         // 会话落库（监听期间）
         if let Ok(guard) = current_session.lock() {
             if let Some(sid) = *guard {
                 match &ev {
-                    DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, .. } => {
+                    DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, duration_ms, rms, .. } => {
+                        if let Ok(mut t) = session_texts.lock() {
+                            t.push(text.clone());
+                        }
                         let _ = sessions.add_segment(
                             sid,
                             &talksage_core::TranscriptSegment {
@@ -263,6 +275,8 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
                                 text: text.clone(),
                                 is_partial: false,
                                 ts_ms: *ts_ms,
+                                duration_ms: *duration_ms,
+                                rms: *rms,
                             },
                         );
                     }
@@ -274,6 +288,34 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
                     }
                     _ => {}
                 }
+            }
+        }
+        // 会话统计收集
+        if let DomainEvent::SessionStats {
+            speaker_label,
+            total_ms,
+            speech_ms,
+            final_segments,
+            samples: _,
+            avg_rms,
+            max_rms,
+            recording,
+            vad_preset,
+            vad_threshold,
+        } = &ev
+        {
+            if let Ok(mut sm) = session_stats.lock() {
+                sm.push(talksage_session::StreamMeta {
+                    speaker_label: speaker_label.clone(),
+                    total_ms: *total_ms,
+                    speech_ms: *speech_ms,
+                    final_segments: *final_segments,
+                    avg_rms: *avg_rms,
+                    max_rms: *max_rms,
+                    recording: recording.clone(),
+                    vad_preset: vad_preset.clone(),
+                    vad_threshold: *vad_threshold,
+                });
             }
         }
         let _ = app.emit("talksage://event", ev);
@@ -307,6 +349,23 @@ fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let _ = state.sessions.end_session(sid, now);
+        // 质量评估落库（stats + 段文本）
+        let stats = state.session_stats.lock().unwrap().clone();
+        let texts = state.session_texts.lock().unwrap().clone();
+        if !stats.is_empty() {
+            let meta = talksage_session::SessionMeta::evaluate(stats, &texts, now);
+            if let Err(e) = state.sessions.set_session_meta(sid, &meta) {
+                log::warn!("保存会话元数据失败: {e}");
+            }
+            log::info!(
+                "会话 #{sid} 质量评估: {}（时长 {}s，语音占比 {:.0}%，文本噪音 {:.2}，跳过下游分析={}）",
+                meta.quality_label(),
+                meta.duration_ms / 1000,
+                meta.speech_ratio * 100.0,
+                meta.text_noise,
+                meta.skipped_analysis,
+            );
+        }
     }
     Ok(())
 }
@@ -481,6 +540,8 @@ pub fn run() {
             pipeline: Mutex::new(None),
             sessions,
             current_session: Arc::new(Mutex::new(None)),
+            session_stats: Arc::new(Mutex::new(Vec::new())),
+            session_texts: Arc::new(Mutex::new(Vec::new())),
         })
         .invoke_handler(tauri::generate_handler![
             get_version,
