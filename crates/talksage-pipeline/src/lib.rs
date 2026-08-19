@@ -270,6 +270,8 @@ struct StreamWorker {
     speaker: Option<speaker::SharedSpeaker>,
     /// 当前语音段音频缓冲（说话人识别用，≤30s）。
     seg_audio: Vec<f32>,
+    /// 最近一块 RMS（f32 bits；Level 事件用）。
+    level: Arc<AtomicU32>,
 }
 
 impl StreamWorker {
@@ -283,6 +285,7 @@ impl StreamWorker {
         recording_path: Option<PathBuf>,
         noise_level: Arc<AtomicU32>,
         speaker: Option<speaker::SharedSpeaker>,
+        level: Arc<AtomicU32>,
     ) -> anyhow::Result<Self> {
         let (threshold, min_speech, min_silence, window, max_speech) = vad_cfg.effective();
         log::info!(
@@ -366,6 +369,7 @@ impl StreamWorker {
             noise_level,
             speaker,
             seg_audio: Vec::new(),
+            level,
         })
     }
 
@@ -442,6 +446,8 @@ impl StreamWorker {
         if block_rms > self.max_rms {
             self.max_rms = block_rms;
         }
+        // 电平指示（Level 事件用）
+        self.level.store(block_rms.to_bits(), Ordering::Relaxed);
         // 非语音块（VAD 判定前 in_speech=false）→ 背景噪音水平
         if !self.in_speech {
             self.non_speech_blocks += 1;
@@ -674,6 +680,9 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
         let dt = chrono_like_ts(now);
         dt
     };
+    // 电平指示（麦克风 / 回环），Level 事件节流推送
+    let mic_level: Arc<AtomicU32> = Arc::new(AtomicU32::new(0.0f32.to_bits()));
+    let loopback_level: Arc<AtomicU32> = Arc::new(AtomicU32::new(0.0f32.to_bits()));
     let build = |sc: &StreamConfig| -> anyhow::Result<StreamWorker> {
         let t0 = std::time::Instant::now();
         // 每条流一个录音文件：{ts}_{speaker_label}.wav
@@ -681,6 +690,7 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             let safe = sc.speaker_label.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
             dir.join(format!("{rec_ts}_{safe}.wav"))
         });
+        let level = if sc.speaker_id == 0 { mic_level.clone() } else { loopback_level.clone() };
         let mut w = StreamWorker::new(
             sc,
             &cfg.vad,
@@ -691,6 +701,7 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             rec_path,
             cfg.noise_level.clone(),
             shared_speaker.clone(),
+            level,
         )?;
         w.start_input(cfg.chunk_ms)?;
         log::info!(
@@ -741,10 +752,19 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
 
     // 事件循环：轮询各流（出错时先收尾再返回，保证录音完成）
     let mut tick_err: Option<anyhow::Error> = None;
+    let mut last_level_at = std::time::Instant::now();
     loop {
         match rx_stop.try_recv() {
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
             Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        // 电平指示：节流 100ms 推送（麦克风 / 回环 RMS）
+        if last_level_at.elapsed() >= Duration::from_millis(100) {
+            let mic = f32::from_bits(mic_level.load(Ordering::Relaxed));
+            let loopback = f32::from_bits(loopback_level.load(Ordering::Relaxed));
+            fire(&emit, DomainEvent::Level { mic_rms: mic, loopback_rms: loopback });
+            last_level_at = std::time::Instant::now();
         }
 
         let mut any_alive = false;

@@ -4,7 +4,7 @@ import type { AppConfig, DomainEvent, NotesTemplate, SegmentHit, SessionDetail, 
 import { TranscriptAccumulator } from "./lib/transcript";
 import { KeyPointAggregator, type KeyPoint } from "./lib/highlights";
 import { cssVars, type Theme } from "./lib/theme";
-import { loadTheme, saveTheme, loadTranscriptMode, saveTranscriptMode, loadNavPage, saveNavPage, loadAsideCollapsed, saveAsideCollapsed } from "./lib/prefs";
+import { loadTheme, saveTheme, loadTranscriptMode, saveTranscriptMode, loadAsideCollapsed, saveAsideCollapsed } from "./lib/prefs";
 import SideNav, { type HealthRow, type NavItem } from "./components/SideNav";
 import TranscriptCard, { type TimelineLine, type TranscriptMode } from "./components/TranscriptCard";
 import KeyPointsCard from "./components/KeyPointsCard";
@@ -48,7 +48,9 @@ export default function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [listening, setListening] = useState(false);
   const [status, setStatus] = useState<string>("待机");
-  const [navPage, setNavPage] = useState<string>(() => loadNavPage());
+  // 启动默认进入「实时转写」页（不跨启动恢复导航页）
+  const [navPage, setNavPage] = useState<string>("transcript");
+  const [micRms, setMicRms] = useState(0); // 麦克风电平（Level 事件）
   const [asideCollapsed, setAsideCollapsed] = useState<boolean>(() => loadAsideCollapsed());
   const [mode, setMode] = useState<TranscriptMode>(() => loadTranscriptMode());
   const [lines, setLines] = useState<TimelineLine[]>([]);
@@ -72,13 +74,14 @@ export default function App() {
   useEffect(() => {
     api.getVersion().then(setVersion).catch(console.error);
     api.getConfig().then(setConfig).catch(console.error);
-    // 启动时若恢复的是历史页，先刷新会话列表
-    if (navPage === "history") refreshHistory();
     const off = api.onEvent((ev: DomainEvent) => {
       if (ev.type === "status") {
         setStatus(ev.message);
         if (ev.stage === "recording") setListening(true);
         if (ev.stage === "idle" || ev.stage === "asr_ready") setListening(false);
+      }
+      if (ev.type === "level") {
+        setMicRms(ev.mic_rms);
       }
       if (ev.type === "segment") {
         const acc = accumulatorRef.current;
@@ -227,7 +230,6 @@ export default function App() {
         setStatus("启动中…");
         // 开始监听 → 自动跳转到实时转写页
         setNavPage("transcript");
-        saveNavPage("transcript");
         await api.startListen();
       }
     } catch (e) {
@@ -238,7 +240,6 @@ export default function App() {
   const handleNavigate = useCallback(
     (key: string) => {
       setNavPage(key);
-      saveNavPage(key);
       if (key === "history") refreshHistory();
     },
     [refreshHistory],
@@ -273,6 +274,7 @@ export default function App() {
         onNavigate={handleNavigate}
         noiseLevel={noiseLevel}
         onNoiseLevel={setNoiseLevel}
+        micRms={micRms}
       />
 
       {/* 主区：不滚动，滚动交给内部子区域（转写/要点/历史/设置各自 flex+overflow） */}

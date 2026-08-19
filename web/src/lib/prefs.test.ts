@@ -4,8 +4,6 @@ import {
   saveTheme,
   loadTranscriptMode,
   saveTranscriptMode,
-  loadNavPage,
-  saveNavPage,
   loadAsideCollapsed,
   saveAsideCollapsed,
 } from "./prefs";
@@ -30,14 +28,6 @@ describe("prefs without localStorage", () => {
 
   it("saveTranscriptMode does not throw", () => {
     expect(() => saveTranscriptMode("focus")).not.toThrow();
-  });
-
-  it("loadNavPage defaults to transcript", () => {
-    expect(loadNavPage()).toBe("transcript");
-  });
-
-  it("saveNavPage does not throw", () => {
-    expect(() => saveNavPage("history")).not.toThrow();
   });
 
   it("loadAsideCollapsed defaults to false", () => {
@@ -73,15 +63,6 @@ describe("prefs with mocked localStorage", () => {
     expect(loadTranscriptMode()).toBe("focus");
   });
 
-  it("persists and restores nav page", () => {
-    saveNavPage("history");
-    expect(loadNavPage()).toBe("history");
-    saveNavPage("settings");
-    expect(loadNavPage()).toBe("settings");
-    saveNavPage("transcript");
-    expect(loadNavPage()).toBe("transcript");
-  });
-
   it("persists and restores aside collapsed", () => {
     saveAsideCollapsed(true);
     expect(loadAsideCollapsed()).toBe(true);
@@ -94,8 +75,6 @@ describe("prefs with mocked localStorage", () => {
     expect(loadTheme()).toBe("dark");
     store["talksage_transcript_mode"] = "weird";
     expect(loadTranscriptMode()).toBe("timeline");
-    store["talksage_nav_page"] = "bogus";
-    expect(loadNavPage()).toBe("transcript");
     store["talksage_aside_collapsed"] = "maybe";
     expect(loadAsideCollapsed()).toBe(false);
   });

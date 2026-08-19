@@ -27,6 +27,7 @@ export default function SideNav({
   onNavigate,
   noiseLevel,
   onNoiseLevel,
+  micRms,
 }: {
   theme: Theme;
   onToggleTheme: () => void;
@@ -38,6 +39,7 @@ export default function SideNav({
   onNavigate: (key: string) => void;
   noiseLevel: number;
   onNoiseLevel: (level: number) => void;
+  micRms: number;
 }) {
   return (
     <nav
@@ -109,6 +111,37 @@ export default function SideNav({
           </div>
         ))}
       </div>
+
+      {/* 麦克风电平（实时指示，噪音电平上方） */}
+      {listening && (
+        <div style={{ margin: "0 10px 10px", padding: "10px 11px", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+            <span style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 700 }}>麦克风电平</span>
+            <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>
+              {Math.round(Math.min(1, micRms * 10) * 100)}%
+            </span>
+          </div>
+          <div style={{ height: 6, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}>
+            <div
+              style={{
+                height: "100%",
+                width: `${Math.min(100, micRms * 1000)}%`,
+                borderRadius: 3,
+                background:
+                  micRms < 0.05
+                    ? "var(--live)"
+                    : micRms < 0.2
+                      ? "var(--brief)"
+                      : "var(--danger)",
+                transition: "width 80ms linear",
+              }}
+            />
+          </div>
+          <div style={{ marginTop: 3, fontSize: 9, color: "var(--muted)", fontFamily: "monospace" }}>
+            {micRms < 0.01 ? "无声" : micRms < 0.05 ? "低" : micRms < 0.2 ? "正常" : "过载"}
+          </div>
+        </div>
+      )}
 
       {/* 噪音电平（监听中可实时调节，无需停止监听） */}
       {listening && (
