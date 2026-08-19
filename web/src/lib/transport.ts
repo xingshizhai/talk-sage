@@ -74,6 +74,10 @@ export const ipcApi: AppApi = {
     await invoke("remove_voiceprint");
   },
 
+  async minimizeToTray(): Promise<void> {
+    await invoke("minimize_to_tray");
+  },
+
   async listSessions(): Promise<SessionRecord[]> {
     return invoke("list_sessions");
   },
@@ -169,6 +173,10 @@ export const httpApi: AppApi = {
 
   async removeVoiceprint(): Promise<void> {
     await req("/voiceprint/remove", { method: "POST" });
+  },
+
+  async minimizeToTray(): Promise<void> {
+    // headless（浏览器）无桌面窗口，最小化到托盘无意义
   },
 
   async listSessions(): Promise<SessionRecord[]> {

@@ -14,7 +14,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sherpa_onnx::{
     SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig,
 };
-use tauri::{Emitter, Manager, WindowEvent};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use talksage_audio::AudioHub;
 use talksage_config::ConfigManager;
 use talksage_core::{DomainEvent, ResultStatus, StatusStage};
@@ -689,6 +691,7 @@ pub fn run() {
             get_voiceprint_status,
             enroll_voice,
             remove_voiceprint,
+            minimize_to_tray,
             list_sessions,
             search_sessions,
             get_session,
@@ -754,6 +757,40 @@ pub fn run() {
                     }
                 });
             }
+            // 系统托盘 / 菜单栏图标（Windows 右下角托盘；macOS 菜单栏状态项，遵循各平台惯例）
+            let tray_icon = app
+                .default_window_icon()
+                .map(|i| i.clone())
+                .unwrap_or_else(|| tauri::image::Image::new_owned(vec![0, 0, 0, 0], 1, 1));
+            let show_item = MenuItem::with_id(app, "show", "显示 / 隐藏窗口", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let tray = TrayIconBuilder::with_id("main-tray")
+                .icon(tray_icon)
+                .tooltip("拓思者 · AI 会议助理")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // 左键单击：切换窗口显示/隐藏
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        toggle_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+            // 持有句柄，防止托盘图标被销毁
+            app.manage(tray);
+            log::info!("系统托盘图标已就绪（Windows 托盘 / macOS 菜单栏）");
+
             let _ = app.emit(
                 "talksage://event",
                 DomainEvent::Status {
@@ -765,4 +802,35 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running TalkSage");
+}
+
+/// 显示并聚焦主窗口（从托盘/菜单栏恢复）。
+fn show_main_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// 隐藏主窗口到托盘（Windows：前端检测到最小化后调用）。
+#[tauri::command]
+fn minimize_to_tray(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("main") {
+        w.hide().map_err(|e| e.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// 切换主窗口显示/隐藏（托盘左键点击）。
+fn toggle_main_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let visible = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
+        if visible {
+            let _ = w.hide();
+        } else {
+            show_main_window(app);
+        }
+    }
 }

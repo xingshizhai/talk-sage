@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getApi } from "./lib/transport";
 import type { AppConfig, DomainEvent, NotesTemplate, SegmentHit, SessionDetail, SessionRecord } from "./lib/api";
 import { TranscriptAccumulator } from "./lib/transcript";
@@ -74,6 +75,24 @@ export default function App() {
   useEffect(() => {
     api.getVersion().then(setVersion).catch(console.error);
     api.getConfig().then(setConfig).catch(console.error);
+    // Windows 桌面：最小化 → 隐藏到系统托盘（托盘点击恢复；macOS 遵循系统惯例最小化到 Dock，不做此处理）
+    const isTauri = !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    const isWindows = /Windows/i.test(navigator.userAgent);
+    let minimizeListener: (() => void) | undefined;
+    if (isTauri && isWindows) {
+      const onVisibility = () => {
+        if (document.hidden) {
+          getCurrentWindow()
+            .isMinimized()
+            .then((m) => {
+              if (m) api.minimizeToTray().catch((e) => console.error("最小化到托盘失败:", e));
+            })
+            .catch(() => {});
+        }
+      };
+      document.addEventListener("visibilitychange", onVisibility);
+      minimizeListener = () => document.removeEventListener("visibilitychange", onVisibility);
+    }
     const off = api.onEvent((ev: DomainEvent) => {
       if (ev.type === "status") {
         setStatus(ev.message);
@@ -126,7 +145,10 @@ export default function App() {
       }
       setRawEvents((prev) => [...prev.slice(-199), ev]);
     });
-    return off;
+    return () => {
+      minimizeListener?.();
+      off();
+    };
   }, []);
 
   // 运行状态行

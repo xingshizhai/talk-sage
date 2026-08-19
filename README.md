@@ -34,6 +34,7 @@
 - **Runtime noise control** — adjust the mic noise gate live from the left panel *while listening*, no restart
 - **History** — SQLite sessions with search, per-segment duration/RMS stats, quality badges
 - **Two carriers** — Tauri 2 desktop app (IPC) and a headless HTTP/WS server (browser access, token-protected)
+- **System tray** — Windows: minimizing hides the window into the tray (click the icon to restore); macOS: follows platform conventions with a menu-bar icon that toggles the window
 
 ## Quick Start
 

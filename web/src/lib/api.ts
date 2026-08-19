@@ -169,6 +169,8 @@ export interface AppApi {
   enrollVoice(seconds: number): Promise<{ ok: boolean; dim: number }>;
   /** 删除主人声纹。 */
   removeVoiceprint(): Promise<void>;
+  /** 最小化到系统托盘（Windows；隐藏主窗口）。 */
+  minimizeToTray(): Promise<void>;
   /** 历史：会话列表。 */
   listSessions(): Promise<SessionRecord[]>;
   /** 历史：全文检索。 */
