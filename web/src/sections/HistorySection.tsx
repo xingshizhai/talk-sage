@@ -47,6 +47,7 @@ export default function HistorySection({
   onRefresh,
   onGenerateNotes,
   onDeleteSession,
+  onDeleteSessions,
   notesBusy,
 }: {
   sessions: SessionRecord[];
@@ -58,13 +59,46 @@ export default function HistorySection({
   onRefresh: () => void;
   onGenerateNotes: (templateId: string) => void;
   onDeleteSession: (id: number) => void;
+  onDeleteSessions: (ids: number[]) => void;
   notesBusy: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [templateId, setTemplateId] = useState(templates[0]?.id ?? "standard_meeting");
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  // 列表多选（批量删除）
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [confirmBatch, setConfirmBatch] = useState(false);
   // 回放光标：{说话人, 音频秒}，用于同步高亮该说话人的当前段
   const [playCursor, setPlayCursor] = useState<{ speaker: string; time: number } | null>(null);
+
+  /** 切换单条选择。 */
+  function toggleSelect(id: number) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  /** 全选 / 清空（基于当前列表）。 */
+  function toggleSelectAll() {
+    const allSelected = sessions.length > 0 && sessions.every((s) => selected.has(s.id));
+    setSelected(allSelected ? new Set() : new Set(sessions.map((s) => s.id)));
+  }
+
+  /** 批量删除（二次确认）。 */
+  function confirmDeleteBatch() {
+    if (confirmBatch) {
+      setConfirmBatch(false);
+      const ids = [...selected];
+      setSelected(new Set());
+      onDeleteSessions(ids);
+    } else {
+      setConfirmBatch(true);
+      setTimeout(() => setConfirmBatch(false), 3000);
+    }
+  }
 
   /** 播放进度 → 更新光标。 */
   function onPlay(speaker: string, time: number) {
@@ -302,6 +336,49 @@ export default function HistorySection({
       ) : (
         <div>
           {sessions.length === 0 && <div style={{ color: "var(--muted)" }}>暂无历史会话</div>}
+          {/* 多选工具条 */}
+          {sessions.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                marginBottom: 8,
+                padding: "6px 8px",
+                borderRadius: 6,
+                background: selected.size > 0 ? "var(--me-soft)" : "var(--surface-2)",
+                border: "1px solid var(--border)",
+                fontSize: 11,
+              }}
+            >
+              <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={sessions.length > 0 && sessions.every((s) => selected.has(s.id))}
+                  onChange={toggleSelectAll}
+                />
+                全选
+              </label>
+              <span style={{ color: "var(--muted)" }}>已选 {selected.size} 条</span>
+              <button
+                onClick={confirmDeleteBatch}
+                disabled={selected.size === 0}
+                style={{
+                  marginLeft: "auto",
+                  fontSize: 11,
+                  padding: "2px 10px",
+                  borderRadius: 6,
+                  cursor: selected.size > 0 ? "pointer" : "not-allowed",
+                  opacity: selected.size > 0 ? 1 : 0.45,
+                  border: "1px solid var(--border)",
+                  background: "var(--surface-2)",
+                  color: confirmBatch ? "var(--danger)" : "var(--danger)",
+                }}
+              >
+                {confirmBatch ? `确认删除 ${selected.size} 条？` : "删除选中"}
+              </button>
+            </div>
+          )}
           {sessions.map((s) => (
             <div
               key={s.id}
@@ -310,25 +387,26 @@ export default function HistorySection({
                 padding: "4px 6px",
                 borderRadius: 4,
                 cursor: "pointer",
-                background: "var(--surface-2)",
+                background: selected.has(s.id) ? "var(--me-soft)" : "var(--surface-2)",
               }}
               onClick={() => onSelect(s.id)}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={selected.has(s.id)}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => {
+                    e.stopPropagation();
+                    toggleSelect(s.id);
+                  }}
+                  style={{ cursor: "pointer", flexShrink: 0 }}
+                />
                 <span>
                   #{s.id} · {formatTime(s.started_at)} <QualityBadge quality={s.quality} />
                 </span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    confirmDelete(s.id);
-                  }}
-                  style={{ ...deleteBtnStyle, marginLeft: "auto", color: confirmDeleteId === s.id ? "var(--danger)" : "var(--muted)" }}
-                >
-                  {confirmDeleteId === s.id ? "确认删除？" : "删除"}
-                </button>
               </div>
-              <div style={{ color: "var(--muted)" }}>
+              <div style={{ color: "var(--muted)", marginLeft: 24 }}>
                 {s.segment_count} 段 · {s.term_count} 术语
                 {s.duration_ms ? ` · ${Math.round(s.duration_ms / 1000)}s` : ""}
                 {s.speech_ratio !== undefined ? ` · 语音 ${Math.round(s.speech_ratio * 100)}%` : ""}

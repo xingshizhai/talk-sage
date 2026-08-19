@@ -217,6 +217,22 @@ export default function App() {
     [refreshHistory],
   );
 
+  /** 批量删除（历史列表多选）。 */
+  const handleDeleteSessions = useCallback(
+    async (ids: number[]) => {
+      if (ids.length === 0) return;
+      try {
+        await Promise.all(ids.map((id) => api.deleteSession(id)));
+        setDetail(null);
+        refreshHistory();
+      } catch (e) {
+        console.error("批量删除失败:", e);
+        alert(`部分删除失败: ${e}`);
+      }
+    },
+    [refreshHistory],
+  );
+
   const handleGenerateNotes = useCallback(
     async (templateId: string) => {
       if (!detail) return;
@@ -344,6 +360,7 @@ export default function App() {
                 onRefresh={refreshHistory}
                 onGenerateNotes={handleGenerateNotes}
                 onDeleteSession={handleDeleteSession}
+                onDeleteSessions={handleDeleteSessions}
                 notesBusy={notesBusy}
               />
             </div>
