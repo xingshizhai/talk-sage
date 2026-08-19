@@ -54,7 +54,7 @@ pub fn init(data_dir: Option<&PathBuf>) -> LogGuard {
     if json_file {
         // 控制台文本 + 文件 JSON lines
         let console = tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
+            .with_writer(std::io::stdout)
             .with_span_events(FmtSpan::NONE);
         let file_layer = tracing_subscriber::fmt::layer()
             .json()
@@ -69,7 +69,7 @@ pub fn init(data_dir: Option<&PathBuf>) -> LogGuard {
     } else {
         // 双文本（控制台 + 文件）
         let console = tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
+            .with_writer(std::io::stdout)
             .with_span_events(FmtSpan::NONE);
         let file_layer = tracing_subscriber::fmt::layer()
             .with_span_events(FmtSpan::NONE)

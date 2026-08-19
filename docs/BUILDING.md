@@ -7,6 +7,34 @@
 
 ---
 
+## 0. 快速上手（推荐：一键脚本）
+
+仓库提供统一工具脚本，自动处理环境变量（CARGO_HOME / SHERPA_ONNX_ARCHIVE_DIR / TALKSAGE_DATA_DIR 项目内隔离）与路径解析：
+
+```powershell
+# Windows
+.\scripts\talksage.ps1 env        # 环境检查（Rust/Node/模型/静态库）
+.\scripts\talksage.ps1 deps       # 下载依赖（模型 + sherpa 静态库 + 前端）
+.\scripts\talksage.ps1 build      # 全量编译（Rust + 前端）
+.\scripts\talksage.ps1 dev        # Tauri 开发模式（热更新）
+.\scripts\talksage.ps1 run        # 运行桌面 release 版
+.\scripts\talksage.ps1 serve      # headless 服务（浏览器访问 127.0.0.1:8080）
+.\scripts\talksage.ps1 listen     # CLI 实时转写（麦克风）
+.\scripts\talksage.ps1 import -wav 录音.wav   # 导入转写入库
+.\scripts\talksage.ps1 test       # 全量测试
+.\scripts\talksage.ps1 package    # 打包（NSIS/MSI）
+.\scripts\talksage.ps1 logs       # 查看最近日志
+.\scripts\talksage.ps1 clean      # 清理构建产物
+
+# macOS / Linux
+./scripts/talksage.sh env deps build serve ...
+```
+
+> 脚本内部命令（`python`/`npm`/`npx`/`cargo`）需在 PATH 中；代理通过 `$env:https_proxy` / `$env:http_proxy` 设置后运行即可。
+> 下面章节为手动步骤（脚本内部执行的等价操作），供定制/排障参考。
+
+---
+
 ## 1. 前置环境
 
 ### 1.1 Rust 工具链（rustup + MSVC）
