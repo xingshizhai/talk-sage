@@ -61,6 +61,10 @@ xcode-select --install          # Command Line Tools（clang/linker）
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
+> **macOS 注意**
+> - 首次运行点击「开始监听 / 录制我的声音」时，系统会弹出**麦克风权限**请求（已在 `web/src-tauri/Info.plist` 声明 `NSMicrophoneUsageDescription`）；拒绝后应用无法采集音频，需到 系统设置 → 隐私与安全性 → 麦克风 中开启。
+> - **回环采集（客户语音）当前仅 Windows 支持**：macOS 上客户流自动降级为关闭（仅用户流单流运行），其余功能（转写/说话人/录音/回放/纪要）不受影响。
+
 **Ubuntu：**
 ```bash
 sudo apt install build-essential cmake libwebkit2gtk-4.1-dev \

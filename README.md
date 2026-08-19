@@ -15,6 +15,8 @@
 
 > **拓思者 (Tuòsī Zhě)** — "Talk" ≈ 拓 (expand), "Sage" ≈ 思 (think): an AI assistant that expands your thinking by turning every meeting into structured knowledge.
 
+**Platform support**: Windows (full features incl. system-loopback dual-stream capture), macOS / Linux (mic-only single stream; loopback capture is Windows-only, macOS ships the mic-permission TCC declaration).
+
 ---
 
 ## What it does

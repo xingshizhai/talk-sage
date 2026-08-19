@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- macOS 麦克风权限（TCC）：无此声明时访问麦克风会导致应用被系统终止 -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>拓思者需要访问麦克风，用于实时会议转写、说话人识别与会议录音。音频仅在本机处理，不会上传。</string>
+  <!-- 系统事件（预留：回环采集客户语音） -->
+  <key>NSAppleEventsUsageDescription</key>
+  <string>拓思者可能需要控制系统音频以采集远程通话中的客户语音。</string>
+</dict>
+</plist>
