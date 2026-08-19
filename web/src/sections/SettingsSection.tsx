@@ -24,6 +24,8 @@ export default function SettingsSection({
   const [vadPreset, setVadPreset] = useState<string>(config?.audio?.vad?.preset ?? "standard");
   const [denoiseEnabled, setDenoiseEnabled] = useState(config?.audio?.denoise?.enabled ?? false);
   const [highpass, setHighpass] = useState(config?.audio?.denoise?.highpass ?? true);
+  const [recEnabled, setRecEnabled] = useState(config?.recording?.enabled ?? true);
+  const [recDir, setRecDir] = useState<string>(config?.recording?.dir ?? "");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -59,6 +61,10 @@ export default function SettingsSection({
             enabled: denoiseEnabled,
             highpass,
           },
+        },
+        recording: {
+          enabled: recEnabled,
+          dir: recDir.trim(),
         },
       };
       await onSave(updates);
@@ -154,7 +160,21 @@ export default function SettingsSection({
         <input type="checkbox" checked={highpass} disabled={!denoiseEnabled} onChange={(e) => setHighpass(e.target.checked)} /> 高通滤波（去低频轰鸣/空调声）
       </label>
 
-      <button onClick={handleSave} disabled={saving} style={{ fontSize: 12, marginTop: 4 }}>
+      <h3 style={{ margin: "10px 0 6px", fontSize: 13 }}>会议录音</h3>
+      <label style={{ display: "block", marginBottom: 4 }}>
+        <input type="checkbox" checked={recEnabled} onChange={(e) => setRecEnabled(e.target.checked)} /> 监听时保存录音（用户流 + 客户流）
+      </label>
+      <input
+        value={recDir}
+        onChange={(e) => setRecDir(e.target.value)}
+        placeholder="录音目录（留空 = 数据目录/recordings）"
+        style={{ width: "100%", padding: "4px 8px", fontSize: 12, borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)", boxSizing: "border-box" }}
+      />
+      <div style={{ marginTop: 4, color: "var(--muted)", fontSize: 11, lineHeight: 1.6 }}>
+        录音用于测试闭环：<code style={{ color: "var(--term)" }}>talksage trim &lt;录音.wav&gt;</code> 去掉静音后，再回放验证转写。
+      </div>
+
+      <button onClick={handleSave} disabled={saving} style={{ fontSize: 12, marginTop: 8 }}>
         {saving ? "保存中…" : "保存设置"}
       </button>
       {message && <div style={{ marginTop: 6, color: message.startsWith("失败") ? "var(--danger)" : "var(--live)" }}>{message}</div>}

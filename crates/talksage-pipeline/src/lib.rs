@@ -68,12 +68,15 @@ pub struct LivePipelineConfig {
     pub plugins: Vec<Arc<dyn AnalyzerPlugin>>,
     /// 插件上下文（知识库/LLM 共享）。
     pub plugin_ctx: talksage_plugins::PluginContext,
+    /// 录音目录（Some 时监听期间把每条流的原始音频保存为 `{ts}_{speaker_label}.wav`）。
+    pub recording_dir: Option<PathBuf>,
 }
 
 /// 实时管道：持有组件并在专用线程中运行事件循环。
 pub struct LivePipeline {
     cfg: Arc<LivePipelineConfig>,
     tx_stop: Option<mpsc::Sender<()>>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl LivePipeline {
@@ -81,6 +84,7 @@ impl LivePipeline {
         Self {
             cfg: Arc::new(cfg),
             tx_stop: None,
+            handle: None,
         }
     }
 
@@ -88,7 +92,7 @@ impl LivePipeline {
     pub fn start(&mut self, emit: EventSink) -> anyhow::Result<()> {
         let (tx_stop, rx_stop) = mpsc::channel::<()>();
         let cfg = self.cfg.clone();
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("talksage-pipeline".into())
             .spawn(move || {
                 if let Err(e) = run_loop(cfg, rx_stop, emit) {
@@ -96,13 +100,17 @@ impl LivePipeline {
                 }
             })?;
         self.tx_stop = Some(tx_stop);
+        self.handle = Some(handle);
         Ok(())
     }
 
-    /// 停止管道（停止采集并等待线程结束）。
+    /// 停止管道：发送停止信号并**等待线程结束**（保证录音收尾/文件头回填完成）。
     pub fn stop(&mut self) {
         if let Some(tx) = self.tx_stop.take() {
             let _ = tx.send(());
+        }
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
         }
     }
 }
@@ -112,6 +120,31 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Unix 秒 → "YYYY-MM-DD_HH-MM-SS"（UTC；Hinnant civil date 算法，无 chrono 依赖）。
+fn chrono_like_ts(unix_secs: u64) -> String {
+    let days = (unix_secs / 86400) as i64;
+    let sod = unix_secs % 86400;
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
+        y,
+        m,
+        d,
+        sod / 3600,
+        (sod % 3600) / 60,
+        sod % 60
+    )
 }
 
 /// 创建 silero VAD（参数化：灵敏度由配置决定）。
@@ -170,6 +203,10 @@ struct StreamWorker {
     loopback: Option<talksage_audio::LoopbackCapture>,
     /// final 段完成后的回调（插件触发）。
     on_final: Option<Arc<dyn Fn(&TranscriptSegment) + Send + Sync>>,
+    /// 录音器（Some = 本流录音中，原始 PCM 逐块写入）。
+    recorder: Option<talksage_audio::wav::WavRecorder>,
+    /// 录音输出路径（收尾时记录日志）。
+    recording_path: Option<PathBuf>,
 }
 
 impl StreamWorker {
@@ -180,6 +217,7 @@ impl StreamWorker {
         asr_threads: usize,
         vad_model: &PathBuf,
         chunk_ms: u64,
+        recording_path: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         let (threshold, min_speech, min_silence, window, max_speech) = vad_cfg.effective();
         log::info!(
@@ -195,6 +233,16 @@ impl StreamWorker {
             denoise.highpass_cutoff_hz,
             denoise.gate_threshold,
         );
+
+        // 录音器（记录原始 PCM，预处理前）
+        let recorder = match &recording_path {
+            Some(p) => {
+                let r = talksage_audio::wav::WavRecorder::create(p, talksage_audio::TARGET_SAMPLE_RATE)?;
+                log::info!("流[{}] 录音中: {}", cfg.speaker_label, p.display());
+                Some(r)
+            }
+            None => None,
+        };
 
         let mic_device = match &cfg.input {
             AudioInput::Mic(d) => d.clone(),
@@ -238,6 +286,8 @@ impl StreamWorker {
             #[cfg(windows)]
             loopback: None,
             on_final: None,
+            recorder,
+            recording_path,
         })
     }
 
@@ -302,6 +352,11 @@ impl StreamWorker {
             }
             return Ok(false);
         };
+
+        // 录音：原始 PCM（预处理前），方便后续裁剪/降噪对比
+        if let Some(rec) = &mut self.recorder {
+            let _ = rec.write(&chunk);
+        }
 
         // 背景噪音预处理（高通/噪声门），再进 VAD/ASR
         self.preprocessor.process(&mut chunk);
@@ -378,10 +433,25 @@ impl StreamWorker {
         }
     }
 
-    /// 关闭流：收尾未完成的语音段（停止监听/输入结束时调用）。
+    /// 关闭流：收尾未完成的语音段 + 结束录音（停止监听/输入结束时调用）。
     fn shutdown(&mut self, emit: &EventSink) {
         self.finish_speech(emit);
         self.stop();
+        if let Some(rec) = self.recorder.take() {
+            let samples = rec.samples_written();
+            match rec.finish() {
+                Ok(()) => {
+                    log::info!(
+                        "流[{}] 录音完成: {}（{} 采样 ≈ {:.1}s）",
+                        self.speaker_label,
+                        self.recording_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+                        samples,
+                        samples as f64 / talksage_audio::TARGET_SAMPLE_RATE as f64,
+                    );
+                }
+                Err(e) => log::warn!("流[{}] 录音收尾失败: {e}", self.speaker_label),
+            }
+        }
     }
 }
 
@@ -397,9 +467,23 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
 
     // 构建各流（client 流失败降级为仅 user 流，不影响主链路）
     let mut workers: Vec<StreamWorker> = Vec::new();
+    // 录音时间戳：整次监听共用一个
+    let rec_ts = {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let dt = chrono_like_ts(now);
+        dt
+    };
     let build = |sc: &StreamConfig| -> anyhow::Result<StreamWorker> {
         let t0 = std::time::Instant::now();
-        let mut w = StreamWorker::new(sc, &cfg.vad, &cfg.denoise, cfg.asr_threads, &cfg.vad_model, cfg.chunk_ms)?;
+        // 每条流一个录音文件：{ts}_{speaker_label}.wav
+        let rec_path = cfg.recording_dir.as_ref().map(|dir| {
+            let safe = sc.speaker_label.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            dir.join(format!("{rec_ts}_{safe}.wav"))
+        });
+        let mut w = StreamWorker::new(sc, &cfg.vad, &cfg.denoise, cfg.asr_threads, &cfg.vad_model, cfg.chunk_ms, rec_path)?;
         w.start_input(cfg.chunk_ms)?;
         log::info!(
             "流[{}] 就绪: engine={} model={} 加载耗时={:?}",
@@ -447,7 +531,8 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
     });
     log::info!("管道进入事件循环: {} 条流", workers.len());
 
-    // 事件循环：轮询各流
+    // 事件循环：轮询各流（出错时先收尾再返回，保证录音完成）
+    let mut tick_err: Option<anyhow::Error> = None;
     loop {
         match rx_stop.try_recv() {
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
@@ -460,9 +545,12 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
                 continue;
             }
             any_alive = true;
-            w.tick(&emit)?;
+            if let Err(e) = w.tick(&emit) {
+                tick_err = Some(e);
+                break;
+            }
         }
-        if !any_alive {
+        if tick_err.is_some() || !any_alive {
             break;
         }
     }
@@ -474,6 +562,9 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
         stage: StatusStage::Idle,
         message: "已停止".into(),
     });
+    if let Some(e) = tick_err {
+        return Err(e);
+    }
     Ok(())
 }
 

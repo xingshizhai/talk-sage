@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use talksage_asr::EngineKind;
+use talksage_audio::AudioHub;
 use talksage_core::DomainEvent;
 use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConfig};
 
@@ -60,6 +61,9 @@ enum Command {
         /// 落库到会话 SQLite（~/.talksage/sessions.db）
         #[arg(long)]
         save: bool,
+        /// 不保存录音（默认按配置 recording.enabled 决定）
+        #[arg(long)]
+        no_record: bool,
     },
     /// 导入音频离线转写并保存为新会话。
     Import {
@@ -72,8 +76,32 @@ enum Command {
         #[arg(long, default_value = "导入")]
         speaker: String,
     },
-    /// 录制会议（预留）。
-    Record,
+    /// 静音裁剪：用 silero VAD 去掉无声音的部分，输出紧凑音频（测试素材）。
+    Trim {
+        /// 输入 wav（任意采样率，自动重采样到 16k）
+        path: String,
+        /// 输出 wav（默认 <输入>.trimmed.wav）
+        #[arg(short, long)]
+        output: Option<String>,
+        /// VAD 灵敏度预设（standard | sensitive | strict）
+        #[arg(long, default_value = "standard")]
+        preset: String,
+        /// VAD 模型路径（默认 <models>/silero-vad/silero_vad.onnx）
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// 录制原始音频（不转写）：麦克风/回环 → wav。
+    Record {
+        /// 录制秒数（0 = 手动停止）
+        #[arg(short, long, default_value_t = 30)]
+        seconds: u64,
+        /// 输出目录（默认 <data_dir>/recordings）
+        #[arg(short, long)]
+        dir: Option<String>,
+        /// 输入源：mic | loopback
+        #[arg(long, default_value = "mic")]
+        input: String,
+    },
     /// 诊断环境：配置、目录、平台。
     Doctor,
     /// 打印版本。
@@ -105,9 +133,16 @@ fn main() -> ExitCode {
             client,
             kb,
             save,
-        } => cmd_listen(&input, seconds, &engine, client.as_deref(), kb.as_deref(), save),
+            no_record,
+        } => cmd_listen(&input, seconds, &engine, client.as_deref(), kb.as_deref(), save, no_record),
         Command::Import { path, engine, speaker } => cmd_import(&path, &engine, &speaker),
-        Command::Record => cmd_record(),
+        Command::Trim {
+            path,
+            output,
+            preset,
+            model,
+        } => cmd_trim(&path, output.as_deref(), &preset, model.as_deref()),
+        Command::Record { seconds, dir, input } => cmd_record(seconds, dir.as_deref(), &input),
         Command::Doctor => cmd_doctor(),
     }
 }
@@ -165,6 +200,7 @@ fn cmd_listen(
     client_input: Option<&str>,
     kb_folder: Option<&str>,
     save: bool,
+    no_record: bool,
 ) -> ExitCode {
     let kind = match EngineKind::from_name(engine) {
         Some(k) => k,
@@ -309,6 +345,23 @@ fn cmd_listen(
     }
     let plugin_ctx = talksage_plugins::PluginContext { kb, llm };
 
+    // 录音目录（--no-record 或配置关闭时禁用）
+    let recording_dir = if no_record || !snapshot.recording.enabled {
+        None
+    } else {
+        let dir = snapshot.recording.resolve_dir(mgr.data_dir());
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| {
+                eprintln!("创建录音目录失败: {e}");
+                ExitCode::FAILURE
+            })
+            .ok();
+        Some(dir)
+    };
+    if let Some(d) = &recording_dir {
+        println!("录音保存目录: {}", d.display());
+    }
+
     let cfg = LivePipelineConfig {
         vad_model,
         chunk_ms: 100,
@@ -325,6 +378,7 @@ fn cmd_listen(
         client: client_cfg,
         plugins,
         plugin_ctx,
+        recording_dir,
     };
 
     let stop_after = seconds;
@@ -483,6 +537,7 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
         client: None,
         plugins: Vec::new(),
         plugin_ctx: talksage_plugins::PluginContext::new(),
+        recording_dir: None,
     };
 
     // 收集 final 段
@@ -561,9 +616,182 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn cmd_record() -> ExitCode {
-    println!("录制模式（M3 预留，尚未实现）");
-    ExitCode::SUCCESS
+fn cmd_trim(path: &str, output: Option<&str>, preset: &str, model: Option<&str>) -> ExitCode {
+    let input = std::path::PathBuf::from(path);
+    if !input.is_file() {
+        eprintln!("文件不存在: {path}");
+        return ExitCode::FAILURE;
+    }
+    // VAD 模型路径
+    let vad_model = match model {
+        Some(m) => std::path::PathBuf::from(m),
+        None => match resolve_models_dir() {
+            Some(d) => d.join("silero-vad").join("silero_vad.onnx"),
+            None => {
+                eprintln!("未找到模型目录（可设 TALKSAGE_MODELS_DIR 或 --model）");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    if !vad_model.is_file() {
+        eprintln!("缺少 VAD 模型: {}", vad_model.display());
+        return ExitCode::FAILURE;
+    }
+    let output = match output {
+        Some(o) => std::path::PathBuf::from(o),
+        None => {
+            let mut s = input.clone().into_os_string();
+            s.push(".trimmed.wav");
+            std::path::PathBuf::from(s)
+        }
+    };
+    // VAD 预设
+    let mut vad_cfg = talksage_config::VadConfig::default();
+    vad_cfg.preset = match preset {
+        "sensitive" => talksage_config::VadPreset::Sensitive,
+        "strict" => talksage_config::VadPreset::Strict,
+        _ => talksage_config::VadPreset::Standard,
+    };
+
+    println!("静音裁剪: {path}");
+    println!("  VAD: {}（preset={}）", vad_model.display(), preset);
+    match talksage_audio::silence_trim::trim_silence(&input, &output, &vad_model, &vad_cfg) {
+        Ok(stats) => {
+            println!(
+                "  完成: 输入 {:.1}s → 输出 {:.1}s（去掉 {:.1}s 静音，{} 段语音，压缩率 {:.0}%）",
+                stats.input_ms as f64 / 1000.0,
+                stats.output_ms as f64 / 1000.0,
+                stats.removed_ms as f64 / 1000.0,
+                stats.speech_segments,
+                stats.compression_ratio() * 100.0,
+            );
+            if stats.output_samples == 0 {
+                eprintln!("  警告: 未检测到语音内容，输出为空。可尝试 --preset sensitive。");
+            }
+            println!("  输出: {}", stats.output_path);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("裁剪失败: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_record(seconds: u64, dir: Option<&str>, input: &str) -> ExitCode {
+    let out_dir = match dir {
+        Some(d) => std::path::PathBuf::from(d),
+        None => {
+            let mgr = match talksage_config::ConfigManager::load(None, None) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("配置加载失败: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let s = mgr.snapshot();
+            s.recording.resolve_dir(mgr.data_dir())
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("创建目录失败: {e}");
+        return ExitCode::FAILURE;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let label = if input.eq_ignore_ascii_case("loopback") { "loopback" } else { "mic" };
+    let path = out_dir.join(format!("record_{ts}_{label}.wav"));
+
+    if input.eq_ignore_ascii_case("loopback") {
+        #[cfg(windows)]
+        {
+            let (mut cap, rx) = talksage_audio::LoopbackCapture::new(100);
+            if let Err(e) = cap.start() {
+                eprintln!("启动回环采集失败: {e}");
+                return ExitCode::FAILURE;
+            }
+            let mut rec = match talksage_audio::wav::WavRecorder::create(&path, 16000) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("创建录音文件失败: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds.max(1));
+            loop {
+                match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(c) => {
+                        let _ = rec.write(&c);
+                    }
+                    Err(_) => {}
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+            }
+            cap.stop();
+            match rec.finish() {
+                Ok(()) => {
+                    println!("录制完成: {}", path.display());
+                    println!("提示: 可用 `talksage trim {}` 去掉静音", path.display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("录制失败: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("系统回环采集当前仅支持 Windows");
+            ExitCode::FAILURE
+        }
+    } else {
+        cmd_record_mic(&path, seconds)
+    }
+}
+
+/// 麦克风录音：采集 → wav（不转写）。
+fn cmd_record_mic(path: &std::path::Path, seconds: u64) -> ExitCode {
+    let (mut hub, rx) = AudioHub::new(100);
+    if let Err(e) = hub.start(None) {
+        eprintln!("启动麦克风失败: {e}");
+        return ExitCode::FAILURE;
+    }
+    let mut rec = match talksage_audio::wav::WavRecorder::create(path, 16000) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("创建录音文件失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds.max(1));
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(c) => {
+                let _ = rec.write(&c);
+            }
+            Err(_) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+    }
+    hub.stop();
+    match rec.finish() {
+        Ok(()) => {
+            println!("录制完成: {}", path.display());
+            println!("提示: 可用 `talksage trim {}` 去掉静音", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("录制失败: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn cmd_doctor() -> ExitCode {
@@ -591,6 +819,11 @@ fn cmd_doctor() -> ExitCode {
     println!("server       : enabled={} ({}:{})", c.server.enabled, c.server.host, c.server.port);
     println!("plugins      : term={} translator={} brief={}",
         c.plugins.term_explainer.enabled, c.plugins.translator.enabled, c.plugins.brief_retriever.enabled);
+    let rec_dir = c.recording.resolve_dir(mgr.data_dir());
+    println!("recording    : enabled={} dir={}（{}）",
+        c.recording.enabled,
+        rec_dir.display(),
+        if rec_dir.is_dir() { format!("{} 个文件", count_wav(&rec_dir)) } else { "目录不存在".into() });
 
     println!("\n模型检查:");
     match resolve_models_dir() {
@@ -610,6 +843,17 @@ fn cmd_doctor() -> ExitCode {
 
     println!("\ndoctor 完成。");
     ExitCode::SUCCESS
+}
+
+/// 统计目录内 wav 文件数。
+fn count_wav(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".wav"))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// 解析模型根目录：优先环境变量，其次相对可执行文件/当前目录探测。

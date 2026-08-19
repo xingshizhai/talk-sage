@@ -88,6 +88,7 @@ fn zh_file_pipeline(root: &Path, wav: &Path) -> LivePipelineConfig {
         client: None,
         plugins: Vec::new(),
         plugin_ctx: talksage_plugins::PluginContext::new(),
+        recording_dir: None,
     }
 }
 
@@ -243,6 +244,7 @@ fn plugins_emit_term_and_translation_events() {
         client: None,
         plugins,
         plugin_ctx: ctx,
+        recording_dir: None,
     };
 
     let evs = run_and_collect(cfg);
@@ -254,5 +256,36 @@ fn plugins_emit_term_and_translation_events() {
     }
     // term 触发的缩写判定由 plugins 单测覆盖（真实英文识别为全大写，不触发缩写）
     assert!(saw_translation, "未产生 Translation 事件: {evs:?}");
-    eprintln!("插件集成测试：Translation 事件产生（真实识别链路）");
+}
+
+/// 录音端到端：file 输入 + recording_dir → 结束后 wav 文件存在且含音频数据。
+#[test]
+fn recording_saves_wav_files_for_each_stream() {
+    let Some(root) = model_root() else {
+        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
+        return;
+    };
+    let wav = zh_model_dir(&root).join("0.wav");
+    if !vad_model(&root).is_file() || !wav.is_file() {
+        eprintln!("跳过：模型/VAD/测试音频不完整");
+        return;
+    }
+
+    let rec_dir = std::env::temp_dir().join(format!("talksage-rec-test-{}", std::process::id()));
+    let mut cfg = zh_file_pipeline(&root, &wav);
+    cfg.recording_dir = Some(rec_dir.clone());
+    let _evs = run_and_collect(cfg);
+
+    // 用户流录音文件应存在且 > 44 字节（含音频数据）
+    let files: Vec<PathBuf> = std::fs::read_dir(&rec_dir)
+        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.extension().map(|e| e == "wav").unwrap_or(false)).collect())
+        .unwrap_or_default();
+    assert!(!files.is_empty(), "应产生录音文件: {}", rec_dir.display());
+    let f = &files[0];
+    assert!(
+        std::fs::metadata(f).map(|m| m.len() > 44).unwrap_or(false),
+        "录音文件应包含音频数据: {}",
+        f.display()
+    );
+    let _ = std::fs::remove_dir_all(&rec_dir);
 }

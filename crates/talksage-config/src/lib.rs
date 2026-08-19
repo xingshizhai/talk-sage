@@ -50,6 +50,7 @@ pub struct Config {
     pub llm: LlmConfig,
     pub plugins: PluginsConfig,
     pub session: SessionConfig,
+    pub recording: RecordingConfig,
     pub privacy: PrivacyConfig,
     pub server: ServerConfig,
     pub knowledge_base: KnowledgeBaseConfig,
@@ -63,6 +64,7 @@ impl Default for Config {
             llm: LlmConfig::default(),
             plugins: PluginsConfig::default(),
             session: SessionConfig::default(),
+            recording: RecordingConfig::default(),
             privacy: PrivacyConfig::default(),
             server: ServerConfig::default(),
             knowledge_base: KnowledgeBaseConfig::default(),
@@ -372,6 +374,42 @@ impl Default for SessionConfig {
     }
 }
 
+/// 会议录音配置（边用边录，形成"录制 → 裁剪 → 回放验证"闭环）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordingConfig {
+    /// 监听时是否自动保存录音。
+    pub enabled: bool,
+    /// 录音目录（相对 data_dir 或绝对路径；空 = `<data_dir>/recordings`）。
+    pub dir: String,
+    /// 是否自动做静音裁剪（预留：当前由 `talksage trim` 手动完成）。
+    pub clean_silence: bool,
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: String::new(),
+            clean_silence: false,
+        }
+    }
+}
+
+impl RecordingConfig {
+    /// 解析录音目录：相对 data_dir 解析；绝对路径原样返回。
+    pub fn resolve_dir(&self, data_dir: &Path) -> PathBuf {
+        let p = PathBuf::from(&self.dir);
+        if p.is_absolute() {
+            p
+        } else if self.dir.trim().is_empty() {
+            data_dir.join("recordings")
+        } else {
+            data_dir.join(p)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrivacyConfig {
@@ -510,6 +548,11 @@ fn merge_config(default: Config, user: Config) -> Config {
             notes: user.plugins.notes,
         },
         session: user.session,
+        recording: RecordingConfig {
+            enabled: user.recording.enabled,
+            dir: take_or(user.recording.dir, default.recording.dir),
+            clean_silence: user.recording.clean_silence,
+        },
         privacy: user.privacy,
         server: user.server,
         knowledge_base: user.knowledge_base,

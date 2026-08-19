@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 talksage-core = { path = "../talksage-core" }
 talksage-config = { path = "../talksage-config" }
+talksage-audio = { path = "../talksage-audio" }
 talksage-asr = { path = "../talksage-asr" }
 talksage-pipeline = { path = "../talksage-pipeline" }
 talksage-llm = { path = "../talksage-llm" }

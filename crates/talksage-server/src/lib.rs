@@ -549,5 +549,13 @@ fn build_pipeline_config(config: &ConfigManager) -> Result<LivePipelineConfig> {
         client: None, // 回环接入后续（headless 场景音频在服务端本机）
         plugins,
         plugin_ctx: PluginContext { kb, llm },
+        // headless 服务端也支持录音（默认随配置）
+        recording_dir: if snapshot.recording.enabled {
+            let dir = snapshot.recording.resolve_dir(config.data_dir());
+            let _ = std::fs::create_dir_all(&dir);
+            Some(dir)
+        } else {
+            None
+        },
     })
 }

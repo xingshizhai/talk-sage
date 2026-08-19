@@ -142,6 +142,17 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
             }
         }
     }
+    if let Some(rec) = updates.get("recording") {
+        if let Some(e) = rec.get("enabled").and_then(|v| v.as_bool()) {
+            c.recording.enabled = e;
+        }
+        if let Some(d) = rec.get("dir").and_then(|v| v.as_str()) {
+            c.recording.dir = d.to_string();
+        }
+        if let Some(cs) = rec.get("clean_silence").and_then(|v| v.as_bool()) {
+            c.recording.clean_silence = cs;
+        }
+    }
 }
 
 /// hello-world 事件：前端 ping → 后端推送领域事件。
@@ -183,6 +194,18 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
     }
 
     let snapshot = state.config.snapshot();
+    // 录音目录（配置开启时，监听期间保存原始音频）
+    let recording_dir = if snapshot.recording.enabled {
+        let dir = snapshot.recording.resolve_dir(state.config.data_dir());
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            log::warn!("创建录音目录失败（本次不录音）: {e}");
+            None
+        } else {
+            Some(dir)
+        }
+    } else {
+        None
+    };
     let cfg = LivePipelineConfig {
         vad_model,
         chunk_ms: 100,
@@ -220,6 +243,7 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
         },
         plugins: build_plugins(&state.config),
         plugin_ctx: build_plugin_ctx(&state.config),
+        recording_dir,
     };
 
     let mut pipeline = LivePipeline::new(cfg);

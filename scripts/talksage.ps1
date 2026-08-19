@@ -10,6 +10,9 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
   .\scripts\talksage.ps1 serve [-host H] [-port P]   # headless 服务（浏览器访问）
   .\scripts\talksage.ps1 listen [-wav F] [-engine E] [-client C] [-save]  # CLI 转写
   .\scripts\talksage.ps1 import [-wav F] [-engine E]   # 导入转写入库
+  .\scripts\talksage.ps1 trim -wav F [-out O] [-preset P]  # 静音裁剪（录音去静音）
+  .\scripts\talksage.ps1 record [-seconds N] [-dir D] [-input mic|loopback]  # 录制原始音频
+  .\scripts\talksage.ps1 loop              # 录音测试闭环（裁剪 + 回放验证）
   .\scripts\talksage.ps1 doctor               # 环境诊断（talksage doctor）
   .\scripts\talksage.ps1 test                 # 全量测试（Rust + Vitest）
   .\scripts\talksage.ps1 package              # 打包（NSIS/MSI）
@@ -183,6 +186,40 @@ function Cmd-Import {
     $null = Invoke-Native { & $CliExe import $wav --engine $engine }
 }
 
+function Cmd-Trim {
+    $wav = ""; $out = ""; $preset = "standard"
+    for ($i = 0; $i -lt $Rest.Count; $i++) {
+        if ($Rest[$i] -eq "-wav" -and $i + 1 -lt $Rest.Count) { $wav = $Rest[$i + 1] }
+        if ($Rest[$i] -eq "-out" -and $i + 1 -lt $Rest.Count) { $out = $Rest[$i + 1] }
+        if ($Rest[$i] -eq "-preset" -and $i + 1 -lt $Rest.Count) { $preset = $Rest[$i + 1] }
+    }
+    if (-not $wav) { Write-Host "用法: .\scripts\talksage.ps1 trim -wav <录音.wav> [-out <输出.wav>] [-preset standard|sensitive|strict]"; return 1 }
+    if (-not (Test-Path $CliExe)) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
+    Write-Step "静音裁剪: $wav"
+    if ($out) { $null = Invoke-Native { & $CliExe trim $wav -o $out --preset $preset } }
+    else { $null = Invoke-Native { & $CliExe trim $wav --preset $preset } }
+}
+
+function Cmd-Record {
+    $seconds = 30; $dir = ""; $input = "mic"
+    for ($i = 0; $i -lt $Rest.Count; $i++) {
+        if ($Rest[$i] -eq "-seconds" -and $i + 1 -lt $Rest.Count) { $seconds = $Rest[$i + 1] }
+        if ($Rest[$i] -eq "-dir" -and $i + 1 -lt $Rest.Count) { $dir = $Rest[$i + 1] }
+        if ($Rest[$i] -eq "-input" -and $i + 1 -lt $Rest.Count) { $input = $Rest[$i + 1] }
+    }
+    if (-not (Test-Path $CliExe)) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
+    Write-Step "录制音频（不转写）: ${seconds}s input=$input"
+    if ($dir) { $null = Invoke-Native { & $CliExe record --seconds $seconds --dir $dir --input $input } }
+    else { $null = Invoke-Native { & $CliExe record --seconds $seconds --input $input } }
+}
+
+function Cmd-Loop {
+    # 录音测试闭环：裁剪 → 回放验证（见 scripts/recording_loop.ps1）
+    if (-not (Test-Path $CliExe)) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
+    Write-Step "录音测试闭环（裁剪 + 回放验证）"
+    $null = Invoke-Native { & (Join-Path $PSScriptRoot "recording_loop.ps1") @Rest }
+}
+
 function Cmd-Doctor {
     if (-not (Test-Path $CliExe)) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
     $null = Invoke-Native { & $CliExe doctor }
@@ -235,6 +272,9 @@ switch ($Command.ToLower()) {
     "serve"   { Cmd-Serve }
     "listen"  { Cmd-Listen }
     "import"  { Cmd-Import }
+    "trim"    { Cmd-Trim }
+    "record"  { Cmd-Record }
+    "loop"    { Cmd-Loop }
     "doctor"  { Cmd-Doctor }
     "test"    { Cmd-Test }
     "package" { Cmd-Package }

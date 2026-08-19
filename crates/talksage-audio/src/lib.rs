@@ -4,10 +4,15 @@
 //! 通过 mpsc 通道交给 pipeline 线程（回调线程不做重活）。
 //!
 //! 回环采集（WASAPI loopback / ScreenCaptureKit）为 M1b 预留。
+//!
+//! 录音与音频处理：wav 读写（wav）、静音裁剪（silence_trim）。
 
 use std::sync::mpsc;
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+pub mod silence_trim;
+pub mod wav;
 
 /// 目标采样率（sherpa-onnx 模型统一 16kHz）。
 pub const TARGET_SAMPLE_RATE: u32 = 16000;

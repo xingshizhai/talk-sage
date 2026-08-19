@@ -4079,6 +4079,8 @@ dependencies = [
  "anyhow",
  "cpal",
  "log",
+ "sherpa-onnx",
+ "talksage-config",
  "windows 0.62.2",
 ]
 
@@ -4089,6 +4091,7 @@ dependencies = [
  "clap",
  "log",
  "talksage-asr",
+ "talksage-audio",
  "talksage-config",
  "talksage-core",
  "talksage-knowledge",
