@@ -86,6 +86,10 @@ export const ipcApi: AppApi = {
     return invoke("get_session", { sessionId: id });
   },
 
+  async deleteSession(id: number): Promise<void> {
+    await invoke("delete_session", { sessionId: id });
+  },
+
   async listNotesTemplates(): Promise<NotesTemplate[]> {
     return invoke("list_notes_templates");
   },
@@ -177,6 +181,10 @@ export const httpApi: AppApi = {
 
   async getSession(id: number): Promise<SessionDetail> {
     return req<SessionDetail>(`/session/${id}`);
+  },
+
+  async deleteSession(id: number): Promise<void> {
+    await req(`/session/${id}`, { method: "DELETE" });
   },
 
   async listNotesTemplates(): Promise<NotesTemplate[]> {

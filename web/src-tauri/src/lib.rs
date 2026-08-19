@@ -517,6 +517,12 @@ fn get_session(session_id: i64, state: tauri::State<'_, AppState>) -> Result<tal
     state.sessions.get_session(session_id).map_err(|e| e.to_string())
 }
 
+/// 删除会话（含段/术语/翻译）。
+#[tauri::command]
+fn delete_session(session_id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.sessions.delete_session(session_id).map_err(|e| e.to_string())
+}
+
 /// 读取最近日志（调试窗口用）。
 #[tauri::command]
 fn read_logs(state: tauri::State<'_, AppState>, lines: Option<usize>) -> Result<String, String> {
@@ -686,6 +692,7 @@ pub fn run() {
             list_sessions,
             search_sessions,
             get_session,
+            delete_session,
             list_notes_templates,
             generate_notes,
             read_logs

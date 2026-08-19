@@ -385,6 +385,16 @@ impl SessionStore {
         Ok(())
     }
 
+    /// 删除会话及其全部关联数据（段/术语/翻译）。
+    pub fn delete_session(&self, session_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM segments WHERE session_id = ?1", [session_id])?;
+        conn.execute("DELETE FROM terms WHERE session_id = ?1", [session_id])?;
+        conn.execute("DELETE FROM translations WHERE session_id = ?1", [session_id])?;
+        conn.execute("DELETE FROM sessions WHERE id = ?1", [session_id])?;
+        Ok(())
+    }
+
     /// 会话列表（按时间倒序）。
     pub fn list_sessions(&self, limit: u32) -> Result<Vec<SessionRecord>> {
         let conn = self.conn.lock().unwrap();
@@ -582,6 +592,26 @@ mod tests {
         s.set_notes(id, "# 会议纪要\n\n## 摘要\ntest").unwrap();
         let detail = s.get_session(id).unwrap();
         assert_eq!(detail.notes.as_deref(), Some("# 会议纪要\n\n## 摘要\ntest"));
+    }
+
+    #[test]
+    fn delete_session_removes_all_related_rows() {
+        let s = store();
+        let id = s.start_session(1).unwrap();
+        s.add_segment(id, &seg(1, "客户", "We need NPI")).unwrap();
+        s.add_segment(id, &seg(0, "我", "好的")).unwrap();
+        s.add_term(id, "NPI = 新产品导入").unwrap();
+        s.add_translation(id, "en_zh", "我们需要 NPI").unwrap();
+        s.set_notes(id, "纪要内容").unwrap();
+
+        // 删除后：详情查询报错、列表为空
+        s.delete_session(id).unwrap();
+        assert!(s.get_session(id).is_err());
+        let list = s.list_sessions(10).unwrap();
+        assert!(list.is_empty());
+
+        // 不存在的会话删除不报错（幂等）
+        s.delete_session(999).unwrap();
     }
 
     #[test]

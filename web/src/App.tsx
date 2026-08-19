@@ -203,6 +203,20 @@ export default function App() {
     [templates.length],
   );
 
+  const handleDeleteSession = useCallback(
+    async (id: number) => {
+      try {
+        await api.deleteSession(id);
+        setDetail(null);
+        refreshHistory();
+      } catch (e) {
+        console.error("删除会话失败:", e);
+        alert(`删除失败: ${e}`);
+      }
+    },
+    [refreshHistory],
+  );
+
   const handleGenerateNotes = useCallback(
     async (templateId: string) => {
       if (!detail) return;
@@ -329,6 +343,7 @@ export default function App() {
                 onSelect={handleHistorySelect}
                 onRefresh={refreshHistory}
                 onGenerateNotes={handleGenerateNotes}
+                onDeleteSession={handleDeleteSession}
                 notesBusy={notesBusy}
               />
             </div>

@@ -45,6 +45,7 @@ export default function HistorySection({
   onSelect,
   onRefresh,
   onGenerateNotes,
+  onDeleteSession,
   notesBusy,
 }: {
   sessions: SessionRecord[];
@@ -55,10 +56,32 @@ export default function HistorySection({
   onSelect: (id: number) => void;
   onRefresh: () => void;
   onGenerateNotes: (templateId: string) => void;
+  onDeleteSession: (id: number) => void;
   notesBusy: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [templateId, setTemplateId] = useState(templates[0]?.id ?? "standard_meeting");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+
+  /** 删除二次确认：第一次点击进入确认态（3 秒后自动恢复），再次点击执行删除。 */
+  function confirmDelete(id: number) {
+    if (confirmDeleteId === id) {
+      setConfirmDeleteId(null);
+      onDeleteSession(id);
+    } else {
+      setConfirmDeleteId(id);
+      setTimeout(() => setConfirmDeleteId((c) => (c === id ? null : c)), 3000);
+    }
+  }
+
+  const deleteBtnStyle: React.CSSProperties = {
+    fontSize: 10,
+    padding: "1px 7px",
+    borderRadius: 6,
+    cursor: "pointer",
+    border: "1px solid var(--border)",
+    background: "var(--surface-2)",
+  };
 
   return (
     <div
@@ -195,6 +218,14 @@ export default function HistorySection({
               {detail.terms.join("；")}
             </div>
           )}
+          <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+            <button
+              onClick={() => confirmDelete(detail.id)}
+              style={{ ...deleteBtnStyle, color: confirmDeleteId === detail.id ? "var(--danger)" : "var(--muted)" }}
+            >
+              {confirmDeleteId === detail.id ? "确认删除此会话？" : "删除此会话"}
+            </button>
+          </div>
         </div>
       ) : searchResults ? (
         <div>
@@ -225,8 +256,19 @@ export default function HistorySection({
               }}
               onClick={() => onSelect(s.id)}
             >
-              <div>
-                #{s.id} · {formatTime(s.started_at)} <QualityBadge quality={s.quality} />
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span>
+                  #{s.id} · {formatTime(s.started_at)} <QualityBadge quality={s.quality} />
+                </span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    confirmDelete(s.id);
+                  }}
+                  style={{ ...deleteBtnStyle, marginLeft: "auto", color: confirmDeleteId === s.id ? "var(--danger)" : "var(--muted)" }}
+                >
+                  {confirmDeleteId === s.id ? "确认删除？" : "删除"}
+                </button>
               </div>
               <div style={{ color: "var(--muted)" }}>
                 {s.segment_count} 段 · {s.term_count} 术语

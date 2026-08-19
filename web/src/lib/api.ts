@@ -175,6 +175,8 @@ export interface AppApi {
   searchSessions(query: string): Promise<SegmentHit[]>;
   /** 历史：会话详情。 */
   getSession(id: number): Promise<SessionDetail>;
+  /** 历史：删除会话（含段/术语/翻译）。 */
+  deleteSession(id: number): Promise<void>;
   /** 纪要：模板列表。 */
   listNotesTemplates(): Promise<NotesTemplate[]>;
   /** 纪要：按模板生成并保存。 */

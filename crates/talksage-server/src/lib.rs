@@ -81,7 +81,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/config", get(get_config_api).post(save_config_api))
         .route("/sessions", get(list_sessions_api))
         .route("/search", get(search_api))
-        .route("/session/{id}", get(get_session_api))
+        .route("/session/{id}", get(get_session_api).delete(delete_session_api))
         .route("/templates", get(list_templates_api))
         .route("/session/{id}/notes", axum::routing::post(generate_notes_api))
         .route("/logs", get(read_logs_api))
@@ -272,6 +272,21 @@ async fn get_session_api(
     match state.sessions.get_session(id) {
         Ok(detail) => (StatusCode::OK, Json(detail)).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// 删除会话（含段/术语/翻译）。
+async fn delete_session_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    match state.sessions.delete_session(id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
 }
 
