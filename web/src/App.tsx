@@ -1,45 +1,55 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { getApi } from "./lib/transport";
-import type { AppConfig, DomainEvent } from "./lib/api";
-import { TranscriptAccumulator, type TranscriptLine } from "./lib/transcript";
-import TranscriptSection from "./sections/TranscriptSection";
-import TermsSection, { type TermItem } from "./sections/TermsSection";
-import TranslationSection, { type TranslationItem } from "./sections/TranslationSection";
-import BriefSection, { type BriefItem } from "./sections/BriefSection";
+import type { AppConfig, DomainEvent, NotesTemplate, SegmentHit, SessionDetail, SessionRecord } from "./lib/api";
+import { TranscriptAccumulator } from "./lib/transcript";
+import { KeyPointAggregator, type KeyPoint } from "./lib/highlights";
+import { cssVars, type Theme } from "./lib/theme";
+import SideNav, { type HealthRow, type NavItem } from "./components/SideNav";
+import TranscriptCard, { type TimelineLine, type TranscriptMode } from "./components/TranscriptCard";
+import KeyPointsCard from "./components/KeyPointsCard";
+import AsidePanel from "./components/AsidePanel";
 import HistorySection from "./sections/HistorySection";
 import SettingsSection from "./sections/SettingsSection";
 import DebugWindow from "./sections/DebugWindow";
-import type { NotesTemplate, SegmentHit, SessionDetail, SessionRecord } from "./lib/api";
+import type { TermItem } from "./sections/TermsSection";
+import type { BriefItem } from "./sections/BriefSection";
 
 const api = getApi();
 
-const PANEL_STYLE: CSSProperties = {
-  border: "1px solid rgba(255,255,255,0.1)",
-  borderRadius: 10,
-  background: "rgba(255,255,255,0.02)",
-  padding: 10,
-  marginBottom: 12,
+function fmtTime(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+const SPEAKER_STYLE: Record<string, { color: string; engine: string }> = {
+  我: { color: "var(--me)", engine: "paraformer-zh" },
+  客户: { color: "var(--client)", engine: "zipformer-en" },
 };
 
 export default function App() {
+  const [theme, setTheme] = useState<Theme>("dark");
   const [version, setVersion] = useState<string>("—");
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [listening, setListening] = useState(false);
   const [status, setStatus] = useState<string>("待机");
-  const [lines, setLines] = useState<TranscriptLine[]>([]);
+  const [navPage, setNavPage] = useState<string>("transcript");
+  const [mode, setMode] = useState<TranscriptMode>("timeline");
+  const [lines, setLines] = useState<TimelineLine[]>([]);
+  const [points, setPoints] = useState<readonly KeyPoint[]>([]);
   const [terms, setTerms] = useState<TermItem[]>([]);
-  const [translations, setTranslations] = useState<TranslationItem[]>([]);
+  const [expandedTerms, setExpandedTerms] = useState<Record<string, boolean>>({});
   const [briefs, setBriefs] = useState<BriefItem[]>([]);
   const [rawEvents, setRawEvents] = useState<DomainEvent[]>([]);
-  const [showHistory, setShowHistory] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [showDebug, setShowDebug] = useState(false);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [searchResults, setSearchResults] = useState<SegmentHit[] | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [templates, setTemplates] = useState<NotesTemplate[]>([]);
   const [notesBusy, setNotesBusy] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
   const accumulatorRef = useRef(new TranscriptAccumulator());
+  const pointsRef = useRef(new KeyPointAggregator());
+  const lastTranslationRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
     api.getVersion().then(setVersion).catch(console.error);
@@ -53,7 +63,26 @@ export default function App() {
       if (ev.type === "segment") {
         const acc = accumulatorRef.current;
         acc.push(ev);
-        setLines([...acc.getLines()]);
+        setLines(
+          acc.getLines().map((l) => {
+            const st = SPEAKER_STYLE[l.speakerLabel] ?? { color: "var(--muted)", engine: "?" };
+            return {
+              key: l.key,
+              time: fmtTime(l.tsMs),
+              speaker: l.speakerLabel,
+              speakerColor: st.color,
+              engine: st.engine,
+              text: l.text,
+              isPartial: l.isPartial,
+              translation: lastTranslationRef.current[l.speakerLabel],
+            };
+          }),
+        );
+        if (!ev.is_partial) {
+          if (pointsRef.current.push(ev.text, ev.ts_ms ?? Date.now())) {
+            setPoints([...pointsRef.current.getItems()]);
+          }
+        }
       }
       if (ev.type === "term") {
         setTerms((prev) => {
@@ -67,19 +96,29 @@ export default function App() {
         });
       }
       if (ev.type === "translation") {
-        setTranslations((prev) => [
-          ...prev,
-          { resultId: ev.result_id, direction: ev.direction, content: ev.content },
-        ]);
+        lastTranslationRef.current[ev.direction === "en_zh" ? "客户" : "我"] = ev.content;
       }
       if (ev.type === "brief") {
-        setBriefs((prev) => [...prev, { source: ev.source, text: ev.text }]);
+        setBriefs((prev) => [...prev.slice(-19), { source: ev.source, text: ev.text }]);
       }
-      // 调试窗口：保留最近 200 条事件
       setRawEvents((prev) => [...prev.slice(-199), ev]);
     });
     return off;
   }, []);
+
+  // 运行状态行
+  const healthRows: HealthRow[] = [
+    { dot: listening ? "var(--live)" : "var(--muted)", label: "监听", value: listening ? "活跃" : "待机" },
+    { dot: "var(--client)", label: "客户流(VAD)", value: "双流" },
+    { dot: "var(--me)", label: "用户流", value: "paraformer" },
+    { dot: "var(--live)", label: "ASR", value: status },
+  ];
+
+  const navItems: NavItem[] = [
+    { key: "transcript", label: "实时转写", dot: "var(--live)", badge: String(lines.length), active: navPage === "transcript" },
+    { key: "history", label: "历史会话", dot: "var(--term)", badge: String(sessions.length), active: navPage === "history" },
+    { key: "settings", label: "设置", dot: "var(--brief)", badge: "", active: navPage === "settings" },
+  ];
 
   const refreshHistory = useCallback(async () => {
     try {
@@ -152,104 +191,72 @@ export default function App() {
     }
   }, [listening]);
 
-  const handleToggleHistory = useCallback(() => {
-    setShowHistory((v) => !v);
-    if (!showHistory) refreshHistory();
-  }, [showHistory, refreshHistory]);
+  const handleNavigate = useCallback(
+    (key: string) => {
+      setNavPage(key);
+      if (key === "history") refreshHistory();
+    },
+    [refreshHistory],
+  );
+
+  const pageStyle: CSSProperties = {
+    background: "var(--bg)",
+    color: "var(--text)",
+    height: "100vh",
+    display: "flex",
+    fontFamily: "system-ui, sans-serif",
+    overflow: "hidden",
+    ...(cssVars(theme) as CSSProperties),
+  };
 
   return (
-    <div style={{ height: "100vh", display: "flex", flexDirection: "column", fontFamily: "system-ui, sans-serif", overflow: "hidden" }}>
-      {/* 顶栏 */}
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          padding: "10px 14px",
-          borderBottom: "1px solid rgba(255,255,255,0.1)",
-          background: "rgba(255,255,255,0.02)",
-        }}
-      >
-        <b style={{ fontSize: 15 }}>TalkSage</b>
-        <span style={{ fontSize: 11, color: "#64748b" }}>
-          v{version} · {api.transport}
-        </span>
-        <span
-          style={{
-            fontSize: 11,
-            padding: "2px 8px",
-            borderRadius: 10,
-            background: listening ? "rgba(52,211,153,0.15)" : "rgba(100,116,139,0.15)",
-            color: listening ? "#34d399" : "#94a3b8",
-          }}
-        >
-          {listening ? "● 监听中" : status}
-        </span>
-        <div style={{ flex: 1 }} />
-        <button
-          onClick={handleListen}
-          style={{
-            padding: "7px 18px",
-            borderRadius: 8,
-            border: "none",
-            fontWeight: 600,
-            cursor: "pointer",
-            background: listening ? "#ef4444" : "#10b981",
-            color: "#fff",
-          }}
-        >
-          {listening ? "⏹ 停止监听" : "▶ 开始监听"}
-        </button>
-        <button
-          onClick={handleToggleHistory}
-          style={{ padding: "7px 12px", borderRadius: 8, cursor: "pointer", background: showHistory ? "#2563eb" : "#1e293b", color: "#e2e8f0", border: "none" }}
-        >
-          历史
-        </button>
-        <button
-          onClick={() => setShowSettings((v) => !v)}
-          style={{ padding: "7px 12px", borderRadius: 8, cursor: "pointer", background: showSettings ? "#2563eb" : "#1e293b", color: "#e2e8f0", border: "none" }}
-        >
-          设置
-        </button>
-        <button
-          onClick={() => setShowDebug(true)}
-          style={{ padding: "7px 12px", borderRadius: 8, cursor: "pointer", background: "#1e293b", color: "#e2e8f0", border: "none" }}
-        >
-          调试
-        </button>
-      </header>
+    <div style={pageStyle}>
+      <SideNav
+        theme={theme}
+        onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+        navItems={navItems}
+        healthRows={healthRows}
+        listening={listening}
+        onToggleListen={handleListen}
+        onOpenDebug={() => setShowDebug(true)}
+        onNavigate={handleNavigate}
+      />
 
-      {/* 主体：左右双栏 */}
-      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-        {/* 左栏：实时转写 + 实时翻译 */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: 12, minWidth: 0 }}>
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, ...PANEL_STYLE, marginBottom: 10 }}>
-            <h2 style={{ fontSize: 13, margin: "0 0 8px", color: "#94a3b8" }}>实时转写</h2>
-            <div style={{ flex: 1, minHeight: 0 }}>
-              <TranscriptSection lines={lines} />
-            </div>
-          </div>
-          <div style={{ ...PANEL_STYLE, marginBottom: 0 }}>
-            <h2 style={{ fontSize: 13, margin: "0 0 8px", color: "#94a3b8" }}>实时翻译</h2>
-            <TranslationSection items={translations} />
-          </div>
+      {/* 主区 */}
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", padding: 14, gap: 12, overflowY: "auto" }}>
+        {/* 页头 */}
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+          <h1 style={{ fontSize: 18, margin: 0 }}>会议辅助</h1>
+          <span style={{ fontSize: 11, color: "var(--muted)" }}>
+            v{version} · {api.transport}
+          </span>
+          <span
+            style={{
+              marginLeft: "auto",
+              fontSize: 11,
+              padding: "3px 10px",
+              borderRadius: 10,
+              background: listening ? "var(--live-soft)" : "var(--surface-2)",
+              color: listening ? "var(--live)" : "var(--muted)",
+            }}
+          >
+            {listening ? "● VAD 双流活跃" : status}
+          </span>
         </div>
 
-        {/* 右栏：术语 / 简报 / 历史 / 设置 */}
-        <div style={{ width: 360, borderLeft: "1px solid rgba(255,255,255,0.1)", padding: 12, overflowY: "auto" }}>
-          <div style={{ ...PANEL_STYLE }}>
-            <h2 style={{ fontSize: 13, margin: "0 0 8px", color: "#94a3b8" }}>术语</h2>
-            <TermsSection items={terms} />
-          </div>
-          <div style={{ ...PANEL_STYLE }}>
-            <h2 style={{ fontSize: 13, margin: "0 0 8px", color: "#94a3b8" }}>简报</h2>
-            <BriefSection items={briefs} />
-          </div>
+        {navPage === "transcript" && (
+          <>
+            <TranscriptCard mode={mode} setMode={setMode} meta={`${lines.length} 段 · ${mode === "timeline" ? "时间线" : mode === "focus" ? "专注" : "密集"}`} lines={lines} />
+            <KeyPointsCard points={points} />
+          </>
+        )}
 
-          {showHistory && (
-            <div style={PANEL_STYLE}>
-              <h2 style={{ fontSize: 13, margin: "0 0 8px", color: "#94a3b8" }}>历史会话</h2>
+        {navPage === "history" && (
+          <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+            <div style={{ padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
+              <b style={{ fontSize: 13 }}>历史会话</b>
+            </div>
+            <div style={{ padding: "var(--pad)" }}>
               <HistorySection
                 sessions={sessions}
                 searchResults={searchResults}
@@ -262,21 +269,30 @@ export default function App() {
                 notesBusy={notesBusy}
               />
             </div>
-          )}
+          </section>
+        )}
 
-          {showSettings && (
-            <div style={PANEL_STYLE}>
-              <h2 style={{ fontSize: 13, margin: "0 0 8px", color: "#94a3b8" }}>设置</h2>
+        {navPage === "settings" && (
+          <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+            <div style={{ padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
+              <b style={{ fontSize: 13 }}>设置</b>
+            </div>
+            <div style={{ padding: "var(--pad)" }}>
               <SettingsSection config={config} onSave={api.saveConfig} />
             </div>
-          )}
-        </div>
+          </section>
+        )}
       </div>
 
-      {/* 调试窗口（模态） */}
-      {showDebug && (
-        <DebugWindow events={rawEvents} readLogs={api.readLogs} onClose={() => setShowDebug(false)} />
-      )}
+      {/* 右栏 */}
+      <AsidePanel
+        terms={terms}
+        briefs={briefs}
+        expandedTerms={expandedTerms}
+        onToggleTerm={(id) => setExpandedTerms((prev) => ({ ...prev, [id]: !prev[id] }))}
+      />
+
+      {showDebug && <DebugWindow events={rawEvents} readLogs={api.readLogs} onClose={() => setShowDebug(false)} />}
     </div>
   );
 }

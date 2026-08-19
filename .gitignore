@@ -27,3 +27,5 @@ _meetily_src/
 # Misc
 dist/
 .env
+
+tmp/

@@ -9,6 +9,7 @@ export interface TranscriptLine {
   speakerLabel: string;
   text: string;
   isPartial: boolean;
+  tsMs: number;
 }
 
 /** segment 事件的最小形状（与 Rust DomainEvent::Segment 对应）。 */
@@ -16,6 +17,7 @@ export interface SegmentEvent {
   speaker_label: string;
   text: string;
   is_partial: boolean;
+  ts_ms?: number;
 }
 
 /** 转写行聚合器：增量处理 segment 事件，输出稳定的行列表。 */
@@ -31,28 +33,29 @@ export class TranscriptAccumulator {
 
   /** 处理一条 segment 事件。 */
   push(seg: SegmentEvent): void {
+    const tsMs = seg.ts_ms ?? Date.now();
     if (seg.is_partial) {
       if (this.lastPartialKey !== null) {
         // 更新未完成行
         this.lines = this.lines.map((l) =>
-          l.key === this.lastPartialKey ? { ...l, text: seg.text, isPartial: true } : l,
+          l.key === this.lastPartialKey ? { ...l, text: seg.text, isPartial: true, tsMs } : l,
         );
       } else {
         // 新起一行
         const key = this.nextKey++;
         this.lastPartialKey = key;
-        this.lines = [...this.lines, { key, speakerLabel: seg.speaker_label, text: seg.text, isPartial: true }];
+        this.lines = [...this.lines, { key, speakerLabel: seg.speaker_label, text: seg.text, isPartial: true, tsMs }];
       }
     } else {
       if (this.lastPartialKey !== null) {
         // 固化未完成行
         const key = this.lastPartialKey;
         this.lastPartialKey = null;
-        this.lines = this.lines.map((l) => (l.key === key ? { ...l, text: seg.text, isPartial: false } : l));
+        this.lines = this.lines.map((l) => (l.key === key ? { ...l, text: seg.text, isPartial: false, tsMs } : l));
       } else {
         // 直接新增一行
         const key = this.nextKey++;
-        this.lines = [...this.lines, { key, speakerLabel: seg.speaker_label, text: seg.text, isPartial: false }];
+        this.lines = [...this.lines, { key, speakerLabel: seg.speaker_label, text: seg.text, isPartial: false, tsMs }];
       }
     }
   }
