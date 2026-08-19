@@ -1,7 +1,8 @@
-// 历史面板：会话列表 + 全文搜索 + 详情查看（含质量/统计）+ 纪要生成。
+// 历史面板：会话列表 + 全文搜索 + 详情查看（含质量/统计/录音回放）+ 纪要生成 + 删除。
 
 import { useState } from "react";
 import type { NotesTemplate, SegmentHit, SessionDetail, SessionRecord } from "../lib/api";
+import { recordingUrl } from "../lib/transport";
 
 function formatTime(sec: number): string {
   const d = new Date(sec * 1000);
@@ -62,6 +63,23 @@ export default function HistorySection({
   const [query, setQuery] = useState("");
   const [templateId, setTemplateId] = useState(templates[0]?.id ?? "standard_meeting");
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  // 回放光标：{说话人, 音频秒}，用于同步高亮该说话人的当前段
+  const [playCursor, setPlayCursor] = useState<{ speaker: string; time: number } | null>(null);
+
+  /** 播放进度 → 更新光标。 */
+  function onPlay(speaker: string, time: number) {
+    setPlayCursor({ speaker, time });
+  }
+
+  /** 判断段是否处于播放高亮：段在录音中的位置 ≈ (ts_ms - duration_ms - started_at*1000)/1000。 */
+  function segActive(speaker: string, tsMs: number, idx: number, durationMs: number | undefined): boolean {
+    if (!playCursor || playCursor.speaker !== speaker || !detail) return false;
+    const t = playCursor.time;
+    const start = (tsMs - (durationMs ?? 0) - detail.started_at * 1000) / 1000;
+    const rest = detail.segments.slice(idx + 1).find((s) => s.speaker_label === speaker);
+    const nextStart = rest ? (rest.ts_ms - (rest.duration_ms ?? 0) - detail.started_at * 1000) / 1000 : Infinity;
+    return t >= start && t < nextStart;
+  }
 
   /** 删除二次确认：第一次点击进入确认态（3 秒后自动恢复），再次点击执行删除。 */
   function confirmDelete(id: number) {
@@ -165,6 +183,37 @@ export default function HistorySection({
             </div>
           )}
 
+          {/* 回放：历史录音（按流播放，转写同步高亮） */}
+          {(() => {
+            const recs = detail.meta?.streams.filter((s) => s.recording) ?? [];
+            if (recs.length === 0) return null;
+            return (
+              <div style={{ marginTop: 8, padding: "7px 9px", borderRadius: 6, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 6, color: "var(--text-2)" }}>回放（录音）</div>
+                {recs.map((s) => {
+                  const url = recordingUrl(s.recording);
+                  if (!url) return null;
+                  return (
+                    <div key={s.speaker_label} style={{ marginBottom: 8 }}>
+                      <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2, fontFamily: "monospace" }}>
+                        [{s.speaker_label}] {Math.round(s.total_ms / 1000)}s · {s.recording!.split(/[\\/]/).pop()}
+                      </div>
+                      <audio
+                        controls
+                        preload="metadata"
+                        src={url}
+                        style={{ width: "100%", height: 30 }}
+                        onTimeUpdate={(e) => onPlay(s.speaker_label, (e.target as HTMLAudioElement).currentTime)}
+                        onEnded={() => setPlayCursor(null)}
+                      />
+                    </div>
+                  );
+                })}
+                <div style={{ fontSize: 10, color: "var(--muted)" }}>播放时下方对应说话人的转写会同步高亮。</div>
+              </div>
+            );
+          })()}
+
           {/* 纪要生成 */}
           <div style={{ display: "flex", gap: 6, alignItems: "center", margin: "8px 0" }}>
             <select
@@ -207,7 +256,16 @@ export default function HistorySection({
 
           <div style={{ marginTop: 6 }}>
             {detail.segments.map((s, i) => (
-              <div key={i} style={{ marginBottom: 4, wordBreak: "break-word" }}>
+              <div
+                key={i}
+                style={{
+                  marginBottom: 4,
+                  wordBreak: "break-word",
+                  padding: "1px 4px",
+                  borderRadius: 4,
+                  background: segActive(s.speaker_label, s.ts_ms, i, s.duration_ms) ? "var(--brief-soft)" : undefined,
+                }}
+              >
                 <b style={{ color: s.speaker_id === 1 ? "var(--client)" : "var(--me)" }}>[{s.speaker_label}]</b> {s.text}
               </div>
             ))}

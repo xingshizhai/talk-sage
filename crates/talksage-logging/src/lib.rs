@@ -61,11 +61,11 @@ pub fn init(data_dir: Option<&PathBuf>) -> LogGuard {
             .with_current_span(true)
             .with_span_list(true)
             .with_writer(file_writer);
-        tracing_subscriber::registry()
+        let _ = tracing_subscriber::registry()
             .with(filter)
             .with(console)
             .with(file_layer)
-            .init();
+            .try_init(); // 幂等：已初始化时忽略（如 main 已 init 后 serve 再 init）
     } else {
         // 双文本（控制台 + 文件）
         let console = tracing_subscriber::fmt::layer()
@@ -74,13 +74,13 @@ pub fn init(data_dir: Option<&PathBuf>) -> LogGuard {
         let file_layer = tracing_subscriber::fmt::layer()
             .with_span_events(FmtSpan::NONE)
             .with_writer(file_writer);
-        tracing_subscriber::registry()
+        let _ = tracing_subscriber::registry()
             .with(filter)
             .with(console)
             .with(file_layer)
-            .init();
+            .try_init();
     }
-    // 桥接 `log` crate 宏到 tracing（项目内既有 log::* 调用）
+    // 桥接 `log` crate 宏到 tracing（项目内既有 log::* 调用；init 返回 Result，重复调用自动忽略）
     let _ = tracing_log::LogTracer::init();
 
     LogGuard {

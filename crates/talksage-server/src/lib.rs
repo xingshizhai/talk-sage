@@ -91,6 +91,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/voiceprint/status", axum::routing::get(voiceprint_status_api))
         .route("/voiceprint/enroll", axum::routing::post(voiceprint_enroll_api))
         .route("/voiceprint/remove", axum::routing::post(voiceprint_remove_api))
+        .route("/recordings/{filename}", axum::routing::get(get_recording_api))
         .route("/ws", get(ws_handler))
         .with_state(state);
 
@@ -580,6 +581,41 @@ async fn voiceprint_remove_api(
     }
     let _ = talksage_pipeline::speaker::remove_owner_embedding(state.config.data_dir());
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+/// 提供录音文件（历史会话回放）：`GET /api/recordings/<文件名>`。
+/// 仅允许录音目录内的文件（文件名白名单，防目录穿越）。
+async fn get_recording_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath(filename): AxumPath<String>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    // 解析录音目录（与监听时一致）
+    let snapshot = state.config.snapshot();
+    let rec_dir = snapshot.recording.resolve_dir(state.config.data_dir());
+    // 防目录穿越：仅允许文件名（不含分隔符）
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "bad filename" }))).into_response();
+    }
+    let path = rec_dir.join(&filename);
+    if !path.is_file() {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "not found" }))).into_response();
+    }
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "audio/wav".to_string()),
+                (axum::http::header::CACHE_CONTROL, "no-cache".to_string()),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
 }
 
 async fn handle_ws(mut socket: WebSocket, state: ServerState) {

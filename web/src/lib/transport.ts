@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { AppApi, AppConfig, DomainEvent, NotesTemplate, SegmentHit, SessionDetail, SessionRecord } from "./api";
 
@@ -224,4 +224,18 @@ export const httpApi: AppApi = {
 export function getApi(): AppApi {
   const isTauri = !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   return isTauri ? ipcApi : httpApi;
+}
+
+/** 把录音路径转为可播放 URL。
+ * - Tauri：本地文件经 asset 协议（需在 tauri.conf.json 配置 assetProtocol scope）
+ * - headless：按文件名走服务端 `/api/recordings/<name>` 端点
+ */
+export function recordingUrl(recordingPath: string | null | undefined): string | null {
+  if (!recordingPath) return null;
+  const isTauri = !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  if (isTauri) {
+    return convertFileSrc(recordingPath);
+  }
+  const name = recordingPath.split(/[\\/]/).pop() ?? recordingPath;
+  return `/api/recordings/${encodeURIComponent(name)}`;
 }
