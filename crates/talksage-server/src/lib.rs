@@ -87,6 +87,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/logs", get(read_logs_api))
         .route("/listen/start", axum::routing::post(start_listen_api))
         .route("/listen/stop", axum::routing::post(stop_listen_api))
+        .route("/noise_level", axum::routing::post(set_noise_level_api))
         .route("/ws", get(ws_handler))
         .with_state(state);
 
@@ -423,6 +424,28 @@ async fn stop_listen_api(State(state): State<ServerState>, headers: axum::http::
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
+/// 实时调节噪音电平（headless 版）。
+async fn set_noise_level_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let level: f32 = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("level").and_then(|l| l.as_f64()).map(|l| l as f32))
+        .unwrap_or(0.0);
+    match state.pipeline.lock().unwrap().as_ref() {
+        Some(p) => {
+            p.set_noise_level(level);
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "level": p.noise_level() }))).into_response()
+        }
+        None => (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "not listening" }))).into_response(),
+    }
+}
+
 async fn ws_handler(State(state): State<ServerState>, headers: axum::http::HeaderMap, ws: WebSocketUpgrade) -> impl IntoResponse {
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Html("unauthorized")).into_response();
@@ -559,5 +582,6 @@ fn build_pipeline_config(config: &ConfigManager) -> Result<LivePipelineConfig> {
         } else {
             None
         },
+        noise_level: Arc::new(std::sync::atomic::AtomicU32::new(0.0f32.to_bits())),
     })
 }

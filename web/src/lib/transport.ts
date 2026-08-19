@@ -58,6 +58,10 @@ export const ipcApi: AppApi = {
     await invoke("stop_listen");
   },
 
+  async setNoiseLevel(level: number): Promise<void> {
+    await invoke("set_noise_level", { level });
+  },
+
   async listSessions(): Promise<SessionRecord[]> {
     return invoke("list_sessions");
   },
@@ -124,6 +128,14 @@ export const httpApi: AppApi = {
 
   async stopListen(): Promise<void> {
     await req("/listen/stop", { method: "POST" });
+  },
+
+  async setNoiseLevel(level: number): Promise<void> {
+    await req("/noise_level", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ level }),
+    });
   },
 
   async listSessions(): Promise<SessionRecord[]> {

@@ -275,6 +275,7 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
         plugins: build_plugins(&state.config),
         plugin_ctx: build_plugin_ctx(&state.config),
         recording_dir,
+        noise_level: Arc::new(std::sync::atomic::AtomicU32::new(0.0f32.to_bits())),
     };
 
     let mut pipeline = LivePipeline::new(cfg);
@@ -370,8 +371,7 @@ fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.pipeline.lock().map_err(|_| "pipeline 锁失败".to_string())?;
     if let Some(mut p) = guard.take() {
         p.stop();
-    }
-    // 结束会话
+    }    // 结束会话
     if let Some(sid) = state.current_session.lock().unwrap().take() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -398,6 +398,19 @@ fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// 实时调节噪音电平（0 = 关闭；无需停止监听，下一音频块即生效）。
+#[tauri::command]
+fn set_noise_level(level: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let guard = state.pipeline.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+    match guard.as_ref() {
+        Some(p) => {
+            p.set_noise_level(level);
+            Ok(())
+        }
+        None => Err("未在监听中".into()),
+    }
 }
 
 /// 会话列表（历史）。
@@ -580,6 +593,7 @@ pub fn run() {
             ping,
             start_listen,
             stop_listen,
+            set_noise_level,
             list_sessions,
             search_sessions,
             get_session,

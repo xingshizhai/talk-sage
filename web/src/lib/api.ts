@@ -161,6 +161,8 @@ export interface AppApi {
   startListen(): Promise<void>;
   /** 停止实时监听。 */
   stopListen(): Promise<void>;
+  /** 实时调节噪音电平（0 = 关闭，监听中生效，无需重启）。 */
+  setNoiseLevel(level: number): Promise<void>;
   /** 历史：会话列表。 */
   listSessions(): Promise<SessionRecord[]>;
   /** 历史：全文检索。 */

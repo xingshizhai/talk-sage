@@ -50,6 +50,8 @@ export default function App() {
   const [templates, setTemplates] = useState<NotesTemplate[]>([]);
   const [notesBusy, setNotesBusy] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
+  const [noiseLevel, setNoiseLevel] = useState(0); // 0..100（UI 百分比）
+  const prevNoiseRef = useRef(-1);
   const accumulatorRef = useRef(new TranscriptAccumulator());
   const pointsRef = useRef(new KeyPointAggregator());
   const lastTranslationRef = useRef<Record<string, string>>({});
@@ -132,6 +134,27 @@ export default function App() {
       console.error("历史加载失败:", e);
     }
   }, []);
+
+  // 噪音电平：监听中防抖同步到后端（0..100 → 0..0.1 RMS 门限），无需停止监听
+  useEffect(() => {
+    if (!listening) return;
+    const t = setTimeout(() => {
+      if (prevNoiseRef.current === noiseLevel) return;
+      prevNoiseRef.current = noiseLevel;
+      api
+        .setNoiseLevel((noiseLevel / 100) * 0.1)
+        .catch((e) => console.error("设置噪音电平失败:", e));
+    }, 150);
+    return () => clearTimeout(t);
+  }, [noiseLevel, listening]);
+
+  // 停止监听后重置噪音电平（新会话默认关闭）
+  useEffect(() => {
+    if (!listening) {
+      setNoiseLevel(0);
+      prevNoiseRef.current = -1;
+    }
+  }, [listening]);
 
   const handleHistorySearch = useCallback(async (q: string) => {
     setDetail(null);
@@ -235,6 +258,8 @@ export default function App() {
         onToggleListen={handleListen}
         onOpenDebug={() => setShowDebug(true)}
         onNavigate={handleNavigate}
+        noiseLevel={noiseLevel}
+        onNoiseLevel={setNoiseLevel}
       />
 
       {/* 主区：不滚动，滚动交给内部子区域（转写/要点/历史/设置各自 flex+overflow） */}

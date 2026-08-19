@@ -7,6 +7,7 @@
 //! 每条流独立 VAD 分段 + 流式 ASR（增量 partial → 段结束 final）。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -70,6 +71,9 @@ pub struct LivePipelineConfig {
     pub plugin_ctx: talksage_plugins::PluginContext,
     /// 录音目录（Some 时监听期间把每条流的原始音频保存为 `{ts}_{speaker_label}.wav`）。
     pub recording_dir: Option<PathBuf>,
+    /// 运行时噪音电平（f32 bits，0 = 不启用）：监听中可实时调节。
+    /// 块 RMS 低于该值的音频在进入 VAD/ASR 前被静音（抑制背景噪音）。
+    pub noise_level: Arc<AtomicU32>,
 }
 
 /// 实时管道：持有组件并在专用线程中运行事件循环。
@@ -77,15 +81,32 @@ pub struct LivePipeline {
     cfg: Arc<LivePipelineConfig>,
     tx_stop: Option<mpsc::Sender<()>>,
     handle: Option<std::thread::JoinHandle<()>>,
+    /// 运行时噪音电平（f32 bits；与 cfg 共享，`set_noise_level` 实时更新）。
+    noise_level: Arc<AtomicU32>,
 }
 
 impl LivePipeline {
     pub fn new(cfg: LivePipelineConfig) -> Self {
+        let noise_level = cfg.noise_level.clone();
         Self {
             cfg: Arc::new(cfg),
             tx_stop: None,
             handle: None,
+            noise_level,
         }
+    }
+
+    /// 实时调节噪音电平（0 = 关闭；0..0.1 常用范围）。
+    /// 无需停止监听，下一音频块即生效。
+    pub fn set_noise_level(&self, level: f32) {
+        let level = level.clamp(0.0, 0.5);
+        self.noise_level.store(level.to_bits(), Ordering::Relaxed);
+        log::info!("运行时噪音电平已更新: {level:.4}");
+    }
+
+    /// 当前噪音电平。
+    pub fn noise_level(&self) -> f32 {
+        f32::from_bits(self.noise_level.load(Ordering::Relaxed))
     }
 
     /// 在专用线程中启动管道；返回后可用 `stop()` 停止。
@@ -228,6 +249,8 @@ struct StreamWorker {
     non_speech_rms_sum: f64,
     /// 非语音块数。
     non_speech_blocks: u64,
+    /// 运行时噪音电平（f32 bits；0 = 不启用）。
+    noise_level: Arc<AtomicU32>,
 }
 
 impl StreamWorker {
@@ -239,6 +262,7 @@ impl StreamWorker {
         vad_model: &PathBuf,
         chunk_ms: u64,
         recording_path: Option<PathBuf>,
+        noise_level: Arc<AtomicU32>,
     ) -> anyhow::Result<Self> {
         let (threshold, min_speech, min_silence, window, max_speech) = vad_cfg.effective();
         log::info!(
@@ -319,6 +343,7 @@ impl StreamWorker {
             final_segments: 0,
             non_speech_rms_sum: 0.0,
             non_speech_blocks: 0,
+            noise_level,
         })
     }
 
@@ -385,27 +410,32 @@ impl StreamWorker {
         };
 
         // 统计：原始块能量（预处理前，反映环境噪音真实水平）
-        {
-            let block_rms = if chunk.is_empty() {
-                0.0
-            } else {
-                (chunk.iter().map(|&x| x * x).sum::<f32>() / chunk.len() as f32).sqrt()
-            };
-            self.total_samples += chunk.len() as u64;
-            self.rms_sum += (block_rms as f64) * (block_rms as f64) * chunk.len() as f64;
-            if block_rms > self.max_rms {
-                self.max_rms = block_rms;
-            }
-            // 非语音块（VAD 判定前 in_speech=false）→ 背景噪音水平
-            if !self.in_speech {
-                self.non_speech_blocks += 1;
-                self.non_speech_rms_sum += (block_rms as f64) * (block_rms as f64) * chunk.len() as f64;
-            }
+        let block_rms = if chunk.is_empty() {
+            0.0
+        } else {
+            (chunk.iter().map(|&x| x * x).sum::<f32>() / chunk.len() as f32).sqrt()
+        };
+        self.total_samples += chunk.len() as u64;
+        self.rms_sum += (block_rms as f64) * (block_rms as f64) * chunk.len() as f64;
+        if block_rms > self.max_rms {
+            self.max_rms = block_rms;
+        }
+        // 非语音块（VAD 判定前 in_speech=false）→ 背景噪音水平
+        if !self.in_speech {
+            self.non_speech_blocks += 1;
+            self.non_speech_rms_sum += (block_rms as f64) * (block_rms as f64) * chunk.len() as f64;
         }
 
         // 录音：原始 PCM（预处理前），方便后续裁剪/降噪对比
         if let Some(rec) = &mut self.recorder {
             let _ = rec.write(&chunk);
+        }
+
+        // 运行时噪音电平（监听中可调，无需重启）：块能量低于门槛 → 静音（抑制背景噪音）
+        let nl = f32::from_bits(self.noise_level.load(Ordering::Relaxed));
+        if nl > 0.0 && block_rms < nl {
+            log::debug!("噪音电平={nl:.5} 静音块 RMS={block_rms:.5}");
+            chunk.fill(0.0);
         }
 
         // 背景噪音预处理（高通/噪声门），再进 VAD/ASR
@@ -583,7 +613,16 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             let safe = sc.speaker_label.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
             dir.join(format!("{rec_ts}_{safe}.wav"))
         });
-        let mut w = StreamWorker::new(sc, &cfg.vad, &cfg.denoise, cfg.asr_threads, &cfg.vad_model, cfg.chunk_ms, rec_path)?;
+        let mut w = StreamWorker::new(
+            sc,
+            &cfg.vad,
+            &cfg.denoise,
+            cfg.asr_threads,
+            &cfg.vad_model,
+            cfg.chunk_ms,
+            rec_path,
+            cfg.noise_level.clone(),
+        )?;
         w.start_input(cfg.chunk_ms)?;
         log::info!(
             "流[{}] 就绪: engine={} model={} 加载耗时={:?}",

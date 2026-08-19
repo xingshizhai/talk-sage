@@ -64,6 +64,9 @@ enum Command {
         /// 不保存录音（默认按配置 recording.enabled 决定）
         #[arg(long)]
         no_record: bool,
+        /// 运行时噪音电平（0 = 关闭；0.005~0.05 常用），监听中可实时调节
+        #[arg(long, default_value_t = 0.0)]
+        noise_level: f32,
     },
     /// 导入音频离线转写并保存为新会话。
     Import {
@@ -134,7 +137,8 @@ fn main() -> ExitCode {
             kb,
             save,
             no_record,
-        } => cmd_listen(&input, seconds, &engine, client.as_deref(), kb.as_deref(), save, no_record),
+            noise_level,
+        } => cmd_listen(&input, seconds, &engine, client.as_deref(), kb.as_deref(), save, no_record, noise_level),
         Command::Import { path, engine, speaker } => cmd_import(&path, &engine, &speaker),
         Command::Trim {
             path,
@@ -201,6 +205,7 @@ fn cmd_listen(
     kb_folder: Option<&str>,
     save: bool,
     no_record: bool,
+    noise_level: f32,
 ) -> ExitCode {
     let kind = match EngineKind::from_name(engine) {
         Some(k) => k,
@@ -379,6 +384,7 @@ fn cmd_listen(
         plugins,
         plugin_ctx,
         recording_dir,
+        noise_level: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(noise_level.clamp(0.0, 0.5).to_bits())),
     };
 
     let stop_after = seconds;
@@ -608,6 +614,7 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
         plugins: Vec::new(),
         plugin_ctx: talksage_plugins::PluginContext::new(),
         recording_dir: None,
+        noise_level: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0.0f32.to_bits())),
     };
 
     // 收集 final 段

@@ -25,6 +25,8 @@ export default function SideNav({
   onToggleListen,
   onOpenDebug,
   onNavigate,
+  noiseLevel,
+  onNoiseLevel,
 }: {
   theme: Theme;
   onToggleTheme: () => void;
@@ -34,6 +36,8 @@ export default function SideNav({
   onToggleListen: () => void;
   onOpenDebug: () => void;
   onNavigate: (key: string) => void;
+  noiseLevel: number;
+  onNoiseLevel: (level: number) => void;
 }) {
   return (
     <nav
@@ -104,6 +108,32 @@ export default function SideNav({
           </div>
         ))}
       </div>
+
+      {/* 噪音电平（监听中可实时调节，无需停止监听） */}
+      {listening && (
+        <div style={{ margin: "0 10px 10px", padding: "10px 11px", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+            <span style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 700 }}>噪音电平</span>
+            <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--live)", fontFamily: "monospace", fontWeight: 600 }}>
+              {noiseLevel}%
+            </span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={noiseLevel}
+            onChange={(e) => onNoiseLevel(Number(e.target.value))}
+            title="实时调节噪音电平：调高抑制背景噪音（轻声也可能被压），调低更灵敏"
+            style={{ width: "100%", accentColor: "var(--live)", cursor: "pointer" }}
+          />
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", fontFamily: "monospace", marginTop: 2 }}>
+            <span>0 关闭</span>
+            <span>{noiseLevel === 0 ? "默认" : noiseLevel < 50 ? "弱抑制" : "强抑制"}</span>
+          </div>
+        </div>
+      )}
 
       {/* 监听 / 调试 */}
       <div style={{ margin: "0 10px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
