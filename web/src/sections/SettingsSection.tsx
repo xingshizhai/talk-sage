@@ -1,18 +1,21 @@
-// 设置面板：按 Tab 归类（ASR 转写 / 插件分析 / 会议录音 / 噪音检测 / LLM）。
+// 设置面板：按 Tab 归类（ASR 转写 / 插件分析 / 会议录音 / 噪音检测 / 声音标识 / LLM）。
 // 保存写入 talksage.toml。
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { AppConfig } from "../lib/api";
+import { getApi } from "../lib/transport";
 
+const api = getApi();
 const PROVIDERS = ["deepseek", "kimi", "minimax", "groq", "ollama", "claude"];
 
-type SettingsTab = "asr" | "plugins" | "recording" | "quality" | "llm";
+type SettingsTab = "asr" | "plugins" | "recording" | "quality" | "voice" | "llm";
 
 const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "asr", label: "ASR 转写", desc: "引擎 / 灵敏度 / 降噪" },
   { key: "plugins", label: "插件分析", desc: "术语 / 翻译 / 简报 / 知识库" },
   { key: "recording", label: "会议录音", desc: "录音开关与目录" },
   { key: "quality", label: "噪音检测", desc: "会话质量阈值" },
+  { key: "voice", label: "声音标识", desc: "注册主人声音，识别说话人" },
   { key: "llm", label: "LLM", desc: "默认模型与密钥" },
 ];
 
@@ -46,6 +49,53 @@ export default function SettingsSection({
   const [qHighRms, setQHighRms] = useState(config?.quality?.high_rms ?? 0.5);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  // 声音标识
+  const [voiceStatus, setVoiceStatus] = useState<{ model_available: boolean; enrolled: boolean } | null>(null);
+  const [enrolling, setEnrolling] = useState(false);
+  const [enrollCount, setEnrollCount] = useState(0);
+
+  // 加载声纹状态
+  useEffect(() => {
+    (async () => {
+      try {
+        setVoiceStatus(await api.getVoiceprintStatus());
+      } catch (e) {
+        console.error("读取声纹状态失败:", e);
+      }
+    })();
+  }, []);
+
+  /** 录制主人声音（countdown 秒）并保存声纹。 */
+  async function handleEnroll() {
+    const seconds = 6;
+    setEnrolling(true);
+    setMessage("");
+    setEnrollCount(seconds);
+    // 倒计时 UI
+    const timer = setInterval(() => setEnrollCount((c) => c - 1), 1000);
+    try {
+      const r = await api.enrollVoice(seconds);
+      setVoiceStatus({ model_available: true, enrolled: true });
+      setMessage(`声音标识已保存（声纹维度 ${r.dim}）。监听时将优先识别为「我」。`);
+    } catch (e) {
+      setMessage(`声音标识失败: ${e}`);
+    } finally {
+      clearInterval(timer);
+      setEnrollCount(0);
+      setEnrolling(false);
+    }
+  }
+
+  /** 删除主人声纹。 */
+  async function handleRemoveVoice() {
+    try {
+      await api.removeVoiceprint();
+      setVoiceStatus((s) => (s ? { ...s, enrolled: false } : s));
+      setMessage("声音标识已删除");
+    } catch (e) {
+      setMessage(`删除失败: ${e}`);
+    }
+  }
 
   const inputStyle: React.CSSProperties = {
     fontSize: 12,
@@ -282,6 +332,54 @@ export default function SettingsSection({
             </div>
           )}
           <div style={hint}>噪音/静音会话会自动跳过要点聚合等下游分析，历史详情可见质量标记。</div>
+        </div>
+      )}
+
+      {/* ── 声音标识 ── */}
+      {tab === "voice" && (
+        <div>
+          <h3 style={groupTitle}>说话人识别（先识别主人，再区分其他人）</h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
+            <div style={{ fontSize: 12 }}>
+              声纹模型：
+              {voiceStatus === null ? (
+                <span style={{ color: "var(--muted)" }}> 检查中…</span>
+              ) : voiceStatus.model_available ? (
+                <span style={{ color: "var(--live)" }}> 已安装 ✓</span>
+              ) : (
+                <span style={{ color: "var(--danger)" }}> 未安装（运行 scripts/download_models.py wespeaker）</span>
+              )}
+            </div>
+            <div style={{ fontSize: 12 }}>
+              我的声音：
+              {voiceStatus === null ? (
+                <span style={{ color: "var(--muted)" }}> 检查中…</span>
+              ) : voiceStatus.enrolled ? (
+                <span style={{ color: "var(--live)" }}> 已注册 ✓ 监听时您的发言将标记为「我」</span>
+              ) : (
+                <span style={{ color: "var(--brief)" }}> 未注册</span>
+              )}
+            </div>
+          </div>
+          <div style={hint}>
+            点击「录制我的声音」，对着麦克风正常说话 6 秒（保持环境安静）。之后监听时：
+            您的发言标记为「我」，其他说话人自动区分为「客户1」「客户2」…
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button
+              onClick={handleEnroll}
+              disabled={enrolling || !voiceStatus?.model_available}
+              style={{ fontSize: 12 }}
+            >
+              {enrolling ? `录制中… ${enrollCount}s` : voiceStatus?.enrolled ? "重新录制我的声音" : "录制我的声音"}
+            </button>
+            {voiceStatus?.enrolled && (
+              <button onClick={handleRemoveVoice} disabled={enrolling} style={{ fontSize: 12 }}>
+                删除声音标识
+              </button>
+            )}
+          </div>
+          <div style={hint}>未注册声音时保持原双流标签（我 / 客户）；录音仍可用于测试闭环。</div>
         </div>
       )}
 

@@ -28,6 +28,19 @@ const SPEAKER_STYLE: Record<string, { color: string; engine: string }> = {
   客户: { color: "var(--client)", engine: "zipformer-en" },
 };
 
+// 动态说话人（客户1/客户2…）循环配色
+const CLIENT_COLORS = ["var(--client)", "var(--term)", "var(--brief)", "var(--live)", "var(--danger)", "var(--me)"];
+
+function speakerStyle(label: string): { color: string; engine: string } {
+  if (label === "我") return SPEAKER_STYLE["我"];
+  const m = /^客户(\d+)$/.exec(label);
+  if (m) {
+    const n = Number(m[1]);
+    return { color: CLIENT_COLORS[(n - 1) % CLIENT_COLORS.length], engine: "zipformer-en" };
+  }
+  return SPEAKER_STYLE[label] ?? { color: "var(--muted)", engine: "?" };
+}
+
 export default function App() {
   // 主题 / 转写模式从持久化偏好恢复
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
@@ -72,7 +85,7 @@ export default function App() {
         acc.push(ev);
         setLines(
           acc.getLines().map((l) => {
-            const st = SPEAKER_STYLE[l.speakerLabel] ?? { color: "var(--muted)", engine: "?" };
+            const st = speakerStyle(l.speakerLabel);
             return {
               key: l.key,
               time: fmtTime(l.tsMs),

@@ -45,7 +45,7 @@ impl AnalyzerPlugin for TranslatorPlugin {
 
     fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> Option<DomainEvent> {
         let llm = ctx.llm.as_ref()?;
-        let direction = if seg.speaker_id == 1 {
+        let direction = if seg.speaker_id != 0 {
             TranslationDirection::EnZh
         } else {
             TranslationDirection::ZhEn

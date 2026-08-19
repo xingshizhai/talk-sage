@@ -88,6 +88,9 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/listen/start", axum::routing::post(start_listen_api))
         .route("/listen/stop", axum::routing::post(stop_listen_api))
         .route("/noise_level", axum::routing::post(set_noise_level_api))
+        .route("/voiceprint/status", axum::routing::get(voiceprint_status_api))
+        .route("/voiceprint/enroll", axum::routing::post(voiceprint_enroll_api))
+        .route("/voiceprint/remove", axum::routing::post(voiceprint_remove_api))
         .route("/ws", get(ws_handler))
         .with_state(state);
 
@@ -453,6 +456,117 @@ async fn ws_handler(State(state): State<ServerState>, headers: axum::http::Heade
     ws.on_upgrade(move |socket| handle_ws(socket, state))
 }
 
+/// 说话人声纹状态（headless 版）。
+async fn voiceprint_status_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    // 模型路径探测（与 tauri 一致：models/wespeaker）
+    let model_ok = {
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(base) = exe.parent() {
+                candidates.push(base.join("../../models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx"));
+                candidates.push(base.join("../../../models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx"));
+            }
+        }
+        candidates.push(std::path::PathBuf::from("models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx"));
+        candidates.push(std::path::PathBuf::from("../models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx"));
+        candidates.into_iter().any(|p| p.is_file())
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "model_available": model_ok,
+            "enrolled": talksage_pipeline::speaker::owner_enrolled(state.config.data_dir()),
+        })),
+    )
+        .into_response()
+}
+
+/// 注册主人声音（headless 版：服务器本机麦克风录制）。
+async fn voiceprint_enroll_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let seconds: u32 = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("seconds").and_then(|s| s.as_u64()))
+        .unwrap_or(6)
+        .max(3) as u32;
+    let model = {
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(base) = exe.parent() {
+                candidates.push(base.join("../../models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx"));
+                candidates.push(base.join("../../../models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx"));
+            }
+        }
+        candidates.push(std::path::PathBuf::from("models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx"));
+        candidates.push(std::path::PathBuf::from("../models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx"));
+        candidates.into_iter().find(|p| p.is_file())
+    };
+    let Some(model) = model else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "missing speaker model" }))).into_response();
+    };
+    let data_dir = state.config.data_dir().to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        use sherpa_onnx::{SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig};
+        let extractor = SpeakerEmbeddingExtractor::create(&SpeakerEmbeddingExtractorConfig {
+            model: Some(model.to_string_lossy().into()),
+            num_threads: 1,
+            debug: false,
+            provider: Some("cpu".into()),
+        })
+        .ok_or_else(|| "声纹模型加载失败".to_string())?;
+        let (mut hub, rx) = talksage_audio::AudioHub::new(100);
+        hub.start(None).map_err(|e| format!("启动麦克风失败: {e}"))?;
+        let mut audio: Vec<f32> = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds as u64);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(c) => audio.extend_from_slice(&c),
+                Err(_) => {}
+            }
+        }
+        hub.stop();
+        let stream = extractor.create_stream().ok_or("创建声纹流失败")?;
+        stream.accept_waveform(16000, &audio);
+        if !extractor.is_ready(&stream) {
+            return Err("采集音频太短".to_string());
+        }
+        let emb = extractor.compute(&stream).ok_or("声纹提取失败")?;
+        talksage_pipeline::speaker::save_owner_embedding(&data_dir, &emb)
+            .map_err(|e| format!("保存声纹失败: {e}"))?;
+        Ok::<Vec<f32>, String>(emb)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("任务失败: {e}")));
+    match result {
+        Ok(emb) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "dim": emb.len() }))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    }
+}
+
+/// 删除主人声纹（headless 版）。
+async fn voiceprint_remove_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let _ = talksage_pipeline::speaker::remove_owner_embedding(state.config.data_dir());
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
 async fn handle_ws(mut socket: WebSocket, state: ServerState) {
     let mut rx = state.events.subscribe();
     loop {
@@ -583,5 +697,19 @@ fn build_pipeline_config(config: &ConfigManager) -> Result<LivePipelineConfig> {
             None
         },
         noise_level: Arc::new(std::sync::atomic::AtomicU32::new(0.0f32.to_bits())),
+        // 说话人识别（headless 同启用）
+        speaker: {
+            let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
+            if spk_model.is_file() {
+                let owner = talksage_pipeline::speaker::load_owner_embedding(config.data_dir());
+                Some(talksage_pipeline::SpeakerConfig {
+                    model: spk_model,
+                    owner_embedding: owner,
+                    threshold: talksage_pipeline::speaker::DEFAULT_THRESHOLD,
+                })
+            } else {
+                None
+            }
+        },
     })
 }

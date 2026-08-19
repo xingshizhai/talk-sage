@@ -9,9 +9,13 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use sherpa_onnx::{
+    SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig,
+};
 use tauri::{Emitter, Manager, WindowEvent};
+use talksage_audio::AudioHub;
 use talksage_config::ConfigManager;
 use talksage_core::{DomainEvent, ResultStatus, StatusStage};
 use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConfig};
@@ -276,6 +280,21 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
         plugin_ctx: build_plugin_ctx(&state.config),
         recording_dir,
         noise_level: Arc::new(std::sync::atomic::AtomicU32::new(0.0f32.to_bits())),
+        // 说话人识别：wespeaker 模型 + 已注册的主人声纹
+        speaker: {
+            let model_dir = model_dir.clone();
+            let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
+            if spk_model.is_file() {
+                let owner = talksage_pipeline::speaker::load_owner_embedding(state.config.data_dir());
+                Some(talksage_pipeline::SpeakerConfig {
+                    model: spk_model,
+                    owner_embedding: owner,
+                    threshold: talksage_pipeline::speaker::DEFAULT_THRESHOLD,
+                })
+            } else {
+                None
+            }
+        },
     };
 
     let mut pipeline = LivePipeline::new(cfg);
@@ -411,6 +430,73 @@ fn set_noise_level(level: f32, state: tauri::State<'_, AppState>) -> Result<(), 
         }
         None => Err("未在监听中".into()),
     }
+}
+
+/// 说话人声纹状态：模型是否可用、主人是否已注册。
+#[tauri::command]
+fn get_voiceprint_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
+    let model_available = speaker_model_path().is_file();
+    let enrolled = talksage_pipeline::speaker::owner_enrolled(state.config.data_dir());
+    serde_json::json!({
+        "model_available": model_available,
+        "enrolled": enrolled,
+    })
+}
+
+/// 注册主人声音：录制麦克风 `seconds` 秒 → 提取声纹 → 保存。
+#[tauri::command]
+fn enroll_voice(seconds: u32, state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    // 正在监听时不允许注册（麦克风被占用）
+    if state.pipeline.lock().unwrap().is_some() {
+        return Err("请先停止监听再录制声音".into());
+    }
+    let model = speaker_model_path();
+    if !model.is_file() {
+        return Err(format!("缺少声纹模型: {}", model.display()));
+    }
+    let extractor = SpeakerEmbeddingExtractor::create(&SpeakerEmbeddingExtractorConfig {
+        model: Some(model.to_string_lossy().into()),
+        num_threads: 1,
+        debug: false,
+        provider: Some("cpu".into()),
+    })
+    .ok_or("声纹模型加载失败")?;
+
+    let (mut hub, rx) = AudioHub::new(100);
+    hub.start(None).map_err(|e| format!("启动麦克风失败: {e}"))?;
+    log::info!("声纹注册：录制 {} 秒…", seconds);
+    let mut audio: Vec<f32> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(seconds.max(3) as u64);
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(c) => audio.extend_from_slice(&c),
+            Err(_) => {}
+        }
+    }
+    hub.stop();
+
+    let stream = extractor.create_stream().ok_or("创建声纹流失败")?;
+    stream.accept_waveform(16000, &audio);
+    if !extractor.is_ready(&stream) {
+        return Err("采集到的音频太短，无法提取声纹（请保持安静并正常说话）".into());
+    }
+    let emb = extractor.compute(&stream).ok_or("声纹提取失败")?;
+    talksage_pipeline::speaker::save_owner_embedding(state.config.data_dir(), &emb)
+        .map_err(|e| format!("保存声纹失败: {e}"))?;
+    log::info!("声纹注册完成: dim={} samples={}", emb.len(), audio.len());
+    Ok(serde_json::json!({ "ok": true, "dim": emb.len() }))
+}
+
+/// 删除已注册的主人声纹。
+#[tauri::command]
+fn remove_voiceprint(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    talksage_pipeline::speaker::remove_owner_embedding(state.config.data_dir())
+        .map_err(|e| format!("删除声纹失败: {e}"))
+}
+
+/// 声纹模型路径（models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx）。
+fn speaker_model_path() -> PathBuf {
+    resolve_models_dir().join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx")
 }
 
 /// 会话列表（历史）。
@@ -594,6 +680,9 @@ pub fn run() {
             start_listen,
             stop_listen,
             set_noise_level,
+            get_voiceprint_status,
+            enroll_voice,
+            remove_voiceprint,
             list_sessions,
             search_sessions,
             get_session,

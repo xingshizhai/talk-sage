@@ -163,6 +163,12 @@ export interface AppApi {
   stopListen(): Promise<void>;
   /** 实时调节噪音电平（0 = 关闭，监听中生效，无需重启）。 */
   setNoiseLevel(level: number): Promise<void>;
+  /** 说话人声纹状态。 */
+  getVoiceprintStatus(): Promise<{ model_available: boolean; enrolled: boolean }>;
+  /** 注册主人声音（录制麦克风 seconds 秒 → 提取声纹保存）。 */
+  enrollVoice(seconds: number): Promise<{ ok: boolean; dim: number }>;
+  /** 删除主人声纹。 */
+  removeVoiceprint(): Promise<void>;
   /** 历史：会话列表。 */
   listSessions(): Promise<SessionRecord[]>;
   /** 历史：全文检索。 */

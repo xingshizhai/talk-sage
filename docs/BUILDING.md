@@ -142,7 +142,7 @@ $env:SHERPA_ONNX_ARCHIVE_DIR = "$PWD\.tools\sherpa-onnx-archives"
 
 **方式 B：让构建自动下载**（需要能访问 GitHub Releases）
 
-### 3.3 下载 ASR 模型（运行期必需，约 310MB）
+### 3.3 下载 ASR 模型（运行期必需，约 340MB）
 
 ```powershell
 # 需要 Python 3（任意环境，脚本用标准库）
@@ -151,7 +151,11 @@ python scripts\download_models.py all
 #   sherpa-onnx-streaming-paraformer-zh/   （中文 streaming paraformer，int8）
 #   sherpa-onnx-streaming-zipformer-en-2023-06-26/ （英文 streaming zipformer，int8）
 #   silero-vad/silero_vad.onnx             （VAD）
+#   wespeaker/wespeaker_zh_cnceleb_resnet34.onnx （声纹模型，说话人识别，26MB）
+# 只下载声纹模型： python scripts\download_models.py wespeaker
 ```
+
+> 声纹模型用于「说话人识别」：设置页「声音标识」注册主人声音后，监听时先识别主人（标记「我」），其他说话人自动区分为「客户1/客户2/…」。未下载/未注册时保持原双流标签。
 
 ### 3.4 前端依赖
 

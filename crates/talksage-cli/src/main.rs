@@ -385,6 +385,7 @@ fn cmd_listen(
         plugin_ctx,
         recording_dir,
         noise_level: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(noise_level.clamp(0.0, 0.5).to_bits())),
+        speaker: build_speaker_config(&mgr),
     };
 
     let stop_after = seconds;
@@ -615,6 +616,7 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
         plugin_ctx: talksage_plugins::PluginContext::new(),
         recording_dir: None,
         noise_level: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0.0f32.to_bits())),
+        speaker: None,
     };
 
     // 收集 final 段
@@ -693,6 +695,21 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
         println!("  [{}] {}", s.speaker_label, s.text);
     }
     ExitCode::SUCCESS
+}
+
+/// 构造说话人识别配置：wespeaker 模型 + 已注册的主人声纹（有则启用）。
+fn build_speaker_config(mgr: &talksage_config::ConfigManager) -> Option<talksage_pipeline::SpeakerConfig> {
+    let model_dir = resolve_models_dir()?;
+    let model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
+    if !model.is_file() {
+        return None;
+    }
+    let owner = talksage_pipeline::speaker::load_owner_embedding(mgr.data_dir());
+    Some(talksage_pipeline::SpeakerConfig {
+        model,
+        owner_embedding: owner,
+        threshold: talksage_pipeline::speaker::DEFAULT_THRESHOLD,
+    })
 }
 
 fn cmd_trim(path: &str, output: Option<&str>, preset: &str, model: Option<&str>) -> ExitCode {

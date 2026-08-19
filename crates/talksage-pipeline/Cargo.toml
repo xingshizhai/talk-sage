@@ -13,6 +13,7 @@ talksage-plugins = { path = "../talksage-plugins" }
 talksage-llm = { path = "../talksage-llm" }
 talksage-config = { path = "../talksage-config" }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 sherpa-onnx = "1.13"
 log = "0.4"
 

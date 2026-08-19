@@ -19,6 +19,19 @@ use talksage_config::{DenoiseConfig, VadConfig};
 use talksage_core::{DomainEvent, StatusStage, TranscriptSegment};
 use talksage_plugins::AnalyzerPlugin;
 
+pub mod speaker;
+
+/// 说话人识别配置（可选）。
+#[derive(Clone)]
+pub struct SpeakerConfig {
+    /// wespeaker 声纹模型路径。
+    pub model: PathBuf,
+    /// 主人声纹（已注册时 Some）。
+    pub owner_embedding: Option<Vec<f32>>,
+    /// 判定阈值（余弦相似度）。
+    pub threshold: f32,
+}
+
 /// 事件发射器（Tauri 侧桥接 app.emit；headless 侧桥接 WS）。Arc 共享，可跨线程。
 pub type EventSink = Arc<dyn Fn(DomainEvent) + Send + Sync>;
 
@@ -74,6 +87,8 @@ pub struct LivePipelineConfig {
     /// 运行时噪音电平（f32 bits，0 = 不启用）：监听中可实时调节。
     /// 块 RMS 低于该值的音频在进入 VAD/ASR 前被静音（抑制背景噪音）。
     pub noise_level: Arc<AtomicU32>,
+    /// 说话人识别（可选；None = 无声纹/模型，保持流默认标签）。
+    pub speaker: Option<SpeakerConfig>,
 }
 
 /// 实时管道：持有组件并在专用线程中运行事件循环。
@@ -251,6 +266,10 @@ struct StreamWorker {
     non_speech_blocks: u64,
     /// 运行时噪音电平（f32 bits；0 = 不启用）。
     noise_level: Arc<AtomicU32>,
+    /// 说话人识别器（共享；None = 未启用）。
+    speaker: Option<speaker::SharedSpeaker>,
+    /// 当前语音段音频缓冲（说话人识别用，≤30s）。
+    seg_audio: Vec<f32>,
 }
 
 impl StreamWorker {
@@ -263,6 +282,7 @@ impl StreamWorker {
         chunk_ms: u64,
         recording_path: Option<PathBuf>,
         noise_level: Arc<AtomicU32>,
+        speaker: Option<speaker::SharedSpeaker>,
     ) -> anyhow::Result<Self> {
         let (threshold, min_speech, min_silence, window, max_speech) = vad_cfg.effective();
         log::info!(
@@ -344,6 +364,8 @@ impl StreamWorker {
             non_speech_rms_sum: 0.0,
             non_speech_blocks: 0,
             noise_level,
+            speaker,
+            seg_audio: Vec::new(),
         })
     }
 
@@ -450,12 +472,21 @@ impl StreamWorker {
             self.seg_start_ms = now_ms();
             self.seg_samples = 0;
             self.seg_rms_acc = 0.0;
+            self.seg_audio.clear();
         }
 
         if self.in_speech {
             self.seg_samples += chunk.len() as u64;
             self.speech_samples += chunk.len() as u64;
             self.seg_rms_acc += chunk.iter().map(|&x| x * x).sum::<f32>() as f64;
+            // 说话人音频缓冲（预处理后，限 30s，说话人识别用）
+            if self.speaker.is_some() {
+                const MAX_SEG_AUDIO: usize = 480000; // 30s @16k
+                let remain = MAX_SEG_AUDIO.saturating_sub(self.seg_audio.len());
+                if remain > 0 {
+                    self.seg_audio.extend_from_slice(&chunk[..chunk.len().min(remain)]);
+                }
+            }
             if let Some(text) = self.engine.accept(&chunk) {
                 let text = text.trim().to_string();
                 if !text.is_empty() && text != self.last_partial {
@@ -500,17 +531,35 @@ impl StreamWorker {
             } else {
                 0.0
             };
+            // 说话人判定（声纹）：先识别主人，再区分其他说话人
+            let mut label = self.speaker_label.clone();
+            let mut sid = self.speaker_id;
+            if let Some(sp) = &self.speaker {
+                let identified = sp.identify(&self.seg_audio, &self.speaker_label);
+                if identified == "我" {
+                    label = "我".into();
+                    sid = 0;
+                } else if let Some(rest) = identified.strip_prefix("客户") {
+                    if let Ok(n) = rest.parse::<u32>() {
+                        label = identified.clone();
+                        sid = n;
+                    } else {
+                        label = identified.clone();
+                    }
+                } else {
+                    label = identified.clone();
+                }
+            }
             log::info!(
-                "段完成[{}] 时长={}ms rms={:.4} 字数={} 文本={}",
+                "段完成[{}] 说话人判定=[{label}] 时长={}ms rms={rms:.4} 字数={} 文本={}",
                 self.speaker_label,
                 duration_ms,
-                rms,
                 final_text.chars().count(),
                 final_text.chars().take(60).collect::<String>(),
             );
             let seg = TranscriptSegment {
-                speaker_id: self.speaker_id,
-                speaker_label: self.speaker_label.clone(),
+                speaker_id: sid,
+                speaker_label: label.clone(),
                 text: final_text.clone(),
                 is_partial: false,
                 ts_ms: now_ms(),
@@ -533,6 +582,7 @@ impl StreamWorker {
         }
         self.last_partial.clear();
         self.engine.reset();
+        self.seg_audio.clear();
     }
 
     /// 流级统计（会话结束回溯用）。
@@ -597,6 +647,24 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
 
     // 构建各流（client 流失败降级为仅 user 流，不影响主链路）
     let mut workers: Vec<StreamWorker> = Vec::new();
+    // 说话人识别器（共享；模型缺失/未注册 → None，保持流默认标签）
+    let shared_speaker: Option<speaker::SharedSpeaker> = cfg.speaker.as_ref().and_then(|sc| {
+        match speaker::SpeakerIdentifier::new(&sc.model, sc.owner_embedding.clone(), sc.threshold) {
+            Some(s) => {
+                log::info!(
+                    "说话人识别已启用: model={} 主人声纹={} 阈值={}",
+                    sc.model.display(),
+                    if sc.owner_embedding.is_some() { "已注册" } else { "未注册" },
+                    sc.threshold,
+                );
+                Some(Arc::new(s))
+            }
+            None => {
+                log::warn!("说话人识别模型加载失败（降级为默认标签）: {}", sc.model.display());
+                None
+            }
+        }
+    });
     // 录音时间戳：整次监听共用一个
     let rec_ts = {
         let now = SystemTime::now()
@@ -622,6 +690,7 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             cfg.chunk_ms,
             rec_path,
             cfg.noise_level.clone(),
+            shared_speaker.clone(),
         )?;
         w.start_input(cfg.chunk_ms)?;
         log::info!(

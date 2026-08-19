@@ -94,7 +94,7 @@ impl AnalyzerPlugin for TermExplainerPlugin {
     }
 
     fn should_trigger(&self, seg: &TranscriptSegment) -> bool {
-        seg.speaker_id == 1 && !self.unseen_acronyms(&seg.text).is_empty() && !self.cooldown_active()
+        seg.speaker_id != 0 && !self.unseen_acronyms(&seg.text).is_empty() && !self.cooldown_active()
     }
 
     fn skeleton(&self, seg: &TranscriptSegment) -> Option<DomainEvent> {

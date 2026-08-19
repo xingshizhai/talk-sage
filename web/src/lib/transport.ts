@@ -62,6 +62,18 @@ export const ipcApi: AppApi = {
     await invoke("set_noise_level", { level });
   },
 
+  async getVoiceprintStatus(): Promise<{ model_available: boolean; enrolled: boolean }> {
+    return invoke("get_voiceprint_status");
+  },
+
+  async enrollVoice(seconds: number): Promise<{ ok: boolean; dim: number }> {
+    return invoke("enroll_voice", { seconds });
+  },
+
+  async removeVoiceprint(): Promise<void> {
+    await invoke("remove_voiceprint");
+  },
+
   async listSessions(): Promise<SessionRecord[]> {
     return invoke("list_sessions");
   },
@@ -136,6 +148,23 @@ export const httpApi: AppApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ level }),
     });
+  },
+
+  async getVoiceprintStatus(): Promise<{ model_available: boolean; enrolled: boolean }> {
+    return req("/voiceprint/status");
+  },
+
+  async enrollVoice(seconds: number): Promise<{ ok: boolean; dim: number }> {
+    const r = await req<{ ok: boolean; dim: number }>("/voiceprint/enroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seconds }),
+    });
+    return r;
+  },
+
+  async removeVoiceprint(): Promise<void> {
+    await req("/voiceprint/remove", { method: "POST" });
   },
 
   async listSessions(): Promise<SessionRecord[]> {

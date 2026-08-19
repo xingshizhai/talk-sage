@@ -90,6 +90,7 @@ fn zh_file_pipeline(root: &Path, wav: &Path) -> LivePipelineConfig {
         plugin_ctx: talksage_plugins::PluginContext::new(),
         recording_dir: None,
         noise_level: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0.0f32.to_bits())),
+        speaker: None,
     }
 }
 
@@ -247,6 +248,7 @@ fn plugins_emit_term_and_translation_events() {
         plugin_ctx: ctx,
         recording_dir: None,
         noise_level: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0.0f32.to_bits())),
+        speaker: None,
     };
 
     let evs = run_and_collect(cfg);

@@ -9,6 +9,7 @@ license.workspace = true
 talksage-core = { path = "../talksage-core" }
 talksage-config = { path = "../talksage-config" }
 talksage-asr = { path = "../talksage-asr" }
+talksage-audio = { path = "../talksage-audio" }
 talksage-pipeline = { path = "../talksage-pipeline" }
 talksage-llm = { path = "../talksage-llm" }
 talksage-knowledge = { path = "../talksage-knowledge" }
@@ -19,6 +20,7 @@ talksage-logging = { path = "../talksage-logging" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sherpa-onnx = "1.13"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 tower-http = { version = "0.6", features = ["fs", "cors"] }

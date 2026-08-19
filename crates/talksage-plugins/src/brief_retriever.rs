@@ -35,8 +35,8 @@ impl AnalyzerPlugin for BriefRetrieverPlugin {
     }
 
     fn should_trigger(&self, seg: &TranscriptSegment) -> bool {
-        if seg.speaker_id != 1 {
-            return false;
+        if seg.speaker_id == 0 {
+            return false; // 主人发言不检索简报（简报针对客户/其他说话人）
         }
         let last = *self.last_trigger_at.lock().unwrap();
         !(self.cooldown_seconds > 0.0 && last > 0.0 && now() - last < self.cooldown_seconds)
