@@ -1,6 +1,7 @@
-// 左侧导航栏：导航项 + 运行状态 + 监听/调试按钮。
+// 左侧导航栏：品牌 logo + 导航项 + 运行状态 + 监听/调试按钮。
 
 import type { Theme } from "../lib/theme";
+import talksageMark from "../assets/talksage-mark.svg";
 
 export interface NavItem {
   key: string;
@@ -54,7 +55,7 @@ export default function SideNav({
     >
       {/* 品牌 */}
       <div style={{ padding: "14px 14px 8px", display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ width: 9, height: 9, borderRadius: 3, background: "var(--live)" }} />
+        <img src={talksageMark} alt="拓思者 logo" style={{ width: 22, height: 22, borderRadius: 5, flexShrink: 0 }} />
         <b style={{ fontSize: 14 }}>拓思者</b>
         <span style={{ fontSize: 9, color: "var(--muted)", fontFamily: "monospace" }}>TalkSage</span>
         <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>
