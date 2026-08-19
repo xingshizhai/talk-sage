@@ -112,59 +112,65 @@ export default function SideNav({
         ))}
       </div>
 
-      {/* 麦克风电平（实时指示，噪音电平上方） */}
+      {/* 音频控制（麦克风电平 + 噪音电平，监听中实时可用） */}
       {listening && (
         <div style={{ margin: "0 10px 10px", padding: "10px 11px", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-            <span style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 700 }}>麦克风电平</span>
-            <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>
-              {Math.round(Math.min(1, micRms * 10) * 100)}%
-            </span>
-          </div>
-          <div style={{ height: 6, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}>
-            <div
-              style={{
-                height: "100%",
-                width: `${Math.min(100, micRms * 1000)}%`,
-                borderRadius: 3,
-                background:
-                  micRms < 0.05
-                    ? "var(--live)"
-                    : micRms < 0.2
-                      ? "var(--brief)"
-                      : "var(--danger)",
-                transition: "width 80ms linear",
-              }}
-            />
-          </div>
-          <div style={{ marginTop: 3, fontSize: 9, color: "var(--muted)", fontFamily: "monospace" }}>
-            {micRms < 0.01 ? "无声" : micRms < 0.05 ? "低" : micRms < 0.2 ? "正常" : "过载"}
-          </div>
-        </div>
-      )}
+          <div style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 700, marginBottom: 7 }}>音频控制</div>
 
-      {/* 噪音电平（监听中可实时调节，无需停止监听） */}
-      {listening && (
-        <div style={{ margin: "0 10px 10px", padding: "10px 11px", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-            <span style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 700 }}>噪音电平</span>
-            <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--live)", fontFamily: "monospace", fontWeight: 600 }}>
-              {noiseLevel}%
-            </span>
+          {/* 麦克风电平 */}
+          <div style={{ marginBottom: 9 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+              <span style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 700 }}>麦克风电平</span>
+              <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>
+                {Math.round(Math.min(1, micRms * 10) * 100)}%
+              </span>
+            </div>
+            <div style={{ height: 6, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}>
+              <div
+                style={{
+                  height: "100%",
+                  width: `${Math.min(100, micRms * 1000)}%`,
+                  borderRadius: 3,
+                  background:
+                    micRms < 0.05
+                      ? "var(--live)"
+                      : micRms < 0.2
+                        ? "var(--brief)"
+                        : "var(--danger)",
+                  transition: "width 80ms linear",
+                }}
+              />
+            </div>
+            <div style={{ marginTop: 3, fontSize: 9, color: "var(--muted)", fontFamily: "monospace" }}>
+              {micRms < 0.01 ? "无声" : micRms < 0.05 ? "低" : micRms < 0.2 ? "正常" : "过载"}
+            </div>
           </div>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            step={1}
-            value={noiseLevel}
-            onChange={(e) => onNoiseLevel(Number(e.target.value))}
-            title="实时调节噪音电平：调高抑制背景噪音（轻声也可能被压），调低更灵敏"
-            style={{ width: "100%", accentColor: "var(--live)", cursor: "pointer" }}
-          />
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", fontFamily: "monospace", marginTop: 2 }}>
-            <span>0 关闭</span>
-            <span>{noiseLevel === 0 ? "默认" : noiseLevel < 50 ? "弱抑制" : "强抑制"}</span>
+
+          {/* 分隔线 */}
+          <div style={{ borderTop: "1px solid var(--border)", margin: "2px 0 9px" }} />
+
+          {/* 噪音电平 */}
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+              <span style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 700 }}>噪音电平</span>
+              <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--live)", fontFamily: "monospace", fontWeight: 600 }}>
+                {noiseLevel}%
+              </span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={noiseLevel}
+              onChange={(e) => onNoiseLevel(Number(e.target.value))}
+              title="实时调节噪音电平：调高抑制背景噪音（轻声也可能被压），调低更灵敏"
+              style={{ width: "100%", accentColor: "var(--live)", cursor: "pointer" }}
+            />
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", fontFamily: "monospace", marginTop: 2 }}>
+              <span>0 关闭</span>
+              <span>{noiseLevel === 0 ? "默认" : noiseLevel < 50 ? "弱抑制" : "强抑制"}</span>
+            </div>
           </div>
         </div>
       )}
