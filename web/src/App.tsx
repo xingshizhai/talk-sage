@@ -189,6 +189,9 @@ export default function App() {
         setStatus("已停止");
       } else {
         setStatus("启动中…");
+        // 开始监听 → 自动跳转到实时转写页
+        setNavPage("transcript");
+        saveNavPage("transcript");
         await api.startListen();
       }
     } catch (e) {
