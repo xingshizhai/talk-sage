@@ -1,133 +1,176 @@
-# TalkSage v2
+<p align="center">
+  <strong>拓思者 · TalkSage</strong><br/>
+  <em>Your personal AI meeting assistant — transcribe, identify speakers, analyze, and summarize.</em>
+</p>
 
-实时个人 AI 会议助理——在视频会议或面对面洽谈中，实时识别对方讲话，提炼关键内容、解释术语、关联知识，帮助你及时回应。
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#usage">Usage</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#testing">Testing</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="README_zh-CN.md">中文版</a>
+</p>
 
-**v2 为推翻重设计**：Rust 全栈核心 + Tauri 2 桌面壳 + React Web UI（架构参考 DeepSeek Harness 的工程形态）。旧版 Python/PySide6 实现已移除。
+> **拓思者 (Tuòsī Zhě)** — "Talk" ≈ 拓 (expand), "Sage" ≈ 思 (think): an AI assistant that expands your thinking by turning every meeting into structured knowledge.
 
-## 功能
+---
 
-- **双流实时转写**：user（麦克风，中文 streaming paraformer）+ client（回环/文件，英文 streaming zipformer），各自 VAD 分段 + 流式增量出字
-- **全本地处理**：sherpa-onnx 流式 ASR（CPU 推理，RTF ≈ 0.04，比实时快 20+ 倍）
-- **会议辅助插件**：术语解释（英文缩写 → LLM 中文解释，冷却+去重+先骨架）、客户简报检索（本地知识库 Jaccard）、实时中英互译——独立线程执行不阻塞音频链路
-- **会话持久化**：监听自动落库 SQLite（`TALKSAGE_DATA_DIR`/`~/.talksage/sessions.db`），历史页可浏览/搜索/查看详情
-- **纪要模板化**：基于会话转写+术语按模板（标准会议/商务谈判/技术评审/每日站会）LLM 生成 Markdown 纪要，保存到会话
-- **导入转写**：`talksage import <wav>` 离线转写并保存为新会话
-- **Headless 服务（多设备）**：`talksage serve` 启动本地服务，**手机/平板浏览器**即可访问全部功能（同局域网需 `--host 0.0.0.0` + token）
-- **领域事件驱动**：转写/术语/翻译/简报/状态事件经 IPC（Tauri）或 WS（headless 预留）推送，前端分区实时渲染
-- **全自动测试**：核心链路（wav → VAD → ASR → 事件 → 插件 → 前端行聚合）确定性可测，`scripts/run_tests.ps1` 一键全量
+## What it does
 
-## 技术栈
+拓思者 runs **100% locally** (no cloud, no audio leaves your machine): listen to a meeting through your microphone (plus system loopback for remote callers), get **real-time bilingual transcription**, **automatic speaker identification** (register your own voice, then everyone else is separated automatically), live **term explanations**, **translation**, **key-point aggregation**, **knowledge-base briefs**, and **meeting minutes** — all while **recording the raw audio** for later regression testing.
 
-| 层 | 选型 |
+## Features
+
+- **Real-time streaming ASR** — Chinese (paraformer) + English (zipformer) dual streams, incremental partials, VAD segmentation
+- **Multi-speaker identification** — voiceprint registration of the owner in Settings ("我的声音"), then every final segment is matched: owner → 「我」, others → 「客户1」「客户2」… (online clustering, labels reused)
+- **Live meeting intelligence** — term/acronym explanations, real-time translation (en↔zh), rule-based key-point aggregation (questions / requirements / decisions / tech), knowledge-base brief retrieval
+- **Meeting minutes** — template-based generation via any OpenAI-compatible LLM (DeepSeek, Kimi, Ollama, …)
+- **Recording & testing loop** — every listening session saves raw PCM wav per stream; `talksage trim` removes silence with the same VAD; `scripts/recording_loop.ps1` trims + replays for regression
+- **Session quality assessment** — automatic noise/silence detection per session (configurable thresholds + auto background-noise calibration); noisy sessions skip downstream analysis
+- **Runtime noise control** — adjust the mic noise gate live from the left panel *while listening*, no restart
+- **History** — SQLite sessions with search, per-segment duration/RMS stats, quality badges
+- **Two carriers** — Tauri 2 desktop app (IPC) and a headless HTTP/WS server (browser access, token-protected)
+
+## Quick Start
+
+### Prerequisites
+
+- **Rust** (stable) with MSVC toolchain on Windows / clang on macOS / gcc on Linux
+- **Node.js 18+** (frontend build)
+- **Python 3** (model download script, stdlib only)
+- Windows: **VS 2022 Build Tools** (C++ workload) for Tauri & sherpa-onnx linking
+
+### 1. Get the models (~340 MB)
+
+```bash
+# via an HTTP/HTTPS proxy if your network requires one:
+# export https_proxy=http://127.0.0.1:10808 http_proxy=http://127.0.0.1:10808
+python scripts/download_models.py all
+```
+
+This downloads into `models/`:
+
+| Model | Purpose |
 |---|---|
-| 核心 | Rust workspace（crates: core / config / asr / audio / pipeline / cli） |
-| 应用壳 | Tauri 2（Windows WebView2 / macOS WKWebView） |
-| 前端 | Vite + React + TypeScript |
-| ASR | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 1.13（streaming paraformer-zh + zipformer-en，静态链接预编译库） |
-| VAD | sherpa-onnx silero VAD（端点分段） |
-| 音频采集 | cpal（麦克风）；WASAPI loopback（系统回环，Windows） |
+| `sherpa-onnx-streaming-paraformer-zh` | Chinese streaming ASR |
+| `sherpa-onnx-streaming-zipformer-en-2023-06-26` | English streaming ASR |
+| `silero-vad/silero_vad.onnx` | Voice activity detection |
+| `wespeaker/wespeaker_zh_cnceleb_resnet34.onnx` | Speaker embedding (voiceprint) |
 
-## 仓库结构
+### 2. Build
 
-```
-├── crates/
-│   ├── talksage-core/        # 领域模型与事件（DomainEvent，传输无关）
-│   ├── talksage-config/      # 分层配置（默认 + talksage.toml + 环境变量）
-│   ├── talksage-asr/         # sherpa-onnx 流式引擎封装（双引擎）
-│   ├── talksage-audio/       # cpal 麦克风采集 + WASAPI 回环 + 重采样
-│   ├── talksage-pipeline/    # 双流管道：VAD 分段 → 流式 ASR → 插件 → 领域事件
-│   ├── talksage-llm/         # OpenAI 兼容 LLM Provider
-│   ├── talksage-knowledge/   # 本地知识库 Jaccard 检索
-│   ├── talksage-plugins/     # 术语解释 / 简报检索 / 翻译
-│   ├── talksage-session/     # SQLite 会话存储（可检索历史）
-│   ├── talksage-notes/       # 模板化纪要生成（标准/谈判/评审/站会）
-│   ├── talksage-server/      # headless 服务（axum API + WS + SPA 托管）
-│   └── talksage-cli/         # launcher：web / serve / import / listen / doctor
-├── web/
-│   ├── src/                  # React SPA（转写分区、监听控制）
-│   └── src-tauri/            # Tauri 适配器（command + 事件桥接）
-├── scripts/                  # 模型下载、图标生成、一键测试
-├── docs/                     # 架构 / PoC 报告 / 测试文档
-└── models/                   # ASR/VAD 模型（gitignore，由脚本下载）
+**Windows**
+
+```powershell
+.\scripts\talksage.ps1 env      # environment check
+.\scripts\talksage.ps1 build    # cargo + frontend (debug CLI)
+# desktop app (release):
+cd web
+npx tauri build --no-bundle
 ```
 
-## 快速开始
-
-### 环境
-
-- Rust 1.85+（MSVC）、Node 18+、cmake（仅 sherpa-onnx 构建期，可选）
-- 模型：`python scripts/download_models.py all`（经代理下载 streaming 模型 + silero VAD，约 310MB）
-
-### 开发运行（Tauri GUI）
+**macOS / Linux**
 
 ```bash
-# 构建期依赖（sherpa-onnx 预编译静态库）
-$env:SHERPA_ONNX_ARCHIVE_DIR = "$PWD\.tools\sherpa-onnx-archives"
-cd web && npx tauri dev     # 窗口打开后点「开始监听」对着麦克风说话
+./scripts/talksage.sh build
 ```
 
-### Headless 验证（无需 GUI）
+See [BUILDING.md](docs/BUILDING.md) for full manual steps (static sherpa-onnx linking, proxy notes, packaging).
+
+### 3. Run
 
 ```bash
-cargo build -p talksage-cli
-target\debug\talksage.exe doctor                        # 环境诊断
-target\debug\talksage.exe listen --input mic            # 真实麦克风实时转写
-target\debug\talksage.exe listen --input <中文16k.wav>  # 文件模拟（自动化验证）
-target\debug\talksage.exe listen --input <中文16k.wav> --client <英文16k.wav>   # 双流
-target\debug\talksage.exe listen --input <16k.wav> --save      # 落库
-target\debug\talksage.exe import <16k.wav>              # 导入转写 → 新会话
+# Desktop app (release build)
+./scripts/talksage.ps1 run          # Windows
+
+# CLI live transcription (mic)
+cargo run -p talksage-cli -- listen --input mic
+
+# CLI from a recorded wav (no GUI needed)
+talksage listen --input meeting.wav
+
+# Headless web service (browser → http://127.0.0.1:8080)
+talksage serve --host 127.0.0.1 --port 8080
 ```
 
-### Headless 服务（多设备/浏览器）
+## Usage
+
+| Task | How |
+|---|---|
+| Start listening | Left panel ▶ 开始监听 (jumps to live transcript) |
+| Register your voice | Settings → 声音标识 → 录制我的声音 (6 s) |
+| Tune mic level / noise gate | Left panel while listening: 麦克风电平 meter + 噪音电平 slider (live, no restart) |
+| Trim silence from a recording | `talksage trim rec.wav [-o out.wav] [--preset sensitive\|standard\|strict]` |
+| Record raw audio only | `talksage record --seconds 60 [--input loopback]` |
+| Import audio offline | `talksage import audio.wav` |
+| Doctor / diagnostics | `talksage doctor` |
+
+### The recording → trim → replay loop
+
+Every listening session auto-saves raw wav per stream to `<data_dir>/recordings/`. Use them as regression material:
+
+```powershell
+.\scripts\recording_loop.ps1        # trim all recordings + replay through real ASR
+.\scripts\talksage.ps1 loop
+```
+
+Details: [docs/RECORDING.md](docs/RECORDING.md)
+
+## Architecture
+
+A Rust workspace (single binary, no Python) with a clean domain-event bus shared by every carrier:
+
+```
+AudioHub (cpal / WASAPI loopback) → Preprocessor (denoise/highpass/noise gate)
+        → VAD (silero) → streaming ASR (sherpa-onnx) → final segment
+        → speaker identification (wespeaker) → plugins (term/translate/brief/keypoint)
+        → DomainEvent (serde) → Tauri IPC or WS → React UI
+        → session SQLite (segments + stats + quality meta)
+```
+
+| Crate | Responsibility |
+|---|---|
+| `talksage-core` | Domain events, session quality, text-noise scoring |
+| `talksage-audio` | Mic/loopback capture, resample, denoise, wav IO, silence trim |
+| `talksage-asr` | sherpa-onnx streaming engine wrapper |
+| `talksage-pipeline` | VAD segmentation, dual streams, recording, runtime noise level, speaker ID |
+| `talksage-plugins` | Term explainer / translator / brief retriever |
+| `talksage-session` | SQLite storage + quality evaluation |
+| `talksage-notes` | Minutes templates + generator |
+| `talksage-server` | axum headless service (REST + WS + SPA) |
+| `talksage-cli` | Launcher: listen / trim / record / import / serve / doctor |
+| `web/` | Tauri 2 shell + React/Vite/TS UI |
+
+## Testing
 
 ```bash
-# 先构建前端
-cd web && npm run build && cd ..
-
-# 启动服务（默认 127.0.0.1:8080；浏览器打开 http://127.0.0.1:8080）
-target\debug\talksage.exe serve
-
-# 局域网/手机访问（需 token 保护）
-$env:TALKSAGE_SERVER_TOKEN = "mytoken"
-target\debug\talksage.exe serve --host 0.0.0.0 --port 8080
-# 浏览器访问 http://<本机IP>:8080/?token=mytoken
+.\scripts\run_tests.ps1        # cargo test (unit + real-model integration) + vitest
+cargo test --workspace         # Rust: unit + live model tests (auto-skip if models missing)
+cd web && npx vitest run       # frontend: 27 tests
 ```
 
-### 打包分发
+Real-model integration tests cover: Chinese/English ASR recognition, dual-stream events, recording files, **speaker identification** (owner vs new speaker), silence trim, server API, and the **13:57 noisy-session quality case**.
 
-```bash
-cd web && npm run tauri build     # Windows → NSIS 安装包；macOS → dmg
+## Documentation
+
+- [architecture-v2.md](docs/architecture-v2.md) — v2 design: dual carriers, latency budget, fast/slow paths
+- [BUILDING.md](docs/BUILDING.md) — build & packaging guide
+- [RECORDING.md](docs/RECORDING.md) — recording / trim / regression loop
+- [LOGGING.md](docs/LOGGING.md) — structured logging & debugging
+- [testing.md](docs/testing.md) — automated testing strategy
+
+## Repository layout
+
+```
+crates/            Rust workspace (10 domain crates)
+web/               Tauri 2 + React frontend
+scripts/           build/run/test tooling + model downloaders
+docs/              design & operation docs
+models/            runtime models (gitignored, ~340 MB)
 ```
 
-## 测试
+## License
 
-```bash
-scripts\run_tests.ps1        # cargo test --workspace + vitest run（一键全量）
-```
-
-详见 [docs/testing.md](docs/testing.md)。
-
-## 文档
-
-- [架构设计](docs/architecture-v2.md)（双载体、延迟预算、模块划分）
-- [ASR PoC 报告](docs/poc-asr-report.md)（延迟实测）
-- [测试文档](docs/testing.md)
-- [编译与打包指南](docs/BUILDING.md)（环境准备 / 依赖下载 / 编译 / 测试 / 打包 / 故障排除）
-- [日志与调试指南](docs/LOGGING.md)（结构化日志位置 / 级别 / AI Agent 分析指引）
-
-## 里程碑
-
-- ✅ M0 骨架（workspace + launcher + Tauri 壳 + IPC hello-world）
-- ✅ M1 实时转写闭环（采集 → VAD → 流式 ASR → 事件 → 前端）
-- ✅ M1b 双流 + WASAPI 系统回环采集（Windows；macOS ScreenCaptureKit 待接入）→ 视频会议客户流可用
-- ✅ M2 会议辅助核心（术语解释 / 简报检索 / 实时翻译插件 + 前端分区）
-- ✅ M2 会话持久化（SQLite 落库 + 历史页搜索/详情）
-- ✅ M3 纪要模板化（多模板 LLM 生成 + 保存会话）
-- ✅ M3 导入转写（文件 → 离线 ASR → 新会话）
-- ✅ M4 headless 服务（axum API + WS 事件 + SPA 托管，多设备浏览器访问）
-- ⏳ 打包分发（NSIS/dmg，命令已就绪待 CI 构建）
-- ⏳ 未来：macOS 回环（ScreenCaptureKit）、浏览器麦克风直传（WS 上行）
-
-## 隐私
-
-音频、转写、会话默认全部本地处理与存储；模型本地推理，无云端依赖。
+MIT
