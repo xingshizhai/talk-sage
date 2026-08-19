@@ -19,5 +19,7 @@ talksage-knowledge = { path = "../talksage-knowledge" }
 talksage-plugins = { path = "../talksage-plugins" }
 talksage-session = { path = "../talksage-session" }
 talksage-server = { path = "../talksage-server" }
+talksage-logging = { path = "../talksage-logging" }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+log = "0.4"

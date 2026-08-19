@@ -236,13 +236,6 @@ export default function App() {
       </section>
 
       <section style={{ marginTop: 12 }}>
-        <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>配置快照</h2>
-        <pre style={{ background: "#f5f5f5", padding: 10, borderRadius: 6, fontSize: 11, overflow: "auto", maxHeight: 120 }}>
-          {config ? JSON.stringify(config, null, 2) : "加载中…"}
-        </pre>
-      </section>
-
-      <section style={{ marginTop: 12 }}>
         <h2 style={{ fontSize: 13, margin: "0 0 6px" }}>事件流（调试）</h2>
         <ul style={{ fontSize: 11, maxHeight: 140, overflow: "auto", paddingLeft: 20 }}>
           {rawEvents.length === 0 ? <li style={{ color: "#999" }}>暂无事件</li> : rawEvents.map((e, i) => <li key={i}>{e}</li>)}

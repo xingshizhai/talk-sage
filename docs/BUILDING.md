@@ -190,6 +190,17 @@ cd web && npx vitest run
 
 > 集成测试需要 `models/`（3.3）；模型缺失时自动跳过并打印提示，不失败。
 
+### 5.2 日志调试
+
+```powershell
+# 结构化日志（JSON lines）写入 <数据目录>/logs/talksage.<日期>.log
+# 级别：--verbose / --log-level / RUST_LOG / TALKSAGE_LOG
+.\target\debug\talksage.exe --verbose listen --input a.wav
+Get-Content "$env:TALKSAGE_DATA_DIR\logs\talksage.log.*" | Select-String '"level":"(ERROR|WARN)"'
+```
+
+详见 [docs/LOGGING.md](LOGGING.md)（日志位置、字段、AI Agent 分析指引）。
+
 ---
 
 ## 6. 打包（发布安装包）

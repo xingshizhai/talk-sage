@@ -17,6 +17,7 @@ tauri = { workspace = true }
 tauri-plugin-opener = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+log = "0.4"
 talksage-core = { path = "../../crates/talksage-core" }
 talksage-config = { path = "../../crates/talksage-config" }
 talksage-asr = { path = "../../crates/talksage-asr" }
@@ -27,3 +28,4 @@ talksage-knowledge = { path = "../../crates/talksage-knowledge" }
 talksage-plugins = { path = "../../crates/talksage-plugins" }
 talksage-session = { path = "../../crates/talksage-session" }
 talksage-notes = { path = "../../crates/talksage-notes" }
+talksage-logging = { path = "../../crates/talksage-logging" }

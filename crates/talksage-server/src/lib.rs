@@ -46,6 +46,8 @@ pub struct ServerState {
 
 /// 启动 headless 服务（阻塞运行）。
 pub async fn run(host: &str, port: u16, token: &str, web_dist: &PathBuf) -> Result<()> {
+    let _log_guard = talksage_logging::init(None);
+    log::info!("headless 服务启动，host={host} port={port} token={}", if token.is_empty() { "none" } else { "set" });
     let config = ConfigManager::load(None, None).map_err(|e| anyhow!("配置加载失败: {e}"))?;
     let sessions = Arc::new(
         SessionStore::open(&config.data_dir().join("sessions.db").to_string_lossy()).map_err(|e| anyhow!("会话库: {e}"))?,

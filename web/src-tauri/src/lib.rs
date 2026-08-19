@@ -393,6 +393,8 @@ fn resolve_models_dir() -> PathBuf {
 pub fn run() {
     let config = ConfigManager::load(None, None).expect("加载配置失败");
     let data_dir = config.data_dir().to_path_buf();
+    let _log_guard = talksage_logging::init(Some(&data_dir));
+    log::info!("TalkSage 桌面应用启动，数据目录: {}", data_dir.display());
     let sessions = Arc::new(
         SessionStore::open(&data_dir.join("sessions.db").to_string_lossy()).expect("打开会话库失败"),
     );

@@ -19,6 +19,12 @@ use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConf
     arg_required_else_help = true
 )]
 struct Cli {
+    /// 详细日志（等价 RUST_LOG=trace）
+    #[arg(long, global = true)]
+    verbose: bool,
+    /// 日志级别（trace/debug/info/warn/error；默认读 RUST_LOG/TALKSAGE_LOG）
+    #[arg(long, global = true, value_name = "LEVEL")]
+    log_level: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -76,6 +82,15 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // 日志初始化（先于命令执行）
+    if cli.verbose {
+        std::env::set_var("TALKSAGE_LOG", "trace");
+    } else if let Some(level) = &cli.log_level {
+        std::env::set_var("TALKSAGE_LOG", level);
+    }
+    let _log_guard = talksage_logging::init(None);
+    log::info!("talksage {} 启动", talksage_core::VERSION);
+
     match cli.command {
         Command::Version => {
             println!("talksage {}", talksage_core::VERSION);

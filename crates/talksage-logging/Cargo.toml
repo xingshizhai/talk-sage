@@ -1,0 +1,16 @@
+[package]
+name = "talksage-logging"
+description = "TalkSage v2 structured logging (tracing: JSON file + console, EnvFilter)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+talksage-config = { path = "../talksage-config" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+tracing-log = "0.2"
+
+[dev-dependencies]
+log = "0.4"

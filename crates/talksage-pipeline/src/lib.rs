@@ -362,8 +362,16 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
     // 构建各流（client 流失败降级为仅 user 流，不影响主链路）
     let mut workers: Vec<StreamWorker> = Vec::new();
     let build = |sc: &StreamConfig| -> anyhow::Result<StreamWorker> {
+        let t0 = std::time::Instant::now();
         let mut w = StreamWorker::new(sc, &cfg.vad_model, cfg.chunk_ms, cfg.min_silence_seconds)?;
         w.start_input(cfg.chunk_ms)?;
+        log::info!(
+            "流[{}] 就绪: engine={} model={} 加载耗时={:?}",
+            sc.speaker_label,
+            sc.engine_kind.display_name(),
+            sc.model_dir.display(),
+            t0.elapsed()
+        );
         Ok(w)
     };
     match build(&cfg.user) {
@@ -401,6 +409,7 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
         stage: StatusStage::Recording,
         message: "监听中…".into(),
     });
+    log::info!("管道进入事件循环: {} 条流", workers.len());
 
     // 事件循环：轮询各流
     loop {
@@ -441,6 +450,7 @@ fn make_on_final(cfg: &LivePipelineConfig, emit: &EventSink) -> Arc<dyn Fn(&Tran
             if !plugin.should_trigger(seg) {
                 continue;
             }
+            log::debug!("插件[{}] 触发: 段=[{}] {}", plugin.name(), seg.speaker_label, seg.text.chars().take(60).collect::<String>());
             // 骨架（本地即时）
             if let Some(skel) = plugin.skeleton(seg) {
                 emit(skel);
@@ -451,7 +461,10 @@ fn make_on_final(cfg: &LivePipelineConfig, emit: &EventSink) -> Arc<dyn Fn(&Tran
             let emit = emit.clone();
             let seg = seg.clone();
             std::thread::spawn(move || {
-                if let Some(ev) = plugin.run(&seg, &ctx) {
+                let t0 = std::time::Instant::now();
+                let result = plugin.run(&seg, &ctx);
+                log::info!("插件[{}] 完成: 耗时={:?} 有结果={}", plugin.name(), t0.elapsed(), result.is_some());
+                if let Some(ev) = result {
                     emit(ev);
                 }
             });

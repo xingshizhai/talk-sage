@@ -113,6 +113,7 @@ scripts\run_tests.ps1        # cargo test --workspace + vitest run（一键全�
 - [ASR PoC 报告](docs/poc-asr-report.md)（延迟实测）
 - [测试文档](docs/testing.md)
 - [编译与打包指南](docs/BUILDING.md)（环境准备 / 依赖下载 / 编译 / 测试 / 打包 / 故障排除）
+- [日志与调试指南](docs/LOGGING.md)（结构化日志位置 / 级别 / AI Agent 分析指引）
 
 ## 里程碑
 

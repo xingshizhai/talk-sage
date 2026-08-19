@@ -15,6 +15,7 @@ talksage-knowledge = { path = "../talksage-knowledge" }
 talksage-plugins = { path = "../talksage-plugins" }
 talksage-session = { path = "../talksage-session" }
 talksage-notes = { path = "../talksage-notes" }
+talksage-logging = { path = "../talksage-logging" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -22,6 +23,7 @@ axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 futures-util = "0.3"
+log = "0.4"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
