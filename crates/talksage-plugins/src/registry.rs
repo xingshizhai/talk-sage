@@ -227,3 +227,33 @@ mod config_tests {
         assert!(!PluginConfig::from_value(json!({"enabled": false})).enabled());
     }
 }
+
+#[cfg(test)]
+mod clone_sharing_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 计数被调用次数的 filter：若 clone 出的是独立实例，两份计数会各自独立。
+    #[derive(Default)]
+    struct Counting(AtomicUsize);
+    impl EventFilter for Counting {
+        fn filter(&self, ev: DomainEvent) -> Option<DomainEvent> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Some(ev)
+        }
+    }
+
+    /// Task 6 的跨流去重依赖：两条音频流各持一份 HookRegistry 克隆，
+    /// 但必须共享同一个 filter 实例（共享去重历史窗口）。
+    #[test]
+    fn cloned_registry_shares_filter_instances() {
+        let counter = Arc::new(Counting::default());
+        let mut a = HookRegistry::default();
+        a.add_filter(counter.clone());
+        let b = a.clone();
+        let ev = DomainEvent::Level { mic_rms: 0.0, loopback_rms: 0.0 };
+        a.apply_filters(ev.clone());
+        b.apply_filters(ev);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 2, "克隆必须共享实例，否则跨流去重会静默失效");
+    }
+}
