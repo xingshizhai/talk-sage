@@ -143,7 +143,13 @@ fn zh_pipeline(root: &Path, wav: &Path, min_commit_ms: u64) -> LivePipelineConfi
         runtime: Arc::new(talksage_pipeline::RuntimeParams::default()),
         speaker: None,
         engine_pool: None,
-        min_commit_ms,
+        hooks: talksage_plugins::build_registry(
+            &talksage_plugins::builtin_plugins(),
+            &std::collections::HashMap::from([(
+                "short_segment".to_string(),
+                serde_json::json!({ "min_ms": min_commit_ms }),
+            )]),
+        ),
     }
 }
 

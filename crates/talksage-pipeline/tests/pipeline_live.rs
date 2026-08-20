@@ -11,6 +11,18 @@ use talksage_asr::EngineKind;
 use talksage_core::DomainEvent;
 use talksage_pipeline::{AudioInput, LivePipelineConfig, SessionRuntime, StreamConfig};
 
+/// 内置插件钩子（短段阈值可调）。整份注册表只建一次，两条流共享同一批
+/// filter 实例 —— 跨流去重靠的就是这份共享历史。
+fn hooks_with_min_commit_ms(min_ms: u64) -> talksage_plugins::HookRegistry {
+    talksage_plugins::build_registry(
+        &talksage_plugins::builtin_plugins(),
+        &std::collections::HashMap::from([(
+            "short_segment".to_string(),
+            serde_json::json!({ "min_ms": min_ms }),
+        )]),
+    )
+}
+
 /// 缺资源时是否必须失败（而不是跳过）。`env` 为 `TALKSAGE_REQUIRE_MODELS` 的值。
 fn must_fail_on_missing(env: Option<&str>) -> bool {
     matches!(env, Some("1") | Some("true"))
@@ -119,7 +131,7 @@ fn zh_file_pipeline(root: &Path, wav: &Path) -> LivePipelineConfig {
         runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
         speaker: None,
         engine_pool: None,
-        min_commit_ms: 0,
+        hooks: hooks_with_min_commit_ms(0),
     }
 }
 
@@ -365,7 +377,7 @@ fn plugins_emit_term_and_translation_events() {
         runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
         speaker: None,
         engine_pool: None,
-        min_commit_ms: 0,
+        hooks: hooks_with_min_commit_ms(0),
     };
 
     let evs = run_and_collect(cfg);
@@ -431,7 +443,7 @@ fn min_commit_ms_suppresses_short_segments() {
 
     // 实验组：min_commit_ms=60_000（> 任何段时长）→ 全部丢弃
     let mut cfg = zh_file_pipeline(&root, &wav);
-    cfg.min_commit_ms = 60_000;
+    cfg.hooks = hooks_with_min_commit_ms(60_000);
     let evs_on = run_and_collect(cfg);
     let finals_on = evs_on
         .iter()

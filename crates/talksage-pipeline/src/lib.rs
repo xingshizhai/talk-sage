@@ -135,9 +135,13 @@ pub struct LivePipelineConfig {
     /// ASR 引擎池（Some = 引擎常驻复用，监听热启动；None = 每次新建）。
     /// 参考 WhisperLiveKit 引擎单例设计。
     pub engine_pool: Option<Arc<EnginePool>>,
-    /// 最短提交时长（ms）：final 段时长低于该值的丢弃（噪音短段抑制；
-    /// 0 = 不限制）。对应配置 `audio.min_segment_ms`。
-    pub min_commit_ms: u64,
+    /// 插件钩子（filter 链 + observer）。由 TalkSageService 用
+    /// talksage_plugins::build_registry 装配。
+    ///
+    /// **必须整份克隆给每个 StreamWorker**：`HookRegistry` 克隆的是
+    /// `Arc<dyn EventFilter>`，两条流因此共享同一个 `CrossStreamDedupFilter`
+    /// 实例（内部历史共享）—— 这是跨流去重能工作的前提。
+    pub hooks: talksage_plugins::HookRegistry,
 }
 
 /// 实时管道：持有组件并在专用线程中运行事件循环。
@@ -346,8 +350,8 @@ struct StreamWorker {
     engine_pool: Option<Arc<EnginePool>>,
     /// 引擎模型目录（归还引擎池用）。
     engine_dir: Option<PathBuf>,
-    /// 最短提交时长（ms）：低于该值的 final 段丢弃（0 = 不限制）。
-    min_commit_ms: u64,
+    /// 插件钩子（filter 链）。与其它流共享同一批 filter 实例。
+    hooks: talksage_plugins::HookRegistry,
     /// final 段累计词数（会话指标用；借鉴 Call.md）。
     words: usize,
     /// final 段累计问句数（会话指标用）。
@@ -371,7 +375,7 @@ impl StreamWorker {
         speaker: Option<speaker::SharedSpeaker>,
         level: Arc<AtomicU32>,
         engine_pool: Option<Arc<EnginePool>>,
-        min_commit_ms: u64,
+        hooks: talksage_plugins::HookRegistry,
         origin_ms: u64,
     ) -> anyhow::Result<Self> {
         let (threshold, min_speech, min_silence, window, max_speech) = vad_cfg.effective();
@@ -469,7 +473,7 @@ impl StreamWorker {
             engine_pool,
             engine_dir: Some(cfg.model_dir.clone()),
             engine: Some(engine),
-            min_commit_ms,
+            hooks,
             words: 0,
             questions: 0,
             clock: AudioClock::new(talksage_audio::TARGET_SAMPLE_RATE),
@@ -643,16 +647,6 @@ impl StreamWorker {
             let end_sample = self.clock.accepted();
             let duration_ms = AudioClock::samples_to_ms(self.clock.sample_rate(), self.seg_samples);
             let ts_ms = self.origin_ms + AudioClock::samples_to_ms(self.clock.sample_rate(), end_sample);
-            // 最短提交时长：短段丢弃（噪音短段抑制，减少无效短段污染转写/历史）
-            if self.min_commit_ms > 0 && duration_ms < self.min_commit_ms {
-                log::info!(
-                    "流[{}] 短段丢弃: 时长={duration_ms}ms < 最短提交={}ms 文本={}",
-                    self.speaker_label,
-                    self.min_commit_ms,
-                    final_text.chars().take(40).collect::<String>(),
-                );
-                return;
-            }
             let rms = if self.seg_samples > 0 {
                 (self.seg_rms_acc / self.seg_samples as f64) as f32
             } else {
@@ -693,12 +687,9 @@ impl StreamWorker {
                 duration_ms,
                 rms,
             };
-            self.final_segments += 1;
-            self.words += talksage_core::metrics::count_words(&final_text);
-            if talksage_core::metrics::is_question_text(&final_text) {
-                self.questions += 1;
-            }
-            emit(DomainEvent::Segment {
+            // filter 链在产生点施加：被吞掉的事件既不 emit，也不触发 observer。
+            // 这一点必须保持——短段抑制原本就同时拦住两者。
+            let ev = DomainEvent::Segment {
                 speaker_id: seg.speaker_id,
                 speaker_label: seg.speaker_label.clone(),
                 text: seg.text.clone(),
@@ -709,7 +700,22 @@ impl StreamWorker {
                 revision: 0,
                 start_sample: self.seg_start_sample,
                 end_sample,
-            });
+            };
+            let Some(ev) = self.hooks.apply_filters(ev) else {
+                // 被吞掉：不计统计、不 emit、不触发 observer，但仍要收尾引擎状态
+                self.last_partial.clear();
+                if let Some(e) = &mut self.engine {
+                    e.reset();
+                }
+                self.seg_audio.clear();
+                return;
+            };
+            self.final_segments += 1;
+            self.words += talksage_core::metrics::count_words(&final_text);
+            if talksage_core::metrics::is_question_text(&final_text) {
+                self.questions += 1;
+            }
+            emit(ev);
             if let Some(hook) = &self.on_final {
                 hook(&seg);
             }
@@ -809,14 +815,11 @@ fn run_loop(
     // 会话指标 + 实时提示（借鉴 Call.md conversation-metrics / nudge-engine）：
     // 包装事件流——final 段事件聚合进 seg_log，随之推送 Metrics 事件；
     // NudgeEngine 按规则（2min 冷却）评估并推送 Nudge 事件。
-    // 跨流回显去重：双流（麦克风 + 系统回环）会把同一语音各识别一次——
-    // 与另一条流时间窗内内容高度相似的 final 段只保留先到的（后到的丢弃）。
+    // 跨流回显去重已搬到 cross_stream_dedup filter（在产生点施加）。
     let seg_log: Arc<Mutex<Vec<TranscriptSegment>>> = Arc::new(Mutex::new(Vec::new()));
-    let recent_finals: Arc<Mutex<std::collections::VecDeque<(u32, String, u64)>>> =
-        Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(32)));
     let nudge_engine: Arc<Mutex<talksage_core::NudgeEngine>> = Arc::new(Mutex::new(talksage_core::NudgeEngine::default()));
     let session_start = Instant::now();
-    let (seg_log_sink, recent_sink, nudge_sink) = (seg_log.clone(), recent_finals.clone(), nudge_engine.clone());
+    let (seg_log_sink, nudge_sink) = (seg_log.clone(), nudge_engine.clone());
     let emit_raw = emit.clone();
     let emit: EventSink = Arc::new(move |ev: DomainEvent| {
         if let DomainEvent::Segment {
@@ -829,25 +832,6 @@ fn run_loop(
             ..
         } = &ev
         {
-            // 跨流回显去重（"我" vs "客户" 同一语音被双录）
-            {
-                let mut recent = recent_sink.lock().unwrap();
-                let is_echo = recent.iter().any(|(sp, t, ts)| {
-                    *sp != *speaker_id && talksage_core::is_echo_duplicate(t, text, ts_ms.saturating_sub(*ts))
-                });
-                if is_echo {
-                    log::info!(
-                        "跨流回显去重: 丢弃[{}] 文本={}（与另一条流重复）",
-                        speaker_label,
-                        text.chars().take(40).collect::<String>()
-                    );
-                    return; // 不 emit（所有消费者都看不到重复段）
-                }
-                recent.push_back((*speaker_id, text.clone(), *ts_ms));
-                if recent.len() > 32 {
-                    recent.pop_front();
-                }
-            }
             seg_log_sink.lock().unwrap().push(TranscriptSegment {
                 speaker_id: *speaker_id,
                 speaker_label: speaker_label.clone(),
@@ -932,7 +916,8 @@ fn run_loop(
             shared_speaker.clone(),
             level,
             cfg.engine_pool.clone(),
-            cfg.min_commit_ms,
+            // clone 共享 Arc<dyn EventFilter>：两条流用同一批 filter 实例
+            cfg.hooks.clone(),
             origin_ms,
         )?;
         w.start_input(cfg.chunk_ms)?;

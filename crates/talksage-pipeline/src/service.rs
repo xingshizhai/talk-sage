@@ -356,6 +356,21 @@ impl TalkSageService {
             None
         };
 
+        // 阶段 2 过渡：filter 类插件的配置暂时仍从既有具名字段翻译过来，
+        // 阶段 5 换成通用 [plugins.<id>] 表后这段删除。
+        // 注册表在这里只建一次 —— 两条流共享同一批 filter 实例（跨流去重的前提）。
+        let mut plugin_overrides: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        plugin_overrides.insert(
+            "short_segment".into(),
+            serde_json::json!({ "min_ms": scene.min_segment_ms }),
+        );
+        plugin_overrides.insert(
+            "cross_stream_dedup".into(),
+            serde_json::json!({ "enabled": true }),
+        );
+        let hooks = talksage_plugins::build_registry(&talksage_plugins::builtin_plugins(), &plugin_overrides);
+
         Ok(LivePipelineConfig {
             vad_model,
             chunk_ms: 100,
@@ -379,7 +394,7 @@ impl TalkSageService {
             runtime: Arc::new(RuntimeParams::with_noise_level(req.noise_level)),
             speaker,
             engine_pool: Some(self.engines.clone()),
-            min_commit_ms: scene.min_segment_ms,
+            hooks,
         })
     }
 
