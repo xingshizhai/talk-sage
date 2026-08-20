@@ -10,6 +10,9 @@ pub mod translator;
 pub mod registry;
 pub mod short_segment;
 pub mod cross_stream_dedup;
+pub mod builtin;
+
+pub use builtin::{build_registry, builtin_plugins};
 
 pub use registry::{EventFilter, HookRegistry, Plugin, PluginConfig, SegmentObserver};
 
