@@ -62,7 +62,10 @@
 python scripts/download_models.py all
 ```
 
-模型：中文 paraformer（**含 fp32 版本，引擎自动优先使用更准的 fp32**；int8 后备）、英文 zipformer（int8）、silero VAD、wespeaker 声纹。
+模型：可多选（设置 → 场景模式 → 自定义 → 我的引擎/客户引擎）：
+- **流式（实时增量）**：中文 paraformer-zh（含 fp32 更准）、英文 zipformer-en
+- **离线段级（更准，段结束出结果）**：Whisper base / Whisper small（多语言，中英夹杂会议效果好）、Qwen3-ASR（模型仓库开放后可用）
+- 其余：silero VAD、wespeaker 声纹
 
 下载到 `models/`：
 

@@ -37,6 +37,24 @@ TARGETS: dict[str, list[tuple[str | None, str, str]]] = {
     "wespeaker": [
         (None, "wespeaker_zh_cnceleb_resnet34.onnx", "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_zh_cnceleb_resnet34.onnx"),
     ],
+    # OpenAI Whisper（离线，段级识别；比流式更准，多语言）。fp32 + int8 都下载，引擎优先 fp32。
+    "whisper-base": [
+        ("csukuangfj/sherpa-onnx-whisper-base", "base-encoder.onnx", ""),
+        ("csukuangfj/sherpa-onnx-whisper-base", "base-decoder.onnx", ""),
+        ("csukuangfj/sherpa-onnx-whisper-base", "base-encoder.int8.onnx", ""),
+        ("csukuangfj/sherpa-onnx-whisper-base", "base-decoder.int8.onnx", ""),
+        ("csukuangfj/sherpa-onnx-whisper-base", "base-tokens.txt", ""),
+    ],
+    "whisper-small": [
+        ("csukuangfj/sherpa-onnx-whisper-small", "small-encoder.onnx", ""),
+        ("csukuangfj/sherpa-onnx-whisper-small", "small-decoder.onnx", ""),
+        ("csukuangfj/sherpa-onnx-whisper-small", "small-encoder.int8.onnx", ""),
+        ("csukuangfj/sherpa-onnx-whisper-small", "small-decoder.int8.onnx", ""),
+        ("csukuangfj/sherpa-onnx-whisper-small", "small-tokens.txt", ""),
+    ],
+    # Qwen3-ASR 0.6B（离线，段级；中英等多语言）。官方仓库暂未公开，模型可用后放到
+    # models/sherpa-onnx-qwen3-asr-0.6b/（conv_frontend.onnx / encoder.onnx / decoder.onnx / tokenizer.json）。
+    "qwen3-asr": [],
 }
 
 

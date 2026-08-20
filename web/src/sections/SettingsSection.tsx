@@ -351,8 +351,11 @@ export default function SettingsSection({
               <label style={labelBlock}>
                 我的引擎：
                 <select value={sceneCustom.user_engine} onChange={(e) => setSceneCustom({ ...sceneCustom, user_engine: e.target.value })} style={inputStyle}>
-                  <option value="paraformer-zh">中文 paraformer-zh（推荐；含 fp32 时自动用更准版本）</option>
-                  <option value="zipformer-en">英文 zipformer-en</option>
+                  <option value="paraformer-zh">中文 paraformer-zh（流式，含 fp32 更准）</option>
+                  <option value="whisper-base">Whisper base（离线段级，多语言更准）</option>
+                  <option value="whisper-small">Whisper small（离线段级，更准更慢）</option>
+                  <option value="qwen3-asr">Qwen3-ASR（离线段级，多语言）</option>
+                  <option value="zipformer-en">英文 zipformer-en（流式）</option>
                 </select>
               </label>
               <label style={labelBlock}>
@@ -361,10 +364,12 @@ export default function SettingsSection({
               <label style={labelBlock}>
                 客户引擎：
                 <select value={sceneCustom.client_engine} onChange={(e) => setSceneCustom({ ...sceneCustom, client_engine: e.target.value })} style={inputStyle}>
-                  <option value="zipformer-en">英文 zipformer-en</option>
-                  <option value="paraformer-zh">中文 paraformer-zh</option>
+                  <option value="zipformer-en">英文 zipformer-en（流式）</option>
+                  <option value="whisper-base">Whisper base（离线段级，多语言）</option>
+                  <option value="paraformer-zh">中文 paraformer-zh（流式）</option>
                 </select>
               </label>
+              <div style={hint}>「离线段级」模型在 VAD 段结束后对整段识别——准确率更高（尤其中英夹杂），但没有逐字增量（partial）；「流式」模型实时增量、延迟低。</div>
               <label style={labelBlock}>
                 <input type="checkbox" checked={sceneCustom.term_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, term_enabled: e.target.checked })} /> 术语解释
                 <span style={{ marginLeft: 12 }}>

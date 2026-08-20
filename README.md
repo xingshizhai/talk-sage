@@ -66,10 +66,13 @@ This downloads into `models/`:
 
 | Model | Purpose |
 |---|---|
-| `sherpa-onnx-streaming-paraformer-zh` | Chinese streaming ASR |
+| `sherpa-onnx-streaming-paraformer-zh` | Chinese streaming ASR (fp32 included, auto-preferred) |
 | `sherpa-onnx-streaming-zipformer-en-2023-06-26` | English streaming ASR |
+| `sherpa-onnx-whisper-base` / `sherpa-onnx-whisper-small` | Offline segment-level ASR (multilingual, accurate for mixed zh/en) |
 | `silero-vad/silero_vad.onnx` | Voice activity detection |
 | `wespeaker/wespeaker_zh_cnceleb_resnet34.onnx` | Speaker embedding (voiceprint) |
+
+Models are selectable per stream in **Settings → Scene → Custom → my engine / client engine**: streaming (paraformer-zh / zipformer-en, real-time partials) or offline segment-level (whisper-base / whisper-small, result after each VAD segment; Qwen3-ASR once its model repo is public).
 
 ### 2. Build
 

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
-use talksage_asr::{EngineKind, EnginePool, SherpaStreamingEngine, StreamingASREngine};
+use talksage_asr::{EngineKind, EnginePool, SegmentEngine, SherpaStreamingEngine};
 use talksage_audio::{AudioHub, Preprocessor};
 use talksage_config::{DenoiseConfig, VadConfig};
 use talksage_core::{DomainEvent, StatusStage, TranscriptSegment};
@@ -247,7 +247,8 @@ enum InputKind {
 struct StreamWorker {
     vad: VoiceActivityDetector,
     /// ASR 引擎（Option 以便归还引擎池）。
-    engine: Option<SherpaStreamingEngine>,
+    /// ASR 引擎（流式 或 离线段级；Option 以便归还引擎池）。
+    engine: Option<Box<dyn talksage_asr::SegmentEngine>>,
     preprocessor: Preprocessor,
     mic_device: Option<String>,
     input_kind: InputKind,
@@ -331,10 +332,16 @@ impl StreamWorker {
             vad_cfg.preset,
         );
         let vad = create_vad(vad_model, threshold, min_speech, min_silence, window, max_speech)?;
-        // ASR 引擎：优先从引擎池复用（热启动，参考 WhisperLiveKit 引擎单例），否则新建
-        let engine = match &engine_pool {
-            Some(pool) => pool.acquire(cfg.engine_kind, &cfg.model_dir, asr_threads.max(1) as i32)?,
-            None => SherpaStreamingEngine::new(cfg.engine_kind, &cfg.model_dir, asr_threads.max(1) as i32)?,
+        // ASR 引擎：流式走引擎池（热启动，参考 WhisperLiveKit 引擎单例）或新建；
+        // 离线段级（whisper/qwen3）每次新建（不进池，段结束时整段识别）。
+        let threads = asr_threads.max(1) as i32;
+        let engine: Box<dyn talksage_asr::SegmentEngine> = if cfg.engine_kind.is_streaming() {
+            match &engine_pool {
+                Some(pool) => pool.acquire(cfg.engine_kind, &cfg.model_dir, threads)?,
+                None => Box::new(SherpaStreamingEngine::new(cfg.engine_kind, &cfg.model_dir, threads)?),
+            }
+        } else {
+            Box::new(talksage_asr::OfflineSegmentEngine::new(cfg.engine_kind, &cfg.model_dir, threads)?)
         };
         let preprocessor = Preprocessor::new(
             denoise.enabled,
@@ -574,10 +581,7 @@ impl StreamWorker {
         }
         self.in_speech = false;
         let final_text = match &mut self.engine {
-            Some(engine) => {
-                engine.finish();
-                engine.accept(&[]).unwrap_or_default().trim().to_string()
-            }
+            Some(engine) => engine.finish().trim().to_string(),
             None => String::new(),
         };
         if !final_text.is_empty() {
