@@ -1,14 +1,40 @@
 //! pipeline 集成测试：wav 文件输入 → VAD → 流式 ASR → 事件序列断言。
 //!
-//! 依赖仓库内模型（models/），缺失时打印提示并跳过（不失败）。
+//! 依赖仓库内模型（models/）。默认缺失时打印提示并跳过；CI 设
+//! `TALKSAGE_REQUIRE_MODELS=1` 时缺失即失败，避免「因跳过而全绿」掩盖回归。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use talksage_asr::EngineKind;
 use talksage_core::DomainEvent;
 use talksage_pipeline::{AudioInput, LivePipelineConfig, SessionRuntime, StreamConfig};
-use talksage_asr::EngineKind;
+
+/// 缺资源时是否必须失败（而不是跳过）。`env` 为 `TALKSAGE_REQUIRE_MODELS` 的值。
+fn must_fail_on_missing(env: Option<&str>) -> bool {
+    matches!(env, Some("1") | Some("true"))
+}
+
+/// 资源缺失：默认打印并跳过；`TALKSAGE_REQUIRE_MODELS=1` 时直接失败，
+/// 避免 CI 上「因跳过而全绿」掩盖回归。
+fn skip(reason: &str) {
+    let env = std::env::var("TALKSAGE_REQUIRE_MODELS").ok();
+    assert!(
+        !must_fail_on_missing(env.as_deref()),
+        "集成测试资源缺失（TALKSAGE_REQUIRE_MODELS=1 要求必须真实运行）: {reason}"
+    );
+    eprintln!("跳过：{reason}");
+}
+
+#[test]
+fn require_models_flag_controls_skip_vs_fail() {
+    assert!(!must_fail_on_missing(None), "未设置时应跳过");
+    assert!(!must_fail_on_missing(Some("0")), "0 应跳过");
+    assert!(!must_fail_on_missing(Some("")), "空值应跳过");
+    assert!(must_fail_on_missing(Some("1")), "1 应失败");
+    assert!(must_fail_on_missing(Some("true")), "true 应失败");
+}
 
 /// 解析模型根目录（TALKSAGE_MODELS_DIR 优先，其次相对 CARGO_MANIFEST_DIR 探测）。
 fn model_root() -> Option<PathBuf> {
@@ -100,13 +126,11 @@ fn zh_file_pipeline(root: &Path, wav: &Path) -> LivePipelineConfig {
 #[test]
 fn file_input_produces_status_and_segments() {
     let Some(root) = model_root() else {
-        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
-        return;
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
     };
     let wav = zh_model_dir(&root).join("0.wav");
     if !vad_model(&root).is_file() || !wav.is_file() {
-        eprintln!("跳过：模型/VAD/测试音频不完整");
-        return;
+        return skip("模型/VAD/测试音频不完整");
     }
 
     let evs = run_and_collect(zh_file_pipeline(&root, &wav));
@@ -168,13 +192,11 @@ fn file_input_produces_status_and_segments() {
 #[test]
 fn file_input_partial_events_precede_final() {
     let Some(root) = model_root() else {
-        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
-        return;
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
     };
     let wav = zh_model_dir(&root).join("0.wav");
     if !vad_model(&root).is_file() || !wav.is_file() {
-        eprintln!("跳过：模型/VAD/测试音频不完整");
-        return;
+        return skip("模型/VAD/测试音频不完整");
     }
 
     let evs = run_and_collect(zh_file_pipeline(&root, &wav));
@@ -193,19 +215,17 @@ fn file_input_partial_events_precede_final() {
 
 /// 双流：user（中文文件）+ client（英文文件）→ 两个 speaker 都产生事件。
 #[test]
-fn dual_stream_user_and_client_both_produce_segments() {    let Some(root) = model_root() else {
-        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
-        return;
+fn dual_stream_user_and_client_both_produce_segments() {
+    let Some(root) = model_root() else {
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
     };
     let zh_wav = zh_model_dir(&root).join("0.wav");
     let en_wav = en_model_dir(&root).join("0.wav");
     if !vad_model(&root).is_file() || !zh_wav.is_file() || !en_wav.is_file() {
-        eprintln!("跳过：模型/VAD/测试音频不完整");
-        return;
+        return skip("模型/VAD/测试音频不完整");
     }
     if !en_model_dir(&root).is_dir() {
-        eprintln!("跳过：缺少英文模型");
-        return;
+        return skip("缺少英文模型");
     }
 
     let mut cfg = zh_file_pipeline(&root, &zh_wav);
@@ -245,13 +265,11 @@ fn dual_stream_user_and_client_both_produce_segments() {    let Some(root) = mod
 #[test]
 fn cross_stream_echo_dedup_keeps_single_copy() {
     let Some(root) = model_root() else {
-        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
-        return;
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
     };
     let wav = zh_model_dir(&root).join("0.wav");
     if !vad_model(&root).is_file() || !wav.is_file() {
-        eprintln!("跳过：模型/VAD/测试音频不完整");
-        return;
+        return skip("模型/VAD/测试音频不完整");
     }
     // 控制组：单流（该音频应有的段数）
     let single = run_and_collect(zh_file_pipeline(&root, &wav));
@@ -306,14 +324,12 @@ fn cross_stream_echo_dedup_keeps_single_copy() {
 #[test]
 fn plugins_emit_term_and_translation_events() {
     let Some(root) = model_root() else {
-        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
-        return;
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
     };
     let en_wav = en_model_dir(&root).join("0.wav");
     let en_model = en_model_dir(&root);
     if !en_model.is_dir() || !en_wav.is_file() || !vad_model(&root).is_file() {
-        eprintln!("跳过：模型/VAD/测试音频不完整");
-        return;
+        return skip("模型/VAD/测试音频不完整");
     }
 
     // mock LLM：术语解释返回固定文本；翻译返回固定文本
@@ -367,13 +383,11 @@ fn plugins_emit_term_and_translation_events() {
 #[test]
 fn recording_saves_wav_files_for_each_stream() {
     let Some(root) = model_root() else {
-        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
-        return;
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
     };
     let wav = zh_model_dir(&root).join("0.wav");
     if !vad_model(&root).is_file() || !wav.is_file() {
-        eprintln!("跳过：模型/VAD/测试音频不完整");
-        return;
+        return skip("模型/VAD/测试音频不完整");
     }
 
     let rec_dir = std::env::temp_dir().join(format!("talksage-rec-test-{}", std::process::id()));
@@ -400,13 +414,11 @@ fn recording_saves_wav_files_for_each_stream() {
 #[test]
 fn min_commit_ms_suppresses_short_segments() {
     let Some(root) = model_root() else {
-        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
-        return;
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
     };
     let wav = zh_model_dir(&root).join("0.wav");
     if !vad_model(&root).is_file() || !wav.is_file() {
-        eprintln!("跳过：模型/VAD/测试音频不完整");
-        return;
+        return skip("模型/VAD/测试音频不完整");
     }
 
     // 对照组：min_commit_ms=0 → 有 final 段
@@ -432,13 +444,11 @@ fn min_commit_ms_suppresses_short_segments() {
 #[test]
 fn segment_timestamps_trace_to_samples() {
     let Some(root) = model_root() else {
-        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
-        return;
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
     };
     let wav = zh_model_dir(&root).join("0.wav");
     if !vad_model(&root).is_file() || !wav.is_file() {
-        eprintln!("跳过：模型/VAD/测试音频不完整");
-        return;
+        return skip("模型/VAD/测试音频不完整");
     }
     let evs = run_and_collect(zh_file_pipeline(&root, &wav));
     let finals: Vec<_> = evs

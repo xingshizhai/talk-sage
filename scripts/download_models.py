@@ -35,6 +35,10 @@ TARGETS: dict[str, list[tuple[str | None, str, str]]] = {
         ("csukuangfj/sherpa-onnx-streaming-paraformer-zh", "encoder.int8.onnx", ""),
         ("csukuangfj/sherpa-onnx-streaming-paraformer-zh", "decoder.int8.onnx", ""),
         ("csukuangfj/sherpa-onnx-streaming-paraformer-zh", "tokens.txt", ""),
+        # 集成测试音频：tests/pipeline_live.rs 期望 <model_dir>/0.wav，
+        # 上游放在 test_wavs/ 下，这里用显式 URL 落到模型目录根。缺失时集成测试会静默跳过。
+        ("csukuangfj/sherpa-onnx-streaming-paraformer-zh", "0.wav",
+         "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-paraformer-zh/resolve/main/test_wavs/0.wav"),
     ],
     "zipformer-en": [
         ("csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26", "encoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx", ""),
@@ -42,6 +46,8 @@ TARGETS: dict[str, list[tuple[str | None, str, str]]] = {
         ("csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26", "joiner-epoch-99-avg-1-chunk-16-left-64.int8.onnx", ""),
         ("csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26", "bpe.model", ""),
         ("csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26", "tokens.txt", ""),
+        ("csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26", "0.wav",
+         "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26/resolve/main/test_wavs/0.wav"),
     ],
     # VAD 模型：整条流水线的前置依赖（分段、静音裁剪、录音都要用），沿用 sherpa-onnx 官方分发版本。
     "silero-vad": [
