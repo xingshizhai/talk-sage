@@ -244,9 +244,9 @@ pub struct DenoiseConfig {
 impl Default for DenoiseConfig {
     fn default() -> Self {
         Self {
-            // 默认开启温和降噪（0.008 RMS 噪声门只压稳态底噪 + 100Hz 高通去低频轰鸣），
-            // 明显改善空调/风扇等嘈杂环境下的识别准确率；弱语音环境可在设置页关闭。
-            enabled: true,
+            // 默认关闭降噪：噪声门会把远端/轻声的弱信号块整体静音，导致 VAD 判"无声"。
+            // 保持默认关闭以保留弱语音识别能力；嘈杂环境可在设置页手动开启（gate 0.008 较温和）。
+            enabled: false,
             gate_threshold: 0.008,
             highpass: true,
             highpass_cutoff_hz: 100.0,

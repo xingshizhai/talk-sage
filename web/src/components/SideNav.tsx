@@ -143,7 +143,7 @@ export default function SideNav({
               />
             </div>
             <div style={{ marginTop: 3, fontSize: 9, color: "var(--muted)", fontFamily: "monospace" }}>
-              {micRms < 0.01 ? "无声" : micRms < 0.05 ? "低" : micRms < 0.2 ? "正常" : "过载"}
+              {micRms < 0.003 ? "无声" : micRms < 0.05 ? "微弱" : micRms < 0.2 ? "正常" : "过载"}
             </div>
           </div>
 

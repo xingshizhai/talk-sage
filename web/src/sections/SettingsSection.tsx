@@ -38,7 +38,7 @@ export default function SettingsSection({
   const [clientEngine, setClientEngine] = useState(config?.asr?.client_engine ?? "zipformer-en");
   const [userEngine, setUserEngine] = useState(config?.asr?.user_engine ?? "paraformer-zh");
   const [vadPreset, setVadPreset] = useState<string>(config?.audio?.vad?.preset ?? "standard");
-  const [denoiseEnabled, setDenoiseEnabled] = useState(config?.audio?.denoise?.enabled ?? true);
+  const [denoiseEnabled, setDenoiseEnabled] = useState(config?.audio?.denoise?.enabled ?? false);
   const [highpass, setHighpass] = useState(config?.audio?.denoise?.highpass ?? true);
   const [minSegmentMs, setMinSegmentMs] = useState<number>(config?.audio?.min_segment_ms ?? 0);
   const [recEnabled, setRecEnabled] = useState(config?.recording?.enabled ?? true);
