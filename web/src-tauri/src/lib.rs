@@ -480,6 +480,8 @@ pub fn run() {
         SessionStore::open(&data_dir.join("sessions.db").to_string_lossy()).expect("打开会话库失败"),
     );
     let service = TalkSageService::new(config.clone(), Some(sessions.clone()), EnginePool::new());
+    // 上次异常退出的残留（未完成录音 + 未结束会话），在窗口起来前先收拾干净。
+    service.recover_on_startup();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

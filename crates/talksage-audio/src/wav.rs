@@ -11,9 +11,28 @@ use anyhow::{Context, Result};
 /// 写入 RIFF 头（44 字节 PCM16）后的数据偏移。
 const HEADER_LEN: u64 = 44;
 
+/// 录音中的临时后缀。见 [`WavRecorder`] 的原子收尾说明。
+pub const PART_SUFFIX: &str = ".part";
+
+/// 给录音路径追加 `.part` 后缀。
+pub fn part_path_of(path: &Path) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(PART_SUFFIX);
+    std::path::PathBuf::from(s)
+}
+
 /// 录音器：边写边维护 data 大小，`finish()` 时回填 RIFF 头。
+///
+/// **原子收尾**：录音期间写入 `<path>.part`，`finish()` 回填头后原子改名到 `<path>`。
+/// 因此「最终路径存在」等价于「文件完整可读」；进程崩溃只会残留 `.part`
+/// （头部为占位零），可被启动扫描识别并修复，而不会留下一个看似正常、
+/// 实为坏头的 `.wav`。
 pub struct WavRecorder {
     file: File,
+    /// 最终路径（改名目标）。
+    final_path: std::path::PathBuf,
+    /// 录音期间的实际写入路径（`final_path` + `.part`）。
+    part_path: std::path::PathBuf,
     sample_rate: u32,
     channels: u16,
     data_bytes: u64,
@@ -21,19 +40,22 @@ pub struct WavRecorder {
 }
 
 impl WavRecorder {
-    /// 创建录音文件（PCM16 mono，任意采样率）。已存在的文件会被覆盖。
+    /// 创建录音文件（PCM16 mono，任意采样率）。已存在的同名 `.part` 会被覆盖。
     pub fn create(path: &Path, sample_rate: u32) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("创建录音目录失败: {}", parent.display()))?;
         }
-        let mut file = File::create(path)
-            .with_context(|| format!("创建录音文件失败: {}", path.display()))?;
+        let part_path = part_path_of(path);
+        let mut file = File::create(&part_path)
+            .with_context(|| format!("创建录音文件失败: {}", part_path.display()))?;
         // 占位头（finish 时回填）
         file.write_all(&[0u8; HEADER_LEN as usize])?;
         file.flush()?;
         Ok(Self {
             file,
+            final_path: path.to_path_buf(),
+            part_path,
             sample_rate,
             channels: 1,
             data_bytes: 0,
@@ -62,29 +84,98 @@ impl WavRecorder {
         self.samples_written
     }
 
-    /// 完成：回填 RIFF/RIFF 大小/fmt/data 头后关闭文件。
+    /// 完成：回填 RIFF/fmt/data 头，然后把 `.part` 原子改名到最终路径。
     pub fn finish(mut self) -> Result<()> {
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(b"RIFF")?;
-        // RIFF chunk size（u32，data_bytes 超出则截断告警）
-        let riff_size = 36u32.checked_add(self.data_bytes as u32).unwrap_or(u32::MAX);
-        self.file.write_all(&riff_size.to_le_bytes())?;
-        self.file.write_all(b"WAVE")?;
-        self.file.write_all(b"fmt ")?;
-        self.file.write_all(&16u32.to_le_bytes())?; // fmt chunk size
-        self.file.write_all(&1u16.to_le_bytes())?; // PCM
-        self.file.write_all(&self.channels.to_le_bytes())?;
-        self.file.write_all(&self.sample_rate.to_le_bytes())?;
-        let byte_rate = self.sample_rate * self.channels as u32 * 2;
-        self.file.write_all(&byte_rate.to_le_bytes())?;
-        let block_align = self.channels * 2;
-        self.file.write_all(&block_align.to_le_bytes())?;
-        self.file.write_all(&16u16.to_le_bytes())?; // bits per sample
-        self.file.write_all(b"data")?;
-        self.file.write_all(&(self.data_bytes as u32).to_le_bytes())?;
-        self.file.flush()?;
+        self.write_header()?;
+        // 先落盘再改名：改名成功即代表最终文件内容完整。
+        self.file.sync_all().ok();
+        std::fs::rename(&self.part_path, &self.final_path).with_context(|| {
+            format!("录音改名失败: {} → {}", self.part_path.display(), self.final_path.display())
+        })?;
         Ok(())
     }
+
+    fn write_header(&mut self) -> Result<()> {
+        write_pcm16_header(&mut self.file, self.sample_rate, self.channels, self.data_bytes)?;
+        Ok(())
+    }
+}
+
+/// 扫描录音目录，把崩溃残留的 `.part` 补头转正。返回恢复出的最终路径。
+///
+/// 进程异常退出时 [`WavRecorder::finish`] 没跑完，`.part` 的 RIFF 头还是占位零。
+/// 这里按实际文件长度算出 data 大小补回头部，再原子改名到最终路径 —— 音频本身
+/// 是顺序写入的，除最后一块外都完好，值得抢救。只有头没有数据的直接删除。
+pub fn recover_orphan_recordings(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut recovered = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(recovered), // 目录不存在 = 没有录音要恢复
+    };
+    for entry in entries.flatten() {
+        let part = entry.path();
+        if part.extension().and_then(|e| e.to_str()) != Some("part") {
+            continue;
+        }
+        match recover_part_file(&part) {
+            Ok(Some(final_path)) => recovered.push(final_path),
+            Ok(None) => {}
+            Err(e) => log::warn!("恢复残留录音失败 {}: {e}", part.display()),
+        }
+    }
+    recovered.sort();
+    Ok(recovered)
+}
+
+/// 修复单个 `.part`：补 RIFF 头并改名。空录音返回 `Ok(None)` 并删除。
+fn recover_part_file(part: &Path) -> Result<Option<std::path::PathBuf>> {
+    let final_path = part.with_extension(""); // 去掉 .part
+    let len = std::fs::metadata(part)?.len();
+    if len <= HEADER_LEN {
+        std::fs::remove_file(part).ok();
+        log::info!("清理空的残留录音: {}", part.display());
+        return Ok(None);
+    }
+    let data_bytes = len - HEADER_LEN;
+    // 采样率无法从坏头恢复，用录音固定的目标采样率。
+    let sample_rate = crate::TARGET_SAMPLE_RATE;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(part)
+        .with_context(|| format!("打开残留录音失败: {}", part.display()))?;
+    write_pcm16_header(&mut file, sample_rate, 1, data_bytes)?;
+    file.sync_all().ok();
+    drop(file);
+    std::fs::rename(part, &final_path)
+        .with_context(|| format!("残留录音改名失败: {}", part.display()))?;
+    log::info!(
+        "已恢复残留录音: {}（{} 采样 ≈ {:.1}s）",
+        final_path.display(),
+        data_bytes / 2,
+        data_bytes as f64 / 2.0 / sample_rate as f64
+    );
+    Ok(Some(final_path))
+}
+
+/// 写 44 字节 PCM16 RIFF 头到文件开头。
+fn write_pcm16_header(file: &mut File, sample_rate: u32, channels: u16, data_bytes: u64) -> Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(b"RIFF")?;
+    let riff_size = 36u32.saturating_add(data_bytes as u32);
+    file.write_all(&riff_size.to_le_bytes())?;
+    file.write_all(b"WAVE")?;
+    file.write_all(b"fmt ")?;
+    file.write_all(&16u32.to_le_bytes())?;
+    file.write_all(&1u16.to_le_bytes())?; // PCM
+    file.write_all(&channels.to_le_bytes())?;
+    file.write_all(&sample_rate.to_le_bytes())?;
+    file.write_all(&(sample_rate * channels as u32 * 2).to_le_bytes())?;
+    file.write_all(&(channels * 2).to_le_bytes())?;
+    file.write_all(&16u16.to_le_bytes())?; // bits per sample
+    file.write_all(b"data")?;
+    file.write_all(&(data_bytes as u32).to_le_bytes())?;
+    file.flush()?;
+    Ok(())
 }
 
 /// 读取 PCM16 WAV：返回 (采样率, mono f32 采样)。
@@ -197,6 +288,94 @@ mod tests {
         assert_eq!(data_size, 200);
         // 文件总长 = 44 + 200
         assert_eq!(raw.len(), 244);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 录音期间只应存在 `.part`；`finish()` 后原子改名到最终路径。
+    /// 这样「最终路径存在」= 「文件完整」，崩溃残留一眼可辨。
+    #[test]
+    fn recording_is_atomic_part_then_rename() {
+        let dir = std::env::temp_dir().join(format!("talksage-wav-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("atomic.wav");
+        let part = dir.join("atomic.wav.part");
+
+        let mut rec = WavRecorder::create(&path, 16000).unwrap();
+        rec.write(&vec![0.1; 320]).unwrap();
+        // 收尾前：只有 .part，最终路径还不存在
+        assert!(part.is_file(), "录音期间应写入 .part: {}", part.display());
+        assert!(!path.exists(), "收尾前不应出现最终文件: {}", path.display());
+
+        rec.finish().unwrap();
+        // 收尾后：最终文件可读，.part 已消失
+        assert!(path.is_file(), "finish 后应存在最终文件");
+        assert!(!part.exists(), "finish 后 .part 应已改名消失");
+        let (sr, samples) = read_wav(&path).unwrap();
+        assert_eq!(sr, 16000);
+        assert_eq!(samples.len(), 320);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 未调用 `finish()` 就 drop（崩溃/异常路径）：残留 `.part`，
+    /// 不产生看起来正常、实为坏头的 `.wav`。
+    #[test]
+    fn dropping_without_finish_leaves_part_not_wav() {
+        let dir = std::env::temp_dir().join(format!("talksage-wav-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("aborted.wav");
+        let part = dir.join("aborted.wav.part");
+
+        {
+            let mut rec = WavRecorder::create(&path, 16000).unwrap();
+            rec.write(&vec![0.2; 160]).unwrap();
+        } // drop without finish
+
+        assert!(part.is_file(), "异常中断应残留 .part 供恢复");
+        assert!(!path.exists(), "异常中断不应产生最终 .wav");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 崩溃残留的 `.part`（头部为占位零）应能按文件长度补回 RIFF 头并转正。
+    #[test]
+    fn recovers_orphan_part_into_readable_wav() {
+        let dir = std::env::temp_dir().join(format!("talksage-wav-recover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("crashed.wav");
+
+        // 模拟崩溃：写了音频但没 finish
+        {
+            let mut rec = WavRecorder::create(&path, 16000).unwrap();
+            rec.write(&vec![0.25; 800]).unwrap();
+        }
+        assert!(part_path_of(&path).is_file(), "前置条件：应有 .part 残留");
+
+        let recovered = recover_orphan_recordings(&dir).unwrap();
+        assert_eq!(recovered.len(), 1, "应恢复 1 个残留录音: {recovered:?}");
+        assert_eq!(recovered[0], path);
+        assert!(!part_path_of(&path).exists(), "恢复后 .part 应消失");
+
+        let (sr, samples) = read_wav(&path).unwrap();
+        assert_eq!(sr, 16000);
+        assert_eq!(samples.len(), 800, "恢复后采样数应与崩溃前写入量一致");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 只有头、没有音频数据的 `.part`（刚创建就崩）没有恢复价值，直接删除。
+    #[test]
+    fn empty_part_is_discarded_not_promoted() {
+        let dir = std::env::temp_dir().join(format!("talksage-wav-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty.wav");
+        drop(WavRecorder::create(&path, 16000).unwrap());
+
+        let recovered = recover_orphan_recordings(&dir).unwrap();
+        assert!(recovered.is_empty(), "空录音不应被转正: {recovered:?}");
+        assert!(!path.exists(), "空录音不应产生 .wav");
+        assert!(!part_path_of(&path).exists(), "空 .part 应被清理");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

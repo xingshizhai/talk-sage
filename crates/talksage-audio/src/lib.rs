@@ -16,6 +16,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 pub mod silence_trim;
 pub mod wav;
 
+pub use wav::{part_path_of, read_wav, recover_orphan_recordings, WavRecorder};
+
 /// 目标采样率（sherpa-onnx 模型统一 16kHz）。
 pub const TARGET_SAMPLE_RATE: u32 = 16000;
 

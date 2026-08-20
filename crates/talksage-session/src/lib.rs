@@ -546,6 +546,40 @@ impl SessionStore {
         Ok(())
     }
 
+    /// 启动恢复：收尾上次异常退出遗留的「未结束」会话（`ended_at IS NULL`）。
+    ///
+    /// 结束时刻按该会话最后一段转写的结束时间推算（`started_at` 秒 + 段内毫秒偏移
+    /// 向上取整）；没有任何段则退回 `started_at`。返回被收尾的会话 id。
+    /// 幂等：已有 `ended_at` 的会话不受影响。
+    pub fn close_orphan_sessions(&self) -> Result<Vec<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.started_at,
+                    COALESCE(MAX(g.ts_ms + g.duration_ms), 0)
+             FROM sessions s
+             LEFT JOIN segments g ON g.session_id = s.id
+             WHERE s.ended_at IS NULL
+             GROUP BY s.id, s.started_at",
+        )?;
+        let rows: Vec<(i64, i64, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        drop(stmt);
+
+        let mut closed = Vec::new();
+        for (id, started_at, last_ms) in rows {
+            // 毫秒偏移向上取整成秒，保证 ended_at >= started_at 且不丢掉不足 1s 的尾巴
+            let ended_at = started_at + (last_ms + 999) / 1000;
+            conn.execute(
+                "UPDATE sessions SET ended_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, ended_at],
+            )?;
+            closed.push(id);
+        }
+        closed.sort();
+        Ok(closed)
+    }
+
     /// 追加转写段（含时长/能量统计）。
     pub fn add_segment(&self, session_id: i64, seg: &TranscriptSegment) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -783,6 +817,38 @@ mod tests {
             duration_ms,
             rms: 0.2,
         }
+    }
+
+    /// 崩溃后 `ended_at` 为 NULL 的会话应在启动时收尾，
+    /// 否则历史里会永远挂着一条「进行中」的僵尸会话。
+    #[test]
+    fn close_orphan_sessions_uses_last_segment_time() {
+        let s = store();
+        let crashed = s.start_session(1_000).unwrap();
+        s.add_segment(crashed, &seg_at(0, "我", "崩溃前最后一句", 5_000, 800)).unwrap();
+        let normal = s.start_session(2_000).unwrap();
+        s.end_session(normal, 3_000).unwrap();
+
+        let closed = s.close_orphan_sessions().unwrap();
+        assert_eq!(closed, vec![crashed], "只应收尾未结束的会话");
+
+        // 崩溃会话按最后一段的结束时刻收尾：1000 + ceil((5000+800)/1000) = 1006
+        let d = s.get_session(crashed).unwrap();
+        assert_eq!(d.ended_at, Some(1_006), "应按最后一段推算结束时间");
+        // 已正常结束的不受影响
+        assert_eq!(s.get_session(normal).unwrap().ended_at, Some(3_000));
+
+        // 幂等：再跑一次没有可收尾的
+        assert!(s.close_orphan_sessions().unwrap().is_empty());
+    }
+
+    /// 没有任何转写段的崩溃会话，退回到 `started_at`（时长 0）。
+    #[test]
+    fn close_orphan_session_without_segments_falls_back_to_start() {
+        let s = store();
+        let empty = s.start_session(7_000).unwrap();
+        assert_eq!(s.close_orphan_sessions().unwrap(), vec![empty]);
+        assert_eq!(s.get_session(empty).unwrap().ended_at, Some(7_000));
     }
 
     #[test]

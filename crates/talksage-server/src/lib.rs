@@ -52,6 +52,8 @@ pub async fn run(host: &str, port: u16, token: &str, web_dist: &PathBuf) -> Resu
     );
     let (tx, _rx) = broadcast::channel::<DomainEvent>(256);
     let service = TalkSageService::new(config.clone(), Some(sessions.clone()), EnginePool::new());
+    // 上次异常退出的残留（未完成录音 + 未结束会话），在对外服务前先收拾干净。
+    service.recover_on_startup();
     let state = ServerState {
         config,
         sessions,

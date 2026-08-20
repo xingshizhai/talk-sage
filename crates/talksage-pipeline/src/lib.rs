@@ -25,7 +25,7 @@ pub mod service;
 pub mod speaker;
 
 pub use runtime::SessionRuntime;
-pub use service::{ClientCapture, RunningListen, StartListen, TalkSageService};
+pub use service::{ClientCapture, RecoveryReport, RunningListen, StartListen, TalkSageService};
 
 /// 停止管道时等待工作线程收尾的时限。超时返回，不卡死 UI；后台仍可能继续 ASR `finish`。
 pub const STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(5);

@@ -114,12 +114,65 @@ pub struct TalkSageService {
     engines: Arc<EnginePool>,
 }
 
+/// [`TalkSageService::recover_on_startup`] 的结果汇总。
+#[derive(Debug, Default)]
+pub struct RecoveryReport {
+    /// 补头转正的录音最终路径。
+    pub recordings: Vec<PathBuf>,
+    /// 被收尾的未结束会话 id。
+    pub sessions: Vec<i64>,
+}
+
 impl TalkSageService {
     pub fn new(config: Arc<ConfigManager>, sessions: Option<Arc<SessionStore>>, engines: Arc<EnginePool>) -> Self {
         Self {
             config,
             sessions,
             engines,
+        }
+    }
+
+    /// 启动恢复：处理上次异常退出留下的两类残留 —— 未完成录音与未结束会话。
+    ///
+    /// 适配器应在对外服务/开窗之前调用一次。
+    pub fn recover_on_startup(&self) -> RecoveryReport {
+        let recordings = self.recover_incomplete_recordings();
+        let sessions = match self.sessions.as_ref() {
+            Some(store) => match store.close_orphan_sessions() {
+                Ok(ids) => {
+                    if !ids.is_empty() {
+                        log::info!("启动恢复：收尾 {} 个未正常结束的会话 {ids:?}", ids.len());
+                    }
+                    ids
+                }
+                Err(e) => {
+                    log::warn!("启动恢复收尾会话失败: {e}");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        RecoveryReport { recordings, sessions }
+    }
+
+    /// 启动恢复：把上次异常退出残留的 `.part` 录音补头转正。
+    ///
+    /// 录音是顺序写入的，崩溃只影响最后一块；不恢复的话整段音频既进不了历史
+    /// 也无法回放。返回恢复出的最终路径（空录音会被清理，不计入）。
+    pub fn recover_incomplete_recordings(&self) -> Vec<PathBuf> {
+        let snapshot = self.config.snapshot();
+        let rec_dir = snapshot.recording.resolve_dir(self.config.data_dir());
+        match talksage_audio::recover_orphan_recordings(&rec_dir) {
+            Ok(paths) => {
+                if !paths.is_empty() {
+                    log::info!("启动恢复：转正 {} 个未完成录音", paths.len());
+                }
+                paths
+            }
+            Err(e) => {
+                log::warn!("启动恢复录音扫描失败 {}: {e}", rec_dir.display());
+                Vec::new()
+            }
         }
     }
 
@@ -562,6 +615,57 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&self.0);
             }
         }
+    }
+
+    /// 启动时应把上次崩溃残留的 `.part` 录音补头转正，
+    /// 否则那段音频既进不了历史，也没法回放。
+    #[test]
+    fn startup_recovers_orphan_recordings() {
+        let dir = tempfile_dir::TempDir::new();
+        let cfg = ConfigManager::from_config(Config::default(), dir.path().to_path_buf());
+        let rec_dir = cfg.snapshot().recording.resolve_dir(dir.path());
+        std::fs::create_dir_all(&rec_dir).unwrap();
+
+        // 模拟崩溃残留：写了音频但没 finish
+        let wav = rec_dir.join("2026-01-01_00-00-00_我.wav");
+        {
+            let mut rec = talksage_audio::WavRecorder::create(&wav, 16000).unwrap();
+            rec.write(&vec![0.3; 640]).unwrap();
+        }
+        assert!(talksage_audio::part_path_of(&wav).is_file(), "前置条件：应有 .part");
+
+        let svc = TalkSageService::new(Arc::new(cfg), None, EnginePool::new());
+        let recovered = svc.recover_incomplete_recordings();
+
+        assert_eq!(recovered.len(), 1, "应恢复 1 个残留录音: {recovered:?}");
+        assert!(wav.is_file(), "残留录音应被转正为 .wav");
+        assert!(!talksage_audio::part_path_of(&wav).exists(), ".part 应已消失");
+        let (_, samples) = talksage_audio::read_wav(&wav).unwrap();
+        assert_eq!(samples.len(), 640);
+    }
+
+    /// 启动恢复应同时处理两类残留：未完成录音 + 未结束会话。
+    #[test]
+    fn startup_recovery_closes_orphan_sessions_too() {
+        let (svc, dir) = temp_service(true);
+        let store = svc.sessions().unwrap();
+        let crashed = store.start_session(1_000).unwrap();
+
+        // 同时放一个残留录音
+        let rec_dir = svc.config().snapshot().recording.resolve_dir(dir.path());
+        std::fs::create_dir_all(&rec_dir).unwrap();
+        let wav = rec_dir.join("crash.wav");
+        {
+            let mut rec = talksage_audio::WavRecorder::create(&wav, 16000).unwrap();
+            rec.write(&vec![0.1; 320]).unwrap();
+        }
+
+        let report = svc.recover_on_startup();
+
+        assert_eq!(report.recordings.len(), 1, "应恢复残留录音");
+        assert_eq!(report.sessions, vec![crashed], "应收尾未结束会话");
+        assert!(store.get_session(crashed).unwrap().ended_at.is_some());
+        assert!(wav.is_file());
     }
 
     #[test]
