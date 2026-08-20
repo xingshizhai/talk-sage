@@ -446,3 +446,9 @@ token = ""
 - **实时提示**：`core::NudgeEngine`（规则 + 2min 冷却 + 优先级 talk_ratio→questions→pace→next_steps + 中文模板），触发推送 `DomainEvent::Nudge`，前端浮动 toast 可关闭
 - **三段式纪要**：`notes::TrioGenerator` 三个专精 prompt **并行**（叙事概述 / 归属发言人的主题要点 JSON / 行动项清单 JSON，容错提取 JSON），入口：Tauri `generate_trio_notes` + server `POST /api/session/{id}/trio-notes`，存 `sessions.trio` 列，历史页"智能纪要"展示
 - 测试：core metrics 5 项单测（占比/独白/打断/健康分/问句启发式/冷却限流）；pipeline_live 集成断言 Metrics 事件；notes trio mock 测试；session trio 存取测试
+
+### 18.9 会议结束 Webhook + Markdown 导出（借鉴 Call.md）
+- **Webhook（SSRF 防护）**：`talksage-core::webhook`——`validate_webhook_url`（仅 http/https；拒绝回环/私网/链路本地 IP、localhost、`.local`、解析到私网的主机名；解析失败放行避免离线误伤）+ `post_webhook`（ureq 直连、禁环境代理、10s 超时）+ `trigger_webhooks`（逐条结果）
+- 配置：`[webhooks] enabled + urls`（设置页「Webhook」tab，每行一个 URL）；会话结束时（Tauri `stop_listen` / server `stop_listen_api`，后台线程）构建 payload（会议元数据 + 会话指标 + 质量 + 纪要/智能纪要 + 完整转写）推送
+- **Markdown 导出**：`talksage_session::export_markdown` 单文件（概览/指标 → 会议纪要 → 智能纪要 → 转写）；入口 Tauri `export_session_markdown`（写入 `<data_dir>/exports/session-{id}.md`）+ server `GET /api/session/{id}/export`；历史页「导出 Markdown」按钮（blob 下载 + 桌面端显示落盘路径）
+- 测试：core webhook 4 项（URL 校验含云元数据端点拒绝 + 本地 TcpListener 端到端 POST）；session payload/export 单测；server export API 集成测试

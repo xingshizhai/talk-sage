@@ -88,6 +88,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/templates", get(list_templates_api))
         .route("/session/{id}/notes", axum::routing::post(generate_notes_api))
         .route("/session/{id}/trio-notes", axum::routing::post(generate_trio_notes_api))
+        .route("/session/{id}/export", get(export_session_api))
         .route("/logs", get(read_logs_api))
         .route("/listen/start", axum::routing::post(start_listen_api))
         .route("/listen/stop", axum::routing::post(stop_listen_api))
@@ -268,6 +269,19 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
             }
         }
     }
+    // 会议结束 Webhook（借鉴 Call.md workflow-webhook）
+    if let Some(w) = updates.get("webhooks") {
+        if let Some(e) = w.get("enabled").and_then(|v| v.as_bool()) {
+            c.webhooks.enabled = e;
+        }
+        if let Some(urls) = w.get("urls").and_then(|v| v.as_array()) {
+            c.webhooks.urls = urls
+                .iter()
+                .filter_map(|u| u.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
 }
 
 async fn list_sessions_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
@@ -437,6 +451,23 @@ async fn generate_trio_notes_api(
     }
 }
 
+/// 导出会话为 Markdown 单文件（转写 + 纪要 + 指标 + 质量；借鉴 Call.md markdown-export）。
+async fn export_session_api(State(state): State<ServerState>, headers: axum::http::HeaderMap, AxumPath(id): AxumPath<i64>) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let Ok(detail) = state.sessions.get_session(id) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "会话不存在" }))).into_response();
+    };
+    let md = talksage_session::export_markdown(&detail);
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/markdown; charset=utf-8"))],
+        md,
+    )
+        .into_response()
+}
+
 async fn start_listen_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
@@ -511,6 +542,19 @@ async fn stop_listen_api(State(state): State<ServerState>, headers: axum::http::
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let _ = state.sessions.end_session(sid, now);
+        // 会议结束 Webhook（借鉴 Call.md workflow-webhook；配置启用 + SSRF 防护）
+        let wh_cfg = state.config.snapshot().webhooks;
+        if wh_cfg.enabled && !wh_cfg.urls.is_empty() {
+            let sessions = state.sessions.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Ok(detail) = sessions.get_session(sid) {
+                    let results = talksage_session::trigger_meeting_webhooks(&detail, &wh_cfg);
+                    for r in &results {
+                        log::info!("webhook {}: {}（{}）", if r.ok { "成功" } else { "失败" }, r.url, r.message);
+                    }
+                }
+            });
+        }
     }
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
 }

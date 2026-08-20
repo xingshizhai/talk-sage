@@ -82,6 +82,51 @@ async fn unknown_api_returns_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn export_returns_markdown_for_session() {
+    // 造一个带数据的会话：通过 sessions API 无法直接插入，用 SessionStore 直接写
+    let state = {
+        let config = Arc::new(talksage_config::ConfigManager::load(None, None).unwrap());
+        let sessions = Arc::new(talksage_session::SessionStore::open(":memory:").unwrap());
+        let id = sessions.start_session(1).unwrap();
+        sessions
+            .add_segment(
+                id,
+                &talksage_core::TranscriptSegment {
+                    speaker_id: 1,
+                    speaker_label: "客户".into(),
+                    text: "We need NPI samples by Friday.".into(),
+                    is_partial: false,
+                    ts_ms: 500,
+                    duration_ms: 500,
+                    rms: 0.2,
+                },
+            )
+            .unwrap();
+        sessions.set_notes(id, "# 纪要").unwrap();
+        let (tx, _rx) = broadcast::channel::<DomainEvent>(16);
+        ServerState {
+            config,
+            sessions,
+            events: tx,
+            pipeline: Arc::new(std::sync::Mutex::new(None)),
+            current_session: Arc::new(std::sync::Mutex::new(None)),
+            token: String::new(),
+            engine_pool: talksage_asr::EnginePool::new(),
+        }
+    };
+    let resp = build_router(state, &std::path::PathBuf::from("nonexistent-dist"))
+        .oneshot(Request::builder().uri("/api/session/1/export").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let md = String::from_utf8_lossy(&bytes).to_string();
+    assert!(md.contains("# 会议记录"), "导出应为 Markdown: {md}");
+    assert!(md.contains("[客户]"), "应含说话人标签: {md}");
+    assert!(md.contains("We need NPI samples by Friday."));
+}
+
 // ── OpenAI 兼容 API（/v1/*）────────────────────────────────
 
 fn models_root() -> Option<std::path::PathBuf> {

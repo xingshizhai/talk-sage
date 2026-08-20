@@ -47,6 +47,11 @@ export interface AppConfig {
     silence_rms: number;
     high_rms: number;
   };
+  /** 会议结束 Webhook（n8n/Zapier/CRM 推送）。 */
+  webhooks: {
+    enabled: boolean;
+    urls: string[];
+  };
   [key: string]: unknown;
 }
 
@@ -228,6 +233,8 @@ export interface AppApi {
   generateNotes(sessionId: number, templateId: string): Promise<string>;
   /** 纪要：三段式智能纪要（概述 / 归属要点 / 行动项）生成并保存。 */
   generateTrioNotes(sessionId: number, meetingName?: string, meetingDescription?: string): Promise<TrioSummary>;
+  /** 导出会话为 Markdown 单文件（转写 + 纪要 + 指标 + 质量；path 为桌面端落盘路径，headless 为空）。 */
+  exportSessionMarkdown(sessionId: number): Promise<{ path: string; content: string }>;
   /** 调试：读取最近日志（尾部 N 行）。 */
   readLogs(lines?: number): Promise<string>;
   /** 订阅领域事件流，返回取消函数。 */

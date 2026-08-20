@@ -10,6 +10,9 @@ pub use metrics::{
     compute_conversation_metrics, ConversationMetrics, Nudge, NudgeAction, NudgeEngine, NudgeKind, NudgeSeverity,
 };
 
+pub mod webhook;
+pub use webhook::{post_webhook, trigger_webhooks, validate_webhook_url, WebhookResult};
+
 /// 应用版本（与 workspace 版本保持一致）。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

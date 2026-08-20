@@ -301,6 +301,29 @@ export default function App() {
     [detail],
   );
 
+  /** 导出会话为 Markdown 单文件（转写 + 纪要 + 指标；借鉴 Call.md markdown-export）。 */
+  const handleExportMarkdown = useCallback(
+    async (id: number): Promise<string> => {
+      try {
+        const { path, content } = await api.exportSessionMarkdown(id);
+        // 浏览器/WebView 侧再触发一次下载（桌面端 path 同时落盘）
+        const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `session-${id}.md`;
+        a.click();
+        URL.revokeObjectURL(url);
+        return path;
+      } catch (e) {
+        console.error("导出失败:", e);
+        alert(`导出失败: ${e}`);
+        return "";
+      }
+    },
+    [],
+  );
+
   const handleListen = useCallback(async () => {
     try {
       if (listening) {
@@ -487,6 +510,7 @@ export default function App() {
                 onRefresh={refreshHistory}
                 onGenerateNotes={handleGenerateNotes}
                 onGenerateTrio={handleGenerateTrio}
+                onExportMarkdown={handleExportMarkdown}
                 onDeleteSession={handleDeleteSession}
                 onDeleteSessions={handleDeleteSessions}
                 notesBusy={notesBusy}

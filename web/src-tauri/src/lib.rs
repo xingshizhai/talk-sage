@@ -162,6 +162,19 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
             }
         }
     }
+    // 会议结束 Webhook（借鉴 Call.md workflow-webhook）
+    if let Some(w) = updates.get("webhooks") {
+        if let Some(e) = w.get("enabled").and_then(|v| v.as_bool()) {
+            c.webhooks.enabled = e;
+        }
+        if let Some(urls) = w.get("urls").and_then(|v| v.as_array()) {
+            c.webhooks.urls = urls
+                .iter()
+                .filter_map(|u| u.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
     if let Some(rec) = updates.get("recording") {
         if let Some(e) = rec.get("enabled").and_then(|v| v.as_bool()) {
             c.recording.enabled = e;
@@ -435,6 +448,22 @@ fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
                 meta.skipped_analysis,
             );
         }
+        // 会议结束 Webhook（借鉴 Call.md workflow-webhook；配置启用 + SSRF 防护）
+        let wh_cfg = state.config.snapshot().webhooks;
+        if wh_cfg.enabled && !wh_cfg.urls.is_empty() {
+            let sessions = state.sessions.clone();
+            std::thread::spawn(move || {
+                if let Ok(detail) = sessions.get_session(sid) {
+                    let results = talksage_session::trigger_meeting_webhooks(&detail, &wh_cfg);
+                    for r in &results {
+                        log::info!("webhook {}: {}（{}）", if r.ok { "成功" } else { "失败" }, r.url, r.message);
+                    }
+                    if results.iter().any(|r| !r.ok) {
+                        log::warn!("部分 webhook 失败: {:?}", results.iter().filter(|r| !r.ok).map(|r| &r.url).collect::<Vec<_>>());
+                    }
+                }
+            });
+        }
     }
     Ok(())
 }
@@ -618,6 +647,19 @@ fn generate_trio_notes(session_id: i64, meeting_name: Option<String>, meeting_de
     Ok(json)
 }
 
+/// 导出会话为 Markdown 单文件（转写 + 纪要 + 指标 + 质量；借鉴 Call.md markdown-export），
+/// 写入 `<data_dir>/exports/session-{id}.md` 并返回内容。
+#[tauri::command]
+fn export_session_markdown(session_id: i64, state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
+    let content = talksage_session::export_markdown(&detail);
+    let dir = state.config.data_dir().join("exports");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建导出目录失败: {e}"))?;
+    let path = dir.join(format!("session-{session_id}.md"));
+    std::fs::write(&path, &content).map_err(|e| format!("写入导出文件失败: {e}"))?;
+    Ok(serde_json::json!({ "path": path.display().to_string(), "content": content }))
+}
+
 /// 根据配置构建 LLM Provider（OpenAI 兼容）。
 fn build_llm(config: &ConfigManager) -> Option<Arc<dyn LLMProvider>> {
     let snapshot = config.snapshot();
@@ -737,6 +779,7 @@ pub fn run() {
             list_notes_templates,
             generate_notes,
             generate_trio_notes,
+            export_session_markdown,
             read_logs
         ])
         .setup(move |app| {

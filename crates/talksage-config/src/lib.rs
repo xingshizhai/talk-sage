@@ -55,6 +55,7 @@ pub struct Config {
     pub privacy: PrivacyConfig,
     pub server: ServerConfig,
     pub knowledge_base: KnowledgeBaseConfig,
+    pub webhooks: WebhooksConfig,
 }
 
 impl Default for Config {
@@ -70,7 +71,24 @@ impl Default for Config {
             privacy: PrivacyConfig::default(),
             server: ServerConfig::default(),
             knowledge_base: KnowledgeBaseConfig::default(),
+            webhooks: WebhooksConfig::default(),
         }
+    }
+}
+
+/// 会议结束 Webhook（借鉴 Call.md workflow-webhook）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebhooksConfig {
+    /// 总开关。
+    pub enabled: bool,
+    /// 目标 URL 列表（http/https；调用前做 SSRF 防护，拒绝内网/回环地址）。
+    pub urls: Vec<String>,
+}
+
+impl Default for WebhooksConfig {
+    fn default() -> Self {
+        Self { enabled: false, urls: Vec::new() }
     }
 }
 
@@ -606,6 +624,10 @@ fn merge_config(default: Config, user: Config) -> Config {
         privacy: user.privacy,
         server: user.server,
         knowledge_base: user.knowledge_base,
+        webhooks: WebhooksConfig {
+            enabled: user.webhooks.enabled,
+            urls: user.webhooks.urls,
+        },
     }
 }
 

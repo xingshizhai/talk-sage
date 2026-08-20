@@ -107,8 +107,8 @@
 | 会话指标增量（我/客户发言占比、WPM、提问数、独白、打断） | 高 | ✅ 已实现（core::metrics + 会中 Metrics 事件 + SessionStats words/questions，见 architecture-v2 §18.8） |
 | 实时提示引擎（规则 + 2min 限流 + 模板） | 高 | ✅ 已实现（core::NudgeEngine + 会中 Nudge 事件 + 前端 toast，见 §18.8） |
 | 三段式纪要生成（overview + 归属发言人的要点 + 行动项） | 高 | ✅ 已实现（notes::TrioGenerator 并行 3 prompt + 历史页"智能纪要"，见 §18.8） |
-| Workflow Webhook（会议结束推送 + url-guard SSRF 防护） | 中 | 待办 |
-| Markdown 结构化导出（转写+纪要+指标单文件） | 中 | 待办 |
+| Workflow Webhook（会议结束推送 + url-guard SSRF 防护） | 中 | ✅ 已实现（core::webhook + 设置页 Webhook tab + 会话结束触发，见 §18.9） |
+| Markdown 结构化导出（转写+纪要+指标单文件） | 中 | ✅ 已实现（session::export_markdown + 历史页"导出 Markdown"，见 §18.9） |
 | 会议准备向导（探测问题 + 会中清单） | 中 | 待办 |
 | 录音时长上限（2h + 5min 预警 + 暂停记账） | 低-中 | 待办 |
 | MCP 自动触发 / 意图检测 | 低（远期） | 先做好本地插件，生态对接后置 |

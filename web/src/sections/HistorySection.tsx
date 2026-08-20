@@ -47,6 +47,7 @@ export default function HistorySection({
   onRefresh,
   onGenerateNotes,
   onGenerateTrio,
+  onExportMarkdown,
   onDeleteSession,
   onDeleteSessions,
   notesBusy,
@@ -61,6 +62,7 @@ export default function HistorySection({
   onRefresh: () => void;
   onGenerateNotes: (templateId: string) => void;
   onGenerateTrio: (meetingName: string, meetingDescription: string) => void;
+  onExportMarkdown: (id: number) => Promise<string>;
   onDeleteSession: (id: number) => void;
   onDeleteSessions: (ids: number[]) => void;
   notesBusy: boolean;
@@ -77,6 +79,9 @@ export default function HistorySection({
   // 三段式智能纪要：会议名称/说明（可选）
   const [meetingName, setMeetingName] = useState("");
   const [meetingDescription, setMeetingDescription] = useState("");
+  // 导出状态消息（Markdown 已保存路径 / 下载提示）
+  const [exportMsg, setExportMsg] = useState("");
+  const [exporting, setExporting] = useState(false);
 
   /** 切换单条选择。 */
   function toggleSelect(id: number) {
@@ -379,13 +384,28 @@ export default function HistorySection({
               {detail.terms.join("；")}
             </div>
           )}
-          <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+          <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button
+              onClick={async () => {
+                setExporting(true);
+                setExportMsg("");
+                const path = await onExportMarkdown(detail.id);
+                setExporting(false);
+                if (path) setExportMsg(`已导出：${path}`);
+                else if (detail.id) setExportMsg("已开始下载（浏览器模式）");
+              }}
+              disabled={exporting}
+              style={{ fontSize: 12 }}
+            >
+              {exporting ? "导出中…" : "导出 Markdown"}
+            </button>
             <button
               onClick={() => confirmDelete(detail.id)}
               style={{ ...deleteBtnStyle, color: confirmDeleteId === detail.id ? "var(--danger)" : "var(--muted)" }}
             >
               {confirmDeleteId === detail.id ? "确认删除此会话？" : "删除此会话"}
             </button>
+            {exportMsg && <span style={{ fontSize: 10, color: "var(--muted)", wordBreak: "break-all" }}>{exportMsg}</span>}
           </div>
         </div>
       ) : searchResults ? (

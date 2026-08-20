@@ -14,6 +14,171 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use talksage_core::TranscriptSegment;
 
+/// 由会话详情构建会议结束 webhook payload（借鉴 Call.md workflow-webhook）。
+pub fn build_webhook_payload(detail: &SessionDetail) -> serde_json::Value {
+    let duration_secs = detail
+        .ended_at
+        .map(|e| (e - detail.started_at).max(0))
+        .unwrap_or(0);
+    let metrics = talksage_core::compute_conversation_metrics(&detail.segments);
+    let quality = detail.meta.as_ref().map(|m| {
+        serde_json::json!({
+            "quality": m.quality,
+            "quality_label": m.quality_label(),
+            "speech_ratio": m.speech_ratio,
+            "text_noise": m.text_noise,
+            "skipped_analysis": m.skipped_analysis,
+        })
+    });
+    serde_json::json!({
+        "meeting": {
+            "id": detail.id,
+            "started_at": detail.started_at,
+            "ended_at": detail.ended_at,
+            "duration_seconds": duration_secs,
+        },
+        "metrics": {
+            "talk_ratio_me": metrics.talk_ratio_me,
+            "talk_ratio_them": metrics.talk_ratio_them,
+            "pace_wpm": metrics.pace_wpm,
+            "questions_me": metrics.questions_me,
+            "monologue_detected": metrics.monologue_detected,
+            "interruption_count": metrics.interruption_count,
+            "health_score": metrics.health_score,
+        },
+        "quality": quality,
+        "content": {
+            "notes": detail.notes,
+            "trio": detail.trio.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
+            "terms": detail.terms,
+            "translations": detail.translations,
+        },
+        "transcript": detail
+            .segments
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "speaker_label": s.speaker_label,
+                    "text": s.text,
+                    "ts_ms": s.ts_ms,
+                    "duration_ms": s.duration_ms,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// 触发会议结束 webhook（配置启用时）：构建 payload 并逐条发送（SSRF 防护）。
+pub fn trigger_meeting_webhooks(
+    detail: &SessionDetail,
+    cfg: &talksage_config::WebhooksConfig,
+) -> Vec<talksage_core::WebhookResult> {
+    if !cfg.enabled || cfg.urls.is_empty() {
+        return Vec::new();
+    }
+    let payload = build_webhook_payload(detail);
+    talksage_core::trigger_webhooks(&cfg.urls, &payload)
+}
+
+/// 会话详情导出为 Markdown 单文件（转写 + 纪要 + 指标 + 质量；借鉴 Call.md markdown-export）。
+pub fn export_markdown(detail: &SessionDetail) -> String {
+    let mut md = String::new();
+    md.push_str(&format!("# 会议记录 #{}（{}）\n\n", detail.id, fmt_unix(detail.started_at)));
+
+    // 概览与指标
+    let metrics = talksage_core::compute_conversation_metrics(&detail.segments);
+    md.push_str("## 概览\n\n");
+    if let Some(meta) = &detail.meta {
+        md.push_str(&format!(
+            "- 时长 {}s · 语音占比 {:.0}% · 质量 **{}**{}\n",
+            meta.duration_ms / 1000,
+            meta.speech_ratio * 100.0,
+            meta.quality_label(),
+            if meta.skipped_analysis { "（跳过下游分析）" } else { "" },
+        ));
+    }
+    if metrics.has_data() {
+        md.push_str(&format!(
+            "- 发言占比 我 {:.0}% / 客户 {:.0}% · 语速 {:.0} WPM · 提问 {} · 独白 {} · 打断 {} · 健康分 **{}**\n",
+            metrics.talk_ratio_me * 100.0,
+            metrics.talk_ratio_them * 100.0,
+            metrics.pace_wpm,
+            metrics.questions_me,
+            if metrics.monologue_detected { "是" } else { "否" },
+            metrics.interruption_count,
+            metrics.health_score,
+        ));
+    }
+
+    // 纪要
+    md.push_str("\n## 会议纪要\n\n");
+    match &detail.notes {
+        Some(n) => md.push_str(&format!("{}\n", n)),
+        None => md.push_str("（未生成）\n"),
+    }
+
+    // 智能纪要
+    md.push_str("\n## 智能纪要\n\n");
+    let trio = detail.trio.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    match trio {
+        Some(t) => {
+            if let Some(o) = t.get("short_overview").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                md.push_str(&format!("**概述**：{o}\n\n"));
+            }
+            if let Some(kps) = t.get("key_points").and_then(|v| v.as_array()) {
+                md.push_str("**关键要点**\n\n");
+                for kp in kps {
+                    let topic = kp.get("topic").and_then(|v| v.as_str()).unwrap_or("");
+                    md.push_str(&format!("### {topic}\n"));
+                    if let Some(pts) = kp.get("points").and_then(|v| v.as_array()) {
+                        for p in pts {
+                            if let Some(s) = p.as_str() {
+                                md.push_str(&format!("- {s}\n"));
+                            }
+                        }
+                    }
+                    md.push('\n');
+                }
+            }
+            if let Some(items) = t.get("action_items").and_then(|v| v.as_array()) {
+                md.push_str("**行动项**\n\n");
+                for it in items {
+                    if let Some(s) = it.as_str() {
+                        md.push_str(&format!("- [ ] {s}\n"));
+                    }
+                }
+                md.push('\n');
+            }
+        }
+        None => md.push_str("（未生成）\n"),
+    }
+
+    // 转写
+    md.push_str("## 转写\n\n");
+    for s in &detail.segments {
+        md.push_str(&format!("**[{}]** {}\n", s.speaker_label, s.text));
+    }
+    md.push('\n');
+    md
+}
+
+/// Unix 秒 → "YYYY-MM-DD HH:MM"（UTC；无 chrono 依赖，Hinnant civil date 算法）。
+fn fmt_unix(secs: i64) -> String {
+    let days = secs.div_euclid(86400);
+    let sod = secs.rem_euclid(86400);
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", sod / 3600, (sod % 3600) / 60)
+}
+
 /// 会话概要（历史列表用）。
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionRecord {
@@ -626,6 +791,52 @@ mod tests {
         s.set_trio(id, trio).unwrap();
         let detail = s.get_session(id).unwrap();
         assert_eq!(detail.trio.as_deref(), Some(trio));
+    }
+
+    #[test]
+    fn export_markdown_bundles_all_sections() {
+        let s = store();
+        let id = s.start_session(1).unwrap();
+        s.add_segment(id, &seg(1, "客户", "We need NPI samples by Friday.")).unwrap();
+        s.add_segment(id, &seg(0, "我", "我们确认可以安排。")).unwrap();
+        s.set_notes(id, "# 会议纪要\n\n## 摘要\n测试").unwrap();
+        s.set_trio(
+            id,
+            r#"{"short_overview":"概述文本","key_points":[{"topic":"交付","points":["客户确认了周五交付"]}],"action_items":["客户发邮件确认"]}"#,
+        )
+        .unwrap();
+        s.end_session(id, 1000).unwrap();
+        let detail = s.get_session(id).unwrap();
+
+        let md = export_markdown(&detail);
+        assert!(md.contains("# 会议记录"), "缺少标题: {md}");
+        assert!(md.contains("## 概览"));
+        assert!(md.contains("## 会议纪要"));
+        assert!(md.contains("## 智能纪要"));
+        assert!(md.contains("**概述**：概述文本"));
+        assert!(md.contains("### 交付"));
+        assert!(md.contains("- [ ] 客户发邮件确认"), "行动项应为可勾选列表: {md}");
+        assert!(md.contains("## 转写"));
+        assert!(md.contains("[客户]"));
+        assert!(md.contains("We need NPI samples by Friday."));
+        assert!(md.contains("[我]"));
+        assert!(md.contains("我们确认可以安排。"));
+    }
+
+    #[test]
+    fn webhook_payload_includes_meeting_metrics_and_transcript() {
+        let s = store();
+        let id = s.start_session(100).unwrap();
+        s.add_segment(id, &seg(0, "我", "这个价格能再低一些吗？")).unwrap();
+        s.add_segment(id, &seg(1, "客户", "可以谈")).unwrap();
+        s.end_session(id, 300).unwrap();
+        let detail = s.get_session(id).unwrap();
+
+        let payload = build_webhook_payload(&detail);
+        assert_eq!(payload["meeting"]["id"].as_i64(), Some(id));
+        assert_eq!(payload["meeting"]["duration_seconds"].as_i64(), Some(200));
+        assert!(payload["metrics"]["questions_me"].as_u64().unwrap_or(0) >= 1, "问句应入 payload: {payload}");
+        assert_eq!(payload["transcript"].as_array().unwrap().len(), 2);
     }
 
     #[test]

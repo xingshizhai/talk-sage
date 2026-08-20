@@ -106,6 +106,10 @@ export const ipcApi: AppApi = {
     return invoke("generate_trio_notes", { sessionId, meetingName: meetingName ?? null, meetingDescription: meetingDescription ?? null });
   },
 
+  async exportSessionMarkdown(sessionId: number): Promise<{ path: string; content: string }> {
+    return invoke("export_session_markdown", { sessionId });
+  },
+
   async readLogs(lines?: number): Promise<string> {
     return invoke("read_logs", { lines });
   },
@@ -218,6 +222,15 @@ export const httpApi: AppApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ meeting_name: meetingName ?? null, meeting_description: meetingDescription ?? null }),
     });
+  },
+
+  async exportSessionMarkdown(sessionId: number): Promise<{ path: string; content: string }> {
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers["X-Talksage-Token"] = token;
+    const r = await fetch(`/api/session/${sessionId}/export`, { headers });
+    if (!r.ok) throw new Error(`导出失败: HTTP ${r.status}`);
+    return { path: "", content: await r.text() };
   },
 
   async readLogs(_lines?: number): Promise<string> {

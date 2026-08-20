@@ -8,7 +8,7 @@ import { getApi } from "../lib/transport";
 const api = getApi();
 const PROVIDERS = ["deepseek", "kimi", "minimax", "groq", "ollama", "claude"];
 
-type SettingsTab = "asr" | "plugins" | "recording" | "quality" | "voice" | "llm";
+type SettingsTab = "asr" | "plugins" | "recording" | "quality" | "voice" | "llm" | "webhooks";
 
 const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "asr", label: "ASR 转写", desc: "引擎 / 灵敏度 / 降噪" },
@@ -17,6 +17,7 @@ const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "quality", label: "噪音检测", desc: "会话质量阈值" },
   { key: "voice", label: "声音标识", desc: "注册主人声音，识别说话人" },
   { key: "llm", label: "LLM", desc: "默认模型与密钥" },
+  { key: "webhooks", label: "Webhook", desc: "会议结束推送（n8n/Zapier/CRM）" },
 ];
 
 export default function SettingsSection({
@@ -48,6 +49,8 @@ export default function SettingsSection({
   const [qMaxRatio, setQMaxRatio] = useState(config?.quality?.max_speech_ratio ?? 0.85);
   const [qSilenceRms, setQSilenceRms] = useState(config?.quality?.silence_rms ?? 0.01);
   const [qHighRms, setQHighRms] = useState(config?.quality?.high_rms ?? 0.5);
+  const [whEnabled, setWhEnabled] = useState(config?.webhooks?.enabled ?? false);
+  const [whUrls, setWhUrls] = useState<string>((config?.webhooks?.urls ?? []).join("\n"));
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   // 声音标识
@@ -157,6 +160,10 @@ export default function SettingsSection({
           max_speech_ratio: qMaxRatio,
           silence_rms: qSilenceRms,
           high_rms: qHighRms,
+        },
+        webhooks: {
+          enabled: whEnabled,
+          urls: whUrls.split("\n").map((s) => s.trim()).filter((s) => s.length > 0),
         },
       };
       await onSave(updates);
@@ -349,6 +356,31 @@ export default function SettingsSection({
             </div>
           )}
           <div style={hint}>噪音/静音会话会自动跳过要点聚合等下游分析，历史详情可见质量标记。</div>
+        </div>
+      )}
+
+      {/* ── Webhook（会议结束推送；借鉴 Call.md workflow-webhook） ── */}
+      {tab === "webhooks" && (
+        <div>
+          <h3 style={groupTitle}>会议结束 Webhook</h3>
+          <label style={labelBlock}>
+            <input type="checkbox" checked={whEnabled} onChange={(e) => setWhEnabled(e.target.checked)} /> 会议结束后推送结构化数据（n8n / Zapier / CRM 自动化）
+          </label>
+          <label style={{ ...labelBlock, opacity: whEnabled ? 1 : 0.5 }}>
+            目标 URL（每行一个，仅 http/https）：
+            <textarea
+              value={whUrls}
+              onChange={(e) => setWhUrls(e.target.value)}
+              disabled={!whEnabled}
+              placeholder={"https://hooks.example.com/meeting-ended\nhttps://your-crm.example/api/meetings"}
+              rows={4}
+              style={{ ...inputStyle, width: "100%", marginTop: 4, fontFamily: "monospace", resize: "vertical" }}
+            />
+          </label>
+          <div style={hint}>
+            payload 包含：会议元数据、会话指标（发言占比/语速/提问/健康分）、质量评估、纪要/智能纪要、完整转写。
+            安全：调用前做 <b>SSRF 防护</b>（拒绝内网/回环/localhost 地址），配置保存后仍会在每次调用时重新校验。
+          </div>
         </div>
       )}
 

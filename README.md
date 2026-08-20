@@ -41,6 +41,8 @@
 - **Live conversation metrics** — real-time talk ratio (me vs them), speaking pace (WPM), question count, monologue detection, interruptions, and a **0–100 health score** (pure stats, no LLM; borrows Call.md's conversation-metrics)
 - **Live coaching nudges** — rule-driven, 2-minute-cooldown hints (talk imbalance / too few questions / fast pace / confirm next steps near the end) shown as dismissible cards (borrows Call.md's nudge-engine)
 - **Trio smart summary** — parallel generation of a narrative overview + **speaker-attributed key points by topic** + **action-item checklist** (History → 智能纪要; borrows Call.md's summary-generator)
+- **Meeting-end webhooks** — structured session data (meeting metadata + conversation metrics + quality + notes + full transcript) pushed to n8n/Zapier/CRM when a session ends, with **SSRF protection** (private/loopback URLs rejected; configurable in Settings)
+- **Structured Markdown export** — one-click single-file export (overview/metrics → notes → trio summary → transcript) from History; desktop also writes to `<data_dir>/exports/`
 
 ## Quick Start
 
