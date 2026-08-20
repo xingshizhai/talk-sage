@@ -332,6 +332,110 @@ fn cross_stream_echo_dedup_keeps_single_copy() {
     eprintln!("跨流去重：单流 {} 段，双流去重后 {} 段", single_finals.len(), finals.len());
 }
 
+/// 只数派发次数的 observer：在 should_trigger 里计数后返回 false，
+/// 因此不产生骨架事件、不起线程、不碰 LLM —— 计数完全确定。
+/// should_trigger 被调用，就等于这一段确实派发到了 observer。
+struct CountingObserver {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl talksage_plugins::AnalyzerPlugin for CountingObserver {
+    fn name(&self) -> &'static str {
+        "counting_observer"
+    }
+
+    fn should_trigger(&self, _seg: &talksage_core::TranscriptSegment) -> bool {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        false
+    }
+
+    fn skeleton(&self, _seg: &talksage_core::TranscriptSegment) -> Option<DomainEvent> {
+        None
+    }
+
+    fn run(
+        &self,
+        _seg: &talksage_core::TranscriptSegment,
+        _ctx: &talksage_plugins::PluginContext,
+    ) -> Option<DomainEvent> {
+        None
+    }
+}
+
+fn count_finals(evs: &[DomainEvent]) -> usize {
+    evs.iter()
+        .filter(|e| matches!(e, DomainEvent::Segment { is_partial: false, .. }))
+        .count()
+}
+
+/// 跑一遍管道，返回 (事件流, observer 派发次数)。
+fn run_with_counting_observer(mut cfg: LivePipelineConfig) -> (Vec<DomainEvent>, usize) {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    cfg.plugins = vec![Arc::new(CountingObserver { calls: calls.clone() })];
+    let evs = run_and_collect(cfg);
+    let n = calls.load(std::sync::atomic::Ordering::SeqCst);
+    (evs, n)
+}
+
+/// 回归网：被 filter 吞掉的段绝不能派发到 observer。
+///
+/// 这是「filter 链放在产生点而不是 sink」的核心不变量。若有人把
+/// `apply_filters` 挪回 emit 包装里，事件流看上去仍然是去重过的
+/// （`cross_stream_echo_dedup_keeps_single_copy` 照样绿），但 `on_final`
+/// 会对回声重复段照常派发 —— 术语/翻译/简报插件白跑一遍，可能带重复的
+/// LLM 调用。那正是这次重构要修掉的缺陷，也只有这个测试能抓到它。
+///
+/// 判据是「派发次数 == 存活的 final 段数」，不依赖 ASR 具体识别出什么，
+/// 因此与语料无关、可确定复现。
+#[test]
+fn filtered_segments_never_reach_observers() {
+    let Some(root) = model_root() else {
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
+    };
+    let wav = zh_model_dir(&root).join("0.wav");
+    if !vad_model(&root).is_file() || !wav.is_file() {
+        return skip("模型/VAD/测试音频不完整");
+    }
+
+    // 基线：单流没有回声可去重，派发次数应恰等于 final 段数。
+    // 这一条同时保证测试非空转 —— 计数器确实在动。
+    let (single, single_calls) = run_with_counting_observer(zh_file_pipeline(&root, &wav));
+    let single_finals = count_finals(&single);
+    assert!(single_finals > 0, "单流应产生 final 段: {single:?}");
+    assert_eq!(
+        single_calls, single_finals,
+        "单流：每个 final 段应恰好派发一次 observer"
+    );
+
+    // 双流回声：同一 wav 同时喂两条流，一半的段会被 cross_stream_dedup 吞掉。
+    let mut cfg = zh_file_pipeline(&root, &wav);
+    cfg.client = Some(StreamConfig {
+        engine_kind: EngineKind::ParaformerZh,
+        model_dir: zh_model_dir(&root),
+        input: AudioInput::File(wav),
+        speaker_id: 1,
+        speaker_label: "客户".into(),
+    });
+    let (dual, dual_calls) = run_with_counting_observer(cfg);
+    let dual_finals = count_finals(&dual);
+    assert!(dual_finals > 0, "双流去重后仍应有 final 段");
+
+    // 核心断言：派发次数不多于存活段数。被吞掉的段一次都不许派发。
+    assert_eq!(
+        dual_calls, dual_finals,
+        "被 filter 吞掉的段派发到了 observer：派发 {dual_calls} 次，但只有 {dual_finals} 个 final 段存活。\
+         filter 链必须施加在产生点（emit 与 on_final 之前），不能只挡 emit"
+    );
+    // 附带：去重后不该退化成双份
+    assert!(
+        dual_calls <= single_finals,
+        "双流派发 {dual_calls} 次 > 单流 {single_finals} 段，回声段仍在触发插件"
+    );
+    eprintln!(
+        "observer 派发：单流 {single_calls} 次 / {single_finals} 段，双流 {dual_calls} 次 / {dual_finals} 段"
+    );
+}
+
 /// 插件集成：英文客户文件 + term_explainer（mock LLM）+ translator → Term/Translation 事件。
 #[test]
 fn plugins_emit_term_and_translation_events() {

@@ -702,7 +702,11 @@ impl StreamWorker {
                 end_sample,
             };
             let Some(ev) = self.hooks.apply_filters(ev) else {
-                // 被吞掉：不计统计、不 emit、不触发 observer，但仍要收尾引擎状态
+                // 被吞掉：不计统计、不 emit、不触发 observer，但仍要收尾引擎状态。
+                //
+                // 注意：下面三行收尾与函数末尾那份是**同一段逻辑的两个副本**
+                // （提前 return 导致）。改动收尾行为时两处必须一起改，
+                // 只改一处会让「被吞掉的段」和「正常段」的引擎状态发散。
                 self.last_partial.clear();
                 if let Some(e) = &mut self.engine {
                     e.reset();
