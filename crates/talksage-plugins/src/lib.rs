@@ -11,6 +11,7 @@ pub mod registry;
 pub mod short_segment;
 pub mod cross_stream_dedup;
 pub mod builtin;
+pub mod conversation_metrics;
 
 pub use builtin::{build_registry, builtin_plugins};
 
