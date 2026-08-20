@@ -436,6 +436,126 @@ fn filtered_segments_never_reach_observers() {
     );
 }
 
+/// 改写型 filter 的后缀。带一个空格 → 每段词数 +1，统计计数器是否用了
+/// filter 之后的文本因此可判定。
+const REWRITE_SUFFIX: &str = " [已改写]";
+
+/// 测试替身：改写（而非丢弃）final 段文本的 filter。
+/// 内置的两个 filter 只会 drop，第一个真正做变换的 filter（脱敏/标点/规范化）
+/// 会暴露「sink 拿到改写后的，observer 与统计拿到原文」的错位。
+struct RewriteFilter;
+
+impl talksage_plugins::EventFilter for RewriteFilter {
+    fn filter(&self, ev: DomainEvent) -> Option<DomainEvent> {
+        match ev {
+            DomainEvent::Segment {
+                speaker_id, speaker_label, text, is_partial: false, ts_ms,
+                duration_ms, rms, revision, start_sample, end_sample,
+            } => Some(DomainEvent::Segment {
+                speaker_id,
+                speaker_label,
+                text: format!("{text}{REWRITE_SUFFIX}"),
+                is_partial: false,
+                ts_ms,
+                duration_ms,
+                rms,
+                revision,
+                start_sample,
+                end_sample,
+            }),
+            other => Some(other),
+        }
+    }
+}
+
+/// 记录每次派发看到的段文本。
+struct RecordingObserver {
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl talksage_plugins::AnalyzerPlugin for RecordingObserver {
+    fn name(&self) -> &'static str {
+        "recording_observer"
+    }
+
+    fn should_trigger(&self, seg: &talksage_core::TranscriptSegment) -> bool {
+        self.seen.lock().unwrap().push(seg.text.clone());
+        false
+    }
+
+    fn skeleton(&self, _seg: &talksage_core::TranscriptSegment) -> Option<DomainEvent> {
+        None
+    }
+
+    fn run(
+        &self,
+        _seg: &talksage_core::TranscriptSegment,
+        _ctx: &talksage_plugins::PluginContext,
+    ) -> Option<DomainEvent> {
+        None
+    }
+}
+
+/// 回归网：filter 链是「变换」，不只是「丢弃」——observer 与统计计数器
+/// 必须看 filter 之后的数据，否则落库/sink 的文本与观察者、words/questions
+/// 会静默错位。
+#[test]
+fn observers_and_counters_see_the_filtered_text() {
+    let Some(root) = model_root() else {
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
+    };
+    let wav = zh_model_dir(&root).join("0.wav");
+    if !vad_model(&root).is_file() || !wav.is_file() {
+        return skip("模型/VAD/测试音频不完整");
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut cfg = zh_file_pipeline(&root, &wav);
+    cfg.plugins = vec![Arc::new(RecordingObserver { seen: seen.clone() })];
+    let mut hooks = hooks_with_min_commit_ms(0);
+    hooks.add_filter(Arc::new(RewriteFilter));
+    cfg.hooks = hooks;
+
+    let evs = run_and_collect(cfg);
+
+    // sink 侧：filter 确实改写了 final 文本
+    let emitted: Vec<String> = evs
+        .iter()
+        .filter_map(|e| match e {
+            DomainEvent::Segment { text, is_partial: false, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!emitted.is_empty(), "应产生 final 段: {evs:?}");
+    assert!(
+        emitted.iter().all(|t| t.ends_with(REWRITE_SUFFIX)),
+        "filter 未生效，事件流里的文本没有改写: {emitted:?}"
+    );
+
+    // observer 侧：必须与 sink 侧逐条一致
+    let observed = seen.lock().unwrap().clone();
+    assert_eq!(
+        observed, emitted,
+        "observer 看到的是 filter 之前的文本 —— on_final 必须用 filter 之后的段，\
+         否则落库/sink 的内容与插件看到的内容会静默错位"
+    );
+
+    // 统计计数器侧：words 必须按改写后的文本计
+    let words: Vec<usize> = evs
+        .iter()
+        .filter_map(|e| match e {
+            DomainEvent::SessionStats { words, .. } => Some(*words),
+            _ => None,
+        })
+        .collect();
+    let expected: usize = emitted.iter().map(|t| talksage_core::metrics::count_words(t)).sum();
+    assert_eq!(
+        words,
+        vec![expected],
+        "SessionStats.words 应按 filter 之后的文本统计（改写后每段多一个词）"
+    );
+}
+
 /// 插件集成：英文客户文件 + term_explainer（mock LLM）+ translator → Term/Translation 事件。
 #[test]
 fn plugins_emit_term_and_translation_events() {

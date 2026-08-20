@@ -726,9 +726,13 @@ impl StreamWorker {
             if let (Some(sp), Some(query)) = (&self.speaker, &pending_speaker) {
                 sp.commit(query);
             }
+            // filter 是**变换**而不仅是丢弃：observer 与统计计数器都必须看
+            // filter 之后的数据。否则第一个做改写的 filter（脱敏/标点/规范化）
+            // 一上线，落库与 sink 的文本就会和插件、words/questions 静默错位。
+            let seg = filtered_segment(&ev).unwrap_or(seg);
             self.final_segments += 1;
-            self.words += talksage_core::metrics::count_words(&final_text);
-            if talksage_core::metrics::is_question_text(&final_text) {
+            self.words += talksage_core::metrics::count_words(&seg.text);
+            if talksage_core::metrics::is_question_text(&seg.text) {
                 self.questions += 1;
             }
             emit(ev);
@@ -816,6 +820,36 @@ impl StreamWorker {
             }
         }
     }
+}
+
+/// 从 filter 之后的事件还原转写段（observer 与统计都用它，保证与 sink 一致）。
+///
+/// filter 链的类型是 `DomainEvent -> Option<DomainEvent>`，理论上允许把 Segment
+/// 换成别的事件类型；那种情况下没有可交给 observer 的段，返回 None，由调用方
+/// 退回产生点的原段。
+fn filtered_segment(ev: &DomainEvent) -> Option<TranscriptSegment> {
+    let DomainEvent::Segment {
+        speaker_id,
+        speaker_label,
+        text,
+        is_partial,
+        ts_ms,
+        duration_ms,
+        rms,
+        ..
+    } = ev
+    else {
+        return None;
+    };
+    Some(TranscriptSegment {
+        speaker_id: *speaker_id,
+        speaker_label: speaker_label.clone(),
+        text: text.clone(),
+        is_partial: *is_partial,
+        ts_ms: *ts_ms,
+        duration_ms: *duration_ms,
+        rms: *rms,
+    })
 }
 
 fn run_loop(
