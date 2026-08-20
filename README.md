@@ -35,6 +35,7 @@
 - **History** — SQLite sessions with search, per-segment duration/RMS stats, quality badges
 - **Two carriers** — Tauri 2 desktop app (IPC) and a headless HTTP/WS server (browser access, token-protected)
 - **System tray** — Windows: minimizing hides the window into the tray (click the icon to restore); macOS: follows platform conventions with a menu-bar icon that toggles the window
+- **Fixed-corpus benchmark** — `talksage bench` streams through `*.wav` corpora (engine pool warm start, model reused in-process) and reports **CER/WER accuracy + real-time factor (RTF) + first-token latency** for regression testing (borrows WhisperLiveKit's bench)
 
 ## Quick Start
 
@@ -96,6 +97,9 @@ talksage listen --input meeting.wav
 
 # Headless web service (browser → http://127.0.0.1:8080)
 talksage serve --host 127.0.0.1 --port 8080
+
+# Fixed-corpus benchmark (put *.wav + same-name .txt references in bench-corpus/)
+talksage bench --dir bench-corpus --engine paraformer-zh
 ```
 
 ## Usage
@@ -109,6 +113,7 @@ talksage serve --host 127.0.0.1 --port 8080
 | Record raw audio only | `talksage record --seconds 60 [--input loopback]` |
 | Import audio offline | `talksage import audio.wav` |
 | Doctor / diagnostics | `talksage doctor` |
+| Fixed-corpus benchmark | `talksage bench [--dir corpus] [--engine paraformer-zh\|zipformer-en] [--limit N]` (CER/WER, RTF, first-token latency) |
 
 ### The recording → trim → replay loop
 
@@ -145,7 +150,7 @@ AudioHub (cpal / WASAPI loopback) → Preprocessor (denoise/highpass/noise gate)
 | `talksage-session` | SQLite storage + quality evaluation |
 | `talksage-notes` | Minutes templates + generator |
 | `talksage-server` | axum headless service (REST + WS + SPA) |
-| `talksage-cli` | Launcher: listen / trim / record / import / serve / doctor |
+| `talksage-cli` | Launcher: listen / trim / record / import / serve / doctor / bench |
 | `web/` | Tauri 2 shell + React/Vite/TS UI |
 
 ## Testing

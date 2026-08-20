@@ -419,6 +419,6 @@ token = ""
 - 风格仿 WhisperLiveKit（Clients / Adapter·事件总线 / Pipeline / Shared Components）。
 
 ### 18.5 后续扩展位
+- ~~固定语料转写评测（WER/RTF/延迟）~~ ✅ 已实现：`talksage bench`（crates/talksage-cli，EnginePool 热启动 + core::cer/wer 指标）
 - headless 多会话：ServerState 从单管道 → 会话表（每会话一个 pipeline，共享 EnginePool/SpeakerIdentifier）
-- 固定语料转写评测（WER/RTF/延迟）：复用录音闭环 + EnginePool
 - 免注册说话人分离（sherpa diarization）：与现声纹方案互补

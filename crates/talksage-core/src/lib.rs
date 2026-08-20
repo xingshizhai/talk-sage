@@ -164,6 +164,49 @@ impl SessionQuality {
     }
 }
 
+/// 编辑距离（Levenshtein）：`talksage bench` 的 CER/WER 基础。
+/// 泛型：`&[char]`（字符级）或 `&[&str]`（词级）。
+pub fn edit_distance<T: PartialEq>(a: &[T], b: &[T]) -> usize {
+    let (la, lb) = (a.len(), b.len());
+    // 滚动两行 DP（O(min(la,lb)) 内存）
+    let (short, long) = if la <= lb { (a, b) } else { (b, a) };
+    let (_, ll) = (short.len(), long.len());
+    let mut prev: Vec<usize> = (0..=ll).collect();
+    let mut curr = vec![0usize; ll + 1];
+    for (i, cs) in short.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, cl) in long.iter().enumerate() {
+            let cost = if cs == cl { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1) // 删除
+                .min(curr[j] + 1) // 插入
+                .min(prev[j] + cost); // 替换/匹配
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[ll]
+}
+
+/// 字符错误率 CER（中文按字符）：`ref` 为参考文本，`hyp` 为转写结果。
+/// 返回 0..1（0 = 完全正确）。
+pub fn cer(reference: &str, hypothesis: &str) -> f32 {
+    let r: Vec<char> = reference.trim().chars().collect();
+    let h: Vec<char> = hypothesis.trim().chars().collect();
+    if r.is_empty() {
+        return if h.is_empty() { 0.0 } else { 1.0 };
+    }
+    edit_distance(&r, &h) as f32 / r.len() as f32
+}
+
+/// 词错误率 WER（英文按空白分词）。
+pub fn wer(reference: &str, hypothesis: &str) -> f32 {
+    let r: Vec<&str> = reference.trim().split_whitespace().collect();
+    let h: Vec<&str> = hypothesis.trim().split_whitespace().collect();
+    if r.is_empty() {
+        return if h.is_empty() { 0.0 } else { 1.0 };
+    }
+    edit_distance(&r, &h) as f32 / r.len() as f32
+}
+
 /// 文本噪音评分：0.0（正常语言）~ 1.0（纯噪音/乱码）。
 ///
 /// 信号：语气词占比（嗯/啊/哦/唉/呢/呀/吧/啦/嘛/么…）、连续重复块（"嗯嗯嗯"/"那个个"）、
@@ -255,5 +298,25 @@ mod tests {
     #[test]
     fn skeleton_and_final_are_distinct() {
         assert_ne!(ResultStatus::Skeleton, ResultStatus::Final);
+    }
+
+    #[test]
+    fn edit_distance_and_transcription_metrics() {
+        // 编辑距离
+        assert_eq!(edit_distance(&['a', 'b', 'c'], &['a', 'b', 'c']), 0);
+        assert_eq!(edit_distance(&['a', 'b'], &['a']), 1);
+        assert_eq!(edit_distance(&['a'], &['b']), 1);
+        assert_eq!(edit_distance(&[], &['x']), 1);
+        // CER（中文按字符）
+        assert!((cer("我们确认交期", "我们确认交期") - 0.0).abs() < 1e-6);
+        let cer1 = cer("我们确认交期", "我们确认");
+        assert!(cer1 > 0.0 && cer1 < 1.0, "CER 应介于 0-1: {cer1}");
+        assert_eq!(cer("", ""), 0.0);
+        assert_eq!(cer("", "abc"), 1.0);
+        // WER（英文按词）
+        assert!((wer("we need samples", "we need samples") - 0.0).abs() < 1e-6);
+        let wer1 = wer("we need samples", "we need");
+        assert!(wer1 > 0.0 && wer1 < 1.0, "WER 应介于 0-1: {wer1}");
+        assert!((wer("hello world", "hello world") - 0.0).abs() < 1e-6);
     }
 }

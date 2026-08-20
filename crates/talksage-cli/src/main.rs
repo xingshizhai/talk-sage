@@ -6,7 +6,7 @@
 use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
-use talksage_asr::EngineKind;
+use talksage_asr::{EngineKind, EnginePool};
 use talksage_audio::AudioHub;
 use talksage_core::DomainEvent;
 use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConfig};
@@ -108,6 +108,18 @@ enum Command {
     },
     /// 诊断环境：配置、目录、平台。
     Doctor,
+    /// 固定语料转写评测：CER/WER + 实时率(RTF) + 首词延迟（参考 WhisperLiveKit bench）。
+    Bench {
+        /// 语料目录（*.wav + 同名 .txt 参考文本；缺省 ./bench-corpus）
+        #[arg(short, long)]
+        dir: Option<String>,
+        /// 引擎（paraformer-zh | zipformer-en）
+        #[arg(long, default_value = "paraformer-zh")]
+        engine: String,
+        /// 只处理前 N 个文件
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// 打印版本。
     Version,
 }
@@ -148,6 +160,7 @@ fn main() -> ExitCode {
             model,
         } => cmd_trim(&path, output.as_deref(), &preset, model.as_deref()),
         Command::Record { seconds, dir, input } => cmd_record(seconds, dir.as_deref(), &input),
+        Command::Bench { dir, engine, limit } => cmd_bench(dir.as_deref(), &engine, limit),
         Command::Doctor => cmd_doctor(),
     }
 }
@@ -891,6 +904,213 @@ fn cmd_record_mic(path: &std::path::Path, seconds: u64) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// 固定语料转写评测：对 `*.wav` 逐个跑流式转写（引擎池热启动），
+/// 有同名 `.txt` 参考文本时计算 CER（中文）/ WER（英文），并输出
+/// 实时率 RTF（处理耗时/音频时长）与首词延迟（管道启动→首个 final 段）。
+fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode {
+    let kind = match EngineKind::from_name(engine) {
+        Some(k) => k,
+        None => {
+            eprintln!("未知引擎: {engine}（可选 paraformer-zh | zipformer-en）");
+            return ExitCode::FAILURE;
+        }
+    };
+    let model_dir = match resolve_models_dir() {
+        Some(d) => d,
+        None => {
+            eprintln!("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）");
+            return ExitCode::FAILURE;
+        }
+    };
+    let engine_dir = match kind {
+        EngineKind::ParaformerZh => model_dir.join("sherpa-onnx-streaming-paraformer-zh"),
+        EngineKind::ZipformerEn => model_dir.join("sherpa-onnx-streaming-zipformer-en-2023-06-26"),
+    };
+    let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
+    if !vad_model.is_file() || !engine_dir.is_dir() {
+        eprintln!("模型不完整（VAD 或 ASR 模型缺失）");
+        return ExitCode::FAILURE;
+    }
+
+    let dir = std::path::PathBuf::from(dir.unwrap_or("bench-corpus"));
+    if !dir.is_dir() {
+        eprintln!("语料目录不存在: {}（准备 *.wav + 同名 .txt 参考文本）", dir.display());
+        return ExitCode::FAILURE;
+    }
+    let mut wavs: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| {
+            eprintln!("读取语料目录失败: {e}");
+            ExitCode::FAILURE
+        })
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".wav"))
+        .map(|e| e.path())
+        .collect();
+    wavs.sort();
+    if let Some(n) = limit {
+        wavs.truncate(n);
+    }
+    if wavs.is_empty() {
+        eprintln!("语料目录无 .wav 文件");
+        return ExitCode::FAILURE;
+    }
+
+    let pool = EnginePool::new();
+    println!("== 拓思者 bench ==");
+    println!("语料: {}（{} 个文件） 引擎: {}（引擎池热启动）", dir.display(), wavs.len(), kind.display_name());
+    println!("{:<36} {:>8} {:>8} {:>10} {:>12}", "文件", "时长s", "CER/WER%", "RTF", "首词延迟ms");
+    println!("{}", "-".repeat(80));
+
+    let mut total_audio = 0.0f64;
+    let mut total_elapsed = 0.0f64;
+    let mut total_err = 0.0f64;
+    let mut total_err_n = 0usize;
+    let mut total_latency = 0.0f64;
+    let mut latency_n = 0usize;
+
+    for wav in &wavs {
+        let base = wav.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let ref_path = [dir.join(format!("{base}.txt")), dir.join(format!("{base}.ref.txt"))]
+            .into_iter()
+            .find(|p| p.is_file());
+        let reference = ref_path.and_then(|p| std::fs::read_to_string(p).ok());
+        let audio_secs = talksage_audio::wav::read_wav(wav)
+            .map(|(_, s)| s.len() as f64 / 16000.0)
+            .unwrap_or(0.0);
+
+        match run_bench_pipeline(&pool, wav, kind, &engine_dir, &vad_model, engine) {
+            Ok((text, elapsed_ms, latency_ms)) => {
+                let rtf = if audio_secs > 0.0 { elapsed_ms / 1000.0 / audio_secs } else { 0.0 };
+                total_audio += audio_secs;
+                total_elapsed += elapsed_ms / 1000.0;
+                if let Some(lt) = latency_ms {
+                    total_latency += lt;
+                    latency_n += 1;
+                }
+                let err = reference.as_deref().map(|r| {
+                    if kind == EngineKind::ParaformerZh {
+                        talksage_core::cer(r, &text)
+                    } else {
+                        talksage_core::wer(r, &text)
+                    }
+                });
+                if let Some(e) = err {
+                    total_err += e as f64;
+                    total_err_n += 1;
+                    println!(
+                        "{:<36} {:>8.1} {:>7.1}% {:>9.2} {:>11.0}",
+                        base, audio_secs, e * 100.0, rtf, latency_ms.unwrap_or(0.0)
+                    );
+                } else {
+                    println!(
+                        "{:<36} {:>8.1} {:>8} {:>9.2} {:>11.0}",
+                        base, audio_secs, "-", rtf, latency_ms.unwrap_or(0.0)
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("  [{base}] 失败: {e}");
+            }
+        }
+    }
+
+    println!("{}", "-".repeat(80));
+    let avg_rtf = if total_audio > 0.0 { total_elapsed / total_audio } else { 0.0 };
+    let avg_err = if total_err_n > 0 { total_err / total_err_n as f64 } else { f64::NAN };
+    let avg_latency = if latency_n > 0 { total_latency / latency_n as f64 } else { f64::NAN };
+    println!(
+        "平均: RTF={avg_rtf:.2}{} 首词延迟={:.0}ms{}",
+        if total_err_n > 0 {
+            format!("  CER/WER={:.1}%", avg_err * 100.0)
+        } else {
+            "  （无参考文本，未计算 CER/WER）".to_string()
+        },
+        avg_latency,
+        if latency_n == 0 { "（无 final 段）".to_string() } else { String::new() },
+    );
+    println!("RTF < 1.0 表示实时；越小越快。准备参考文本（<同名>.txt）即可得到准确率。");
+    ExitCode::SUCCESS
+}
+
+/// 对单个 wav 跑流式转写，返回 (final 文本, 处理耗时 ms, 首词延迟 ms)。
+fn run_bench_pipeline(
+    pool: &std::sync::Arc<EnginePool>,
+    wav: &std::path::Path,
+    kind: EngineKind,
+    engine_dir: &std::path::Path,
+    vad_model: &std::path::Path,
+    _engine_name: &str,
+) -> anyhow::Result<(String, f64, Option<f64>)> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    let cfg = LivePipelineConfig {
+        vad_model: vad_model.to_path_buf(),
+        chunk_ms: 100,
+        vad: talksage_config::VadConfig::default(),
+        denoise: talksage_config::DenoiseConfig::default(),
+        asr_threads: 2,
+        user: StreamConfig {
+            engine_kind: kind,
+            model_dir: engine_dir.to_path_buf(),
+            input: AudioInput::File(wav.to_path_buf()),
+            speaker_id: 0,
+            speaker_label: "我".into(),
+        },
+        client: None,
+        plugins: Vec::new(),
+        plugin_ctx: talksage_plugins::PluginContext::new(),
+        recording_dir: None,
+        runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
+        speaker: None,
+        engine_pool: Some(pool.clone()),
+    };
+
+    let start = Instant::now();
+    let done = std::sync::Arc::new(AtomicBool::new(false));
+    let first_latency = std::sync::Arc::new(std::sync::Mutex::new(None::<f64>));
+    let texts = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    {
+        let done = done.clone();
+        let done_sink = done.clone();
+        let first = first_latency.clone();
+        let texts = texts.clone();
+        let start = start;
+        let sink: std::sync::Arc<dyn Fn(DomainEvent) + Send + Sync> = std::sync::Arc::new(move |ev| {
+            match &ev {
+                DomainEvent::Segment { text, is_partial: false, .. } => {
+                    let mut f = first.lock().unwrap();
+                    if f.is_none() {
+                        *f = Some(start.elapsed().as_millis() as f64);
+                    }
+                    drop(f);
+                    let mut t = texts.lock().unwrap();
+                    if !t.is_empty() {
+                        t.push(' ');
+                    }
+                    t.push_str(text.trim());
+                }
+                DomainEvent::Status { stage: talksage_core::StatusStage::Idle, .. } => {
+                    done_sink.store(true, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        });
+        let mut pipeline = LivePipeline::new(cfg);
+        pipeline.start(sink)?;
+        let deadline = Instant::now() + std::time::Duration::from_secs(300);
+        while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        pipeline.stop();
+    }
+    let elapsed = start.elapsed().as_millis() as f64;
+    let text = texts.lock().unwrap().clone();
+    let latency = first_latency.lock().unwrap().clone();
+    Ok((text, elapsed, latency))
 }
 
 fn cmd_doctor() -> ExitCode {

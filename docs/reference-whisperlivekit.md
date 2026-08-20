@@ -85,6 +85,7 @@ FFmpeg Decoding → Silero VAD（speech/silence）
 - WLK：benchmark runner + 数据集（acl6060 等）+ **WER / RTF（实时率）/ 延迟** 指标 + 散点图 + robustness（clean vs other 噪音对比）
 - 我们：已有"录音→裁剪→回放验证"闭环与真实模型集成测试
 - **借鉴方向**：在 `scripts/recording_loop.ps1` 基础上加**固定语料评测**：对标准 wav 集（含噪音/多人）跑转写，输出 WER + 实时率 + 首词延迟统计，沉淀为 talk-sage 的转写质量基准（与质量评估 meta 结合）
+- ✅ **已落地**：`talksage bench --dir <语料> --engine paraformer-zh|zipformer-en [--limit N]`——`*.wav` + 同名 `.txt` 参考文本，引擎池热启动逐文件转写，输出 **CER/WER%（中文字符级/英文词级）+ RTF + 首词延迟** 与均值（core::cer/wer + edit_distance 有单测）。后续可扩展散点图与 clean/other 对比。
 
 ### 5. 指标收集
 - WLK：metrics_collector 每会话指标 → 我们已有 SessionStats/质量评估，可补充 **RTF（转写耗时/音频时长）** 与端到端延迟两个指标到 meta
@@ -96,7 +97,7 @@ FFmpeg Decoding → Silero VAD（speech/silence）
 
 | 建议 | 优先级 | 说明 |
 |---|---|---|
-| 固定语料转写评测（WER/RTF/延迟基准） | 高 | 复用录音闭环，可量化每次模型/参数改动，性价比最高 |
+| 固定语料转写评测（WER/RTF/延迟基准） | 高 | ✅ 已实现 `talksage bench`（见 §四 4） |
 | OpenAI 兼容转写 API（headless） | 中 | 提升服务可用性，对接现有生态 |
 | 最小提交时长 / ASR 合并参数 | 中 | 减少无效短段（噪音会话场景） |
 | 免注册说话人分离（sherpa diarization） | 低（大项） | 与现声纹方案互补，评估后决定 |

@@ -35,6 +35,7 @@
 - **历史会话**：SQLite 存档，全文搜索、逐段时长/能量统计、质量徽章
 - **双载体**：Tauri 2 桌面应用（IPC）与 headless HTTP/WS 服务（浏览器访问，Token 鉴权）
 - **系统托盘**：Windows 最小化即隐藏到右下角托盘（点击图标恢复）；macOS 遵循系统惯例，菜单栏常驻图标可快速显示/隐藏窗口
+- **固定语料评测**：`talksage bench` 对 `*.wav` 语料逐个跑流式转写（引擎池热启动，进程内复用模型），输出 **CER/WER 准确率 + 实时率 RTF + 首词延迟**，供模型/参数回归对比（借鉴 WhisperLiveKit bench）
 
 ## 快速开始
 
@@ -96,6 +97,9 @@ talksage listen --input meeting.wav
 
 # headless Web 服务（浏览器访问 http://127.0.0.1:8080）
 talksage serve --host 127.0.0.1 --port 8080
+
+# 固定语料评测（bench-corpus/ 下放 *.wav + 同名 .txt 参考文本）
+talksage bench --dir bench-corpus --engine paraformer-zh
 ```
 
 ## 使用指南
@@ -109,6 +113,7 @@ talksage serve --host 127.0.0.1 --port 8080
 | 纯录音 | `talksage record --seconds 60 [--input loopback]` |
 | 离线导入 | `talksage import audio.wav` |
 | 环境诊断 | `talksage doctor` |
+| 固定语料评测 | `talksage bench [--dir 语料目录] [--engine paraformer-zh\|zipformer-en] [--limit N]`（输出 CER/WER、RTF、首词延迟） |
 
 ### 录音 → 裁剪 → 回放闭环
 
@@ -145,7 +150,7 @@ AudioHub（cpal / WASAPI 回环）→ Preprocessor（降噪/高通/噪声门）
 | `talksage-session` | SQLite 存储 + 质量评估 |
 | `talksage-notes` | 纪要模板 + 生成器 |
 | `talksage-server` | axum headless 服务（REST + WS + SPA） |
-| `talksage-cli` | 启动器：listen / trim / record / import / serve / doctor |
+| `talksage-cli` | 启动器：listen / trim / record / import / serve / doctor / bench |
 | `web/` | Tauri 2 壳 + React/Vite/TS 界面 |
 
 ## 自动化测试
