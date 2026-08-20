@@ -48,6 +48,7 @@ export default function HistorySection({
   onGenerateNotes,
   onGenerateTrio,
   onExportMarkdown,
+  onGenerateHighlights,
   onDeleteSession,
   onDeleteSessions,
   notesBusy,
@@ -63,6 +64,7 @@ export default function HistorySection({
   onGenerateNotes: (templateId: string) => void;
   onGenerateTrio: (meetingName: string, meetingDescription: string) => void;
   onExportMarkdown: (id: number) => Promise<string>;
+  onGenerateHighlights: (id: number) => Promise<string[]>;
   onDeleteSession: (id: number) => void;
   onDeleteSessions: (ids: number[]) => void;
   notesBusy: boolean;
@@ -82,6 +84,9 @@ export default function HistorySection({
   // 导出状态消息（Markdown 已保存路径 / 下载提示）
   const [exportMsg, setExportMsg] = useState("");
   const [exporting, setExporting] = useState(false);
+  // LLM 提炼的核心要点（历史详情）
+  const [aiHighlights, setAiHighlights] = useState<string[]>([]);
+  const [hlBusy, setHlBusy] = useState(false);
 
   /** 切换单条选择。 */
   function toggleSelect(id: number) {
@@ -384,6 +389,40 @@ export default function HistorySection({
               {detail.terms.join("；")}
             </div>
           )}
+
+          {/* LLM 提炼核心要点（本地规则之外的补充） */}
+          <div style={{ margin: "8px 0 4px", borderTop: "1px dashed var(--border)", paddingTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
+            <b style={{ fontSize: 12 }}>核心要点（AI）</b>
+            <button
+              onClick={async () => {
+                setHlBusy(true);
+                setAiHighlights([]);
+                try {
+                  setAiHighlights(await onGenerateHighlights(detail.id));
+                } catch (e) {
+                  alert(`要点提炼失败: ${e}`);
+                } finally {
+                  setHlBusy(false);
+                }
+              }}
+              disabled={hlBusy}
+              style={{ fontSize: 11 }}
+            >
+              {hlBusy ? "提炼中…" : "AI 提炼"}
+            </button>
+            <span style={{ fontSize: 10, color: "var(--muted)" }}>需要配置 LLM；未配置时可用会中的本地规则要点</span>
+          </div>
+          {aiHighlights.length > 0 && (
+            <div style={{ background: "var(--surface-2)", borderRadius: 6, padding: 8, fontSize: 12, margin: "4px 0", color: "var(--text)" }}>
+              {aiHighlights.map((h, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, padding: "2px 0", lineHeight: 1.6 }}>
+                  <span style={{ color: "var(--live)", fontWeight: 700, flexShrink: 0 }}>{i + 1}.</span>
+                  <span>{h}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <button
               onClick={async () => {

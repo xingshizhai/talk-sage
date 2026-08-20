@@ -660,6 +660,16 @@ fn export_session_markdown(session_id: i64, state: tauri::State<'_, AppState>) -
     Ok(serde_json::json!({ "path": path.display().to_string(), "content": content }))
 }
 
+/// LLM 提炼核心要点（历史详情；无 LLM 时返回错误，前端提示）。
+#[tauri::command]
+fn generate_highlights(session_id: i64, state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    let Some(llm) = build_llm(&state.config) else {
+        return Err("未配置 LLM（请设置 llm.providers.<provider>.api_key）".into());
+    };
+    let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
+    talksage_notes::generate_highlights(&detail.segments, &llm).map_err(|e| format!("要点提炼失败: {e}"))
+}
+
 /// 根据配置构建 LLM Provider（OpenAI 兼容）。
 fn build_llm(config: &ConfigManager) -> Option<Arc<dyn LLMProvider>> {
     let snapshot = config.snapshot();
@@ -780,6 +790,7 @@ pub fn run() {
             generate_notes,
             generate_trio_notes,
             export_session_markdown,
+            generate_highlights,
             read_logs
         ])
         .setup(move |app| {

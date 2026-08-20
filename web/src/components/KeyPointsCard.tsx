@@ -6,6 +6,7 @@ const KIND_COLOR: Record<string, { fg: string; bg: string }> = {
   问句: { fg: "var(--client)", bg: "var(--client-soft)" },
   要求: { fg: "var(--me)", bg: "var(--me-soft)" },
   决策: { fg: "var(--live)", bg: "var(--live-soft)" },
+  行动: { fg: "var(--danger)", bg: "var(--danger-soft)" },
   技术: { fg: "var(--term)", bg: "var(--term-soft)" },
   其他: { fg: "var(--muted)", bg: "var(--surface-2)" },
 };

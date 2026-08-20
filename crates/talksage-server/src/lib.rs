@@ -89,6 +89,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/session/{id}/notes", axum::routing::post(generate_notes_api))
         .route("/session/{id}/trio-notes", axum::routing::post(generate_trio_notes_api))
         .route("/session/{id}/export", get(export_session_api))
+        .route("/session/{id}/highlights", axum::routing::post(generate_highlights_api))
         .route("/logs", get(read_logs_api))
         .route("/listen/start", axum::routing::post(start_listen_api))
         .route("/listen/stop", axum::routing::post(stop_listen_api))
@@ -466,6 +467,23 @@ async fn export_session_api(State(state): State<ServerState>, headers: axum::htt
         md,
     )
         .into_response()
+}
+
+/// LLM 提炼核心要点（历史详情；无 LLM 配置时 400）。
+async fn generate_highlights_api(State(state): State<ServerState>, headers: axum::http::HeaderMap, AxumPath(id): AxumPath<i64>) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let Some(llm) = build_llm(&state.config) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "未配置 LLM" }))).into_response();
+    };
+    let Ok(detail) = state.sessions.get_session(id) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "会话不存在" }))).into_response();
+    };
+    match talksage_notes::generate_highlights(&detail.segments, &llm) {
+        Ok(points) => (StatusCode::OK, Json(serde_json::json!({ "points": points }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
 }
 
 async fn start_listen_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {

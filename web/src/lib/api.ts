@@ -235,6 +235,8 @@ export interface AppApi {
   generateTrioNotes(sessionId: number, meetingName?: string, meetingDescription?: string): Promise<TrioSummary>;
   /** 导出会话为 Markdown 单文件（转写 + 纪要 + 指标 + 质量；path 为桌面端落盘路径，headless 为空）。 */
   exportSessionMarkdown(sessionId: number): Promise<{ path: string; content: string }>;
+  /** LLM 提炼核心要点（历史详情；需配置 LLM）。 */
+  generateHighlights(sessionId: number): Promise<string[]>;
   /** 调试：读取最近日志（尾部 N 行）。 */
   readLogs(lines?: number): Promise<string>;
   /** 订阅领域事件流，返回取消函数。 */

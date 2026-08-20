@@ -1,6 +1,7 @@
-// 实时转写卡片：3 视图模式（时间线 / 专注 / 密集）+ 自动滚动。
+// 实时转写卡片：3 视图模式（时间线 / 专注 / 密集）+ 自动滚动 + 按句分行。
 
 import { useEffect, useRef } from "react";
+import { splitSentences } from "../lib/transcript";
 
 export type TranscriptMode = "timeline" | "focus" | "dense";
 
@@ -86,15 +87,25 @@ export default function TranscriptCard({
           <div style={{ color: "var(--muted)", fontSize: 13 }}>开始监听后，转写将实时显示在这里…</div>
         )}
         {mode === "dense" ? (
-          lines.map((l) => (
-            <div key={l.key} style={{ fontSize: 12, color: "var(--text-2)", wordBreak: "break-word" }}>
-              <span style={{ color: l.speakerColor, fontWeight: 600 }}>[{l.speaker}]</span>{" "}
-              <span style={{ color: l.isPartial ? "var(--muted)" : "var(--text)" }}>{l.text}</span>
-              {l.isPartial && <span style={{ color: "var(--muted)" }}> ▍</span>}
-            </div>
-          ))
+          lines.map((l) => {
+            const sentences = splitSentences(l.text);
+            return (
+              <div key={l.key} style={{ fontSize: 12, color: "var(--text-2)", wordBreak: "break-word" }}>
+                <span style={{ color: l.speakerColor, fontWeight: 600 }}>[{l.speaker}]</span>{" "}
+                {sentences.map((s, j) => (
+                  <span key={j} style={{ color: l.isPartial ? "var(--muted)" : "var(--text)", marginRight: 6 }}>
+                    {s}
+                    {j < sentences.length - 1 && <span style={{ color: "var(--muted)" }}>｜</span>}
+                  </span>
+                ))}
+                {l.isPartial && <span style={{ color: "var(--muted)" }}> ▍</span>}
+              </div>
+            );
+          })
         ) : (
-          lines.map((l, i) => (
+          lines.map((l, i) => {
+            const sentences = splitSentences(l.text);
+            return (
             <div
               key={l.key}
               style={{
@@ -116,10 +127,12 @@ export default function TranscriptCard({
                 <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "monospace", marginRight: 6 }}>
                   {l.engine}
                 </span>
-                <span style={{ color: l.isPartial ? "var(--text-2)" : "var(--text)" }}>
-                  {l.text}
-                  {l.isPartial && <span style={{ color: "var(--muted)" }}> ▍</span>}
-                </span>
+                {sentences.map((s, j) => (
+                  <div key={j} style={{ color: l.isPartial ? "var(--text-2)" : "var(--text)", lineHeight: 1.7 }}>
+                    {s}
+                    {l.isPartial && j === sentences.length - 1 && <span style={{ color: "var(--muted)" }}> ▍</span>}
+                  </div>
+                ))}
                 {l.translation && (
                   <div style={{ marginTop: 3, fontSize: 12, color: "var(--muted)", borderLeft: "2px solid var(--term)", paddingLeft: 8 }}>
                     {l.translation}
@@ -127,7 +140,8 @@ export default function TranscriptCard({
                 )}
               </div>
             </div>
-          ))
+            );
+          })
         )}
       </div>
     </section>

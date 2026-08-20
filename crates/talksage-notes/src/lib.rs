@@ -377,6 +377,30 @@ fn extract_json(text: &str) -> Option<serde_json::Value> {
     serde_json::from_str(&t[start..=end]).ok()
 }
 
+// ── LLM 要点提炼（高质量核心内容；本地规则之外的补充）──────────────────
+
+const HIGHLIGHTS_SYSTEM: &str = "你是一名会议分析师。根据转写提炼这场会议的核心要点。\
+规则：提炼 5–10 条，覆盖主要讨论内容、关键决定、明确需求、行动项、数字与时间承诺；\
+每条一句话、具体可执行或可引用，不含客套；避免重复；按重要性排序。\
+只输出如下 JSON，不要任何其他内容：{\"points\":[\"要点1\",\"要点2\"]}";
+
+/// 用 LLM 提炼核心要点（无 LLM 时返回 Err，调用方退回本地规则）。
+pub fn generate_highlights(transcript: &[TranscriptSegment], llm: &Arc<dyn LLMProvider>) -> Result<Vec<String>> {
+    if transcript.is_empty() {
+        return Err(anyhow!("会话无转写内容"));
+    }
+    let block = transcript
+        .iter()
+        .map(|s| format!("[{}] {}", s.speaker_label, s.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let raw = llm.complete(&format!("## 转写\n{block}\n\n请提炼核心要点。"), HIGHLIGHTS_SYSTEM)?;
+    extract_json(&raw)
+        .and_then(|v| v.get("points").cloned())
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+        .ok_or_else(|| anyhow!("要点结果不是合法 JSON: {raw}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +495,30 @@ mod tests {
         let s = "```json\n{\"checklist\":[\"a\"]}\n```";
         let v = super::extract_json(s).unwrap();
         assert_eq!(v["checklist"][0], "a");
+    }
+
+    #[test]
+    fn highlights_generate_with_mock_llm() {
+        let mock = MockProvider {
+            response: r#"{"points":["客户确认周五交付NPI样品","报价单需下周一前提交"]}"#.into(),
+        };
+        let llm: Arc<dyn LLMProvider> = Arc::new(mock);
+        let segs = vec![TranscriptSegment { speaker_id: 1, speaker_label: "客户".into(), text: "We need NPI samples by Friday.".into(), is_partial: false, ts_ms: 0, duration_ms: 500, rms: 0.2 }];
+        let points = generate_highlights(&segs, &llm).unwrap();
+        assert_eq!(points.len(), 2);
+        assert!(points[0].contains("周五"));
+    }
+
+    #[test]
+    fn highlights_reject_invalid_json() {
+        let llm: Arc<dyn LLMProvider> = Arc::new(MockProvider { response: "抱歉，无法提炼".into() });
+        let segs = vec![TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), text: "hi".into(), is_partial: false, ts_ms: 0, duration_ms: 100, rms: 0.1 }];
+        assert!(generate_highlights(&segs, &llm).is_err());
+    }
+
+    #[test]
+    fn highlights_empty_transcript_rejected() {
+        let llm: Arc<dyn LLMProvider> = Arc::new(MockProvider { response: "{}".into() });
+        assert!(generate_highlights(&[], &llm).is_err());
     }
 }

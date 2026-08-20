@@ -110,6 +110,10 @@ export const ipcApi: AppApi = {
     return invoke("export_session_markdown", { sessionId });
   },
 
+  async generateHighlights(sessionId: number): Promise<string[]> {
+    return invoke("generate_highlights", { sessionId });
+  },
+
   async readLogs(lines?: number): Promise<string> {
     return invoke("read_logs", { lines });
   },
@@ -231,6 +235,15 @@ export const httpApi: AppApi = {
     const r = await fetch(`/api/session/${sessionId}/export`, { headers });
     if (!r.ok) throw new Error(`导出失败: HTTP ${r.status}`);
     return { path: "", content: await r.text() };
+  },
+
+  async generateHighlights(sessionId: number): Promise<string[]> {
+    const r = await req<{ points: string[] }>(`/session/${sessionId}/highlights`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    return r.points;
   },
 
   async readLogs(_lines?: number): Promise<string> {

@@ -511,6 +511,7 @@ export default function App() {
                 onGenerateNotes={handleGenerateNotes}
                 onGenerateTrio={handleGenerateTrio}
                 onExportMarkdown={handleExportMarkdown}
+                onGenerateHighlights={async (id) => api.generateHighlights(id)}
                 onDeleteSession={handleDeleteSession}
                 onDeleteSessions={handleDeleteSessions}
                 notesBusy={notesBusy}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TranscriptAccumulator } from "./transcript";
+import { splitSentences, TranscriptAccumulator } from "./transcript";
 
 function seg(speaker: string, text: string, partial: boolean) {
   return { speaker_label: speaker, text, is_partial: partial };
@@ -70,5 +70,33 @@ describe("TranscriptAccumulator", () => {
     expect(new Set(keys).size).toBe(2);
     // 同行 key 不变（partial→final）
     expect(keys[0]).toBe(keys[0]);
+  });
+});
+
+describe("splitSentences", () => {
+  it("splits on sentence-ending punctuation", () => {
+    expect(splitSentences("今天天气不错。我们开会吧！")).toEqual(["今天天气不错。", "我们开会吧！"]);
+    expect(splitSentences("价格如何？能否优惠？")).toEqual(["价格如何？", "能否优惠？"]);
+  });
+
+  it("splits long runs at weak boundaries", () => {
+    const s = "我们需要确认交付时间，然后安排样品寄送，最后汇总报价单给客户确认，同时跟进物流状态。";
+    const parts = splitSentences(s);
+    expect(parts.length).toBeGreaterThanOrEqual(2);
+    // 所有片段总长等于原文（去掉空白后）
+    expect(parts.join("")).toBe(s);
+  });
+
+  it("soft-breaks very long boundaryless text", () => {
+    const long = "这是一段非常长的没有标点也没有断句的连续中文文本内容用来验证软断行逻辑是否正常工作";
+    const parts = splitSentences(long);
+    expect(parts.length).toBeGreaterThanOrEqual(2);
+    expect(parts.every((p) => p.length <= 30)).toBe(true);
+    expect(parts.join("")).toBe(long);
+  });
+
+  it("handles empty and whitespace input", () => {
+    expect(splitSentences("")).toEqual([]);
+    expect(splitSentences("   ")).toEqual([]);
   });
 });
