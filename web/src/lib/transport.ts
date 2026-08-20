@@ -120,12 +120,21 @@ export const ipcApi: AppApi = {
 
   onEvent(handler: (ev: DomainEvent) => void): () => void {
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
     listen<DomainEvent>("talksage://event", (e) => handler(e.payload))
       .then((fn) => {
-        unlisten = fn;
+        if (cancelled) {
+          // 卸载发生在 listen 注册完成之前：立即取消，避免监听器残留（双收事件）
+          fn();
+        } else {
+          unlisten = fn;
+        }
       })
       .catch((err) => console.error("failed to listen events:", err));
-    return () => unlisten?.();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   },
 };
 
