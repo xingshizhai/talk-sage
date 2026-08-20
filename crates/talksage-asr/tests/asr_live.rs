@@ -5,6 +5,23 @@ use std::path::{Path, PathBuf};
 use sherpa_onnx::Wave;
 use talksage_asr::{EngineKind, SegmentEngine, SherpaStreamingEngine, StreamingASREngine};
 
+/// 缺资源时是否必须失败（而不是跳过）。`env` 为 `TALKSAGE_REQUIRE_MODELS` 的值。
+fn must_fail_on_missing(env: Option<&str>) -> bool {
+    matches!(env, Some("1") | Some("true"))
+}
+
+/// 资源缺失：默认打印并跳过；`TALKSAGE_REQUIRE_MODELS=1` 时直接失败，
+/// 避免 CI 上「因跳过而全绿」掩盖回归。
+fn skip(reason: &str) {
+    let env = std::env::var("TALKSAGE_REQUIRE_MODELS").ok();
+    assert!(
+        !must_fail_on_missing(env.as_deref()),
+        "集成测试资源缺失（TALKSAGE_REQUIRE_MODELS=1 要求必须真实运行）: {reason}"
+    );
+    eprintln!("跳过：{reason}");
+}
+
+
 fn model_root() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
         let p = PathBuf::from(d);
@@ -29,14 +46,12 @@ fn model_root() -> Option<PathBuf> {
 #[test]
 fn paraformer_zh_streaming_recognizes_chinese_audio() {
     let Some(root) = model_root() else {
-        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
-        return;
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
     };
     let model_dir = root.join("sherpa-onnx-streaming-paraformer-zh");
     let wav = model_dir.join("0.wav");
     if !model_dir.is_dir() || !wav.is_file() {
-        eprintln!("跳过：模型或测试音频不完整");
-        return;
+        return skip("模型或测试音频不完整");
     }
 
     let mut engine = SherpaStreamingEngine::new(EngineKind::ParaformerZh, &model_dir, 2)
@@ -76,14 +91,12 @@ fn engine_kind_from_name_covers_configured_values() {
 #[test]
 fn whisper_offline_segment_engine_recognizes_audio() {
     let Some(root) = model_root() else {
-        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
-        return;
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
     };
     let model_dir = root.join("sherpa-onnx-whisper-base");
     let wav = root.join("sherpa-onnx-streaming-paraformer-zh").join("0.wav");
     if !model_dir.is_dir() || !wav.is_file() {
-        eprintln!("跳过：whisper-base 模型或测试音频不完整");
-        return;
+        return skip("whisper-base 模型或测试音频不完整");
     }
     let mut engine = talksage_asr::OfflineSegmentEngine::new(EngineKind::WhisperBase, &model_dir, 2)
         .expect("创建 whisper-base 引擎失败");

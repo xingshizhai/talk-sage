@@ -7,6 +7,23 @@ use std::path::PathBuf;
 
 use talksage_pipeline::speaker::SpeakerIdentifier;
 
+/// 缺资源时是否必须失败（而不是跳过）。`env` 为 `TALKSAGE_REQUIRE_MODELS` 的值。
+fn must_fail_on_missing(env: Option<&str>) -> bool {
+    matches!(env, Some("1") | Some("true"))
+}
+
+/// 资源缺失：默认打印并跳过；`TALKSAGE_REQUIRE_MODELS=1` 时直接失败，
+/// 避免 CI 上「因跳过而全绿」掩盖回归。
+fn skip(reason: &str) {
+    let env = std::env::var("TALKSAGE_REQUIRE_MODELS").ok();
+    assert!(
+        !must_fail_on_missing(env.as_deref()),
+        "集成测试资源缺失（TALKSAGE_REQUIRE_MODELS=1 要求必须真实运行）: {reason}"
+    );
+    eprintln!("跳过：{reason}");
+}
+
+
 fn wespeaker_model() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
         let p = PathBuf::from(d).join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
@@ -49,16 +66,13 @@ fn wav16k(name: &str) -> Option<Vec<f32>> {
 #[test]
 fn identifies_owner_and_new_speaker() {
     let Some(model) = wespeaker_model() else {
-        eprintln!("跳过：未找到 wespeaker 声纹模型（运行 scripts/download_models.py wespeaker）");
-        return;
+        return skip("未找到 wespeaker 声纹模型（运行 scripts/download_models.py wespeaker）");
     };
     let Some(zh) = wav16k("sherpa-onnx-streaming-paraformer-zh/0.wav") else {
-        eprintln!("跳过：缺少中文测试音频");
-        return;
+        return skip("缺少中文测试音频");
     };
     let Some(en) = wav16k("sherpa-onnx-streaming-zipformer-en-2023-06-26/0.wav") else {
-        eprintln!("跳过：缺少英文测试音频");
-        return;
+        return skip("缺少英文测试音频");
     };
 
     let spk = SpeakerIdentifier::new(&model, None, 0.5).expect("wespeaker 模型加载失败");
