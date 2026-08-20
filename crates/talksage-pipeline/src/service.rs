@@ -593,15 +593,23 @@ mod tests {
     /// 避免给测试加 tempfile 依赖：手写临时目录。
     mod tempfile_dir {
         use std::path::{Path, PathBuf};
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        /// 进程内单调计数器，保证并行测试拿到互不相同的目录。
+        ///
+        /// 不能只用时间戳：macOS 的 `SystemTime::now()` 实际只有微秒分辨率
+        /// （`as_nanos()` 末三位恒为 0），连续取值约 95% 重复。并行测试里两个
+        /// `TempDir` 会拿到同一路径，先结束的那个 `Drop` 删掉目录，另一个随即
+        /// 报 `unable to open database file`。
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+
         pub struct TempDir(PathBuf);
         impl TempDir {
             pub fn new() -> Self {
                 let p = std::env::temp_dir().join(format!(
-                    "talksage-svc-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos()
+                    "talksage-svc-{}-{}",
+                    std::process::id(),
+                    SEQ.fetch_add(1, Ordering::Relaxed)
                 ));
                 std::fs::create_dir_all(&p).unwrap();
                 Self(p)
@@ -613,6 +621,25 @@ mod tests {
         impl Drop for TempDir {
             fn drop(&mut self) {
                 let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            use std::collections::HashSet;
+
+            /// 并行创建必须拿到互不相同的路径 —— 这正是原实现（纯时间戳）
+            /// 在 macOS 上失败的场景。
+            #[test]
+            fn concurrent_temp_dirs_never_collide() {
+                let paths: HashSet<PathBuf> = std::thread::scope(|s| {
+                    let handles: Vec<_> = (0..16)
+                        .map(|_| s.spawn(|| TempDir::new().path().to_path_buf()))
+                        .collect();
+                    handles.into_iter().map(|h| h.join().unwrap()).collect()
+                });
+                assert_eq!(paths.len(), 16, "16 次并行创建应得到 16 个不同目录，实际: {paths:?}");
             }
         }
     }
