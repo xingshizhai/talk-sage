@@ -21,7 +21,7 @@ use talksage_audio::AudioHub;
 use talksage_config::ConfigManager;
 use talksage_core::{DomainEvent, ResultStatus, StatusStage};
 use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConfig};
-use talksage_asr::EngineKind;
+use talksage_asr::{EngineKind, EnginePool};
 use talksage_llm::{LLMProvider, OpenAICompatProvider};
 use talksage_plugins::{brief_retriever::BriefRetrieverPlugin, term_explainer::TermExplainerPlugin, translator::TranslatorPlugin, PluginContext};
 use talksage_session::SessionStore;
@@ -41,6 +41,8 @@ pub struct AppState {
     session_stats: Arc<Mutex<Vec<talksage_session::StreamMeta>>>,
     /// 当前会话 final 段文本（质量评估用）。
     session_texts: Arc<Mutex<Vec<String>>>,
+    /// ASR 引擎池（常驻，跨监听复用 → 热启动）。
+    engine_pool: Arc<talksage_asr::EnginePool>,
 }
 
 /// 版本。
@@ -281,7 +283,7 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
         plugins: build_plugins(&state.config),
         plugin_ctx: build_plugin_ctx(&state.config),
         recording_dir,
-        noise_level: Arc::new(std::sync::atomic::AtomicU32::new(0.0f32.to_bits())),
+        runtime: Arc::new(talksage_pipeline::RuntimeParams::default()),
         // 说话人识别：wespeaker 模型 + 已注册的主人声纹
         speaker: {
             let model_dir = model_dir.clone();
@@ -297,6 +299,8 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
                 None
             }
         },
+        // 引擎池：常驻复用（热启动，参考 WhisperLiveKit 引擎单例）
+        engine_pool: Some(state.engine_pool.clone()),
     };
 
     let mut pipeline = LivePipeline::new(cfg);
@@ -679,6 +683,7 @@ pub fn run() {
             current_session: Arc::new(Mutex::new(None)),
             session_stats: Arc::new(Mutex::new(Vec::new())),
             session_texts: Arc::new(Mutex::new(Vec::new())),
+            engine_pool: EnginePool::new(),
         })
         .invoke_handler(tauri::generate_handler![
             get_version,

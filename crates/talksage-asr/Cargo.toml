@@ -9,3 +9,4 @@ license.workspace = true
 talksage-core = { path = "../talksage-core" }
 anyhow = { workspace = true }
 sherpa-onnx = "1.13"
+log = "0.4"

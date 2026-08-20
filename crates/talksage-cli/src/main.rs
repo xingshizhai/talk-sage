@@ -385,8 +385,9 @@ fn cmd_listen(
         plugins,
         plugin_ctx,
         recording_dir,
-        noise_level: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(noise_level.clamp(0.0, 0.5).to_bits())),
+        runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::with_noise_level(noise_level)),
         speaker: build_speaker_config(&mgr),
+        engine_pool: None,
     };
 
     let stop_after = seconds;
@@ -616,8 +617,9 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
         plugins: Vec::new(),
         plugin_ctx: talksage_plugins::PluginContext::new(),
         recording_dir: None,
-        noise_level: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0.0f32.to_bits())),
+        runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
         speaker: None,
+        engine_pool: None,
     };
 
     // 收集 final 段

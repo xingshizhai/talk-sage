@@ -123,6 +123,8 @@ Details: [docs/RECORDING.md](docs/RECORDING.md)
 
 ## Architecture
 
+![拓思者 architecture](docs/architecture.png)
+
 A Rust workspace (single binary, no Python) with a clean domain-event bus shared by every carrier:
 
 ```

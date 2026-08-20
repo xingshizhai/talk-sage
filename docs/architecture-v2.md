@@ -387,3 +387,38 @@ token = ""
 | [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/DeepSeek-Harness) | CLI launcher + profile；能力按域拆包；宿主默认回环安全；/api + WS 事件；配置分层；同一 UI 跑浏览器或原生壳走 IPC |
 | [Meetily](https://github.com/Zackriya-Solutions/meetily) | Tauri 2 同场景验证；流式 VAD 调参；环形缓冲混音；True-Peak 限幅/EBU R128；增量 checkpoint 保存；纪要模板系统；WAL 恢复；whisper 调参 |
 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | 统一 ASR 运行时：streaming paraformer/zipformer、SenseVoice、说话人 embedding；Rust 绑定；CUDA/CoreML 多后端 |
+
+## 18. 架构演进 v2.1：为扩展而重构（参考 WhisperLiveKit）
+
+新功能（说话人识别/质量评估/录音闭环/运行期调节/托盘/多选历史）使管线职责增多，
+参考 WhisperLiveKit 的"引擎单例 + 会话/计算解耦"思想完成以下演进：
+
+### 18.1 ASR 引擎池（EnginePool）—— 引擎常驻、监听热启动
+- 	alksage-asr::EnginePool：按 (kind, model_dir) 缓存已加载的流式引擎，
+  跨监听会话复用；归还时自动 reset。模型**只加载一次**，第二次开始监听毫秒级就绪。
+- 桌面端常驻于 AppState.engine_pool；headless 服务后续接入同一池支持多用户。
+- 详见 crates/talksage-asr/src/lib.rs 的 pool_tests（acquire/release/warmup）。
+
+### 18.2 RuntimeParams —— 运行期参数集中
+- RuntimeParams { noise_level: Arc<AtomicU32> } 取代散落的运行期字段；
+  新增"监听中可调"参数（VAD 灵敏度、降噪强度等）只需在此扩展，
+  无需再改 LivePipelineConfig 与所有构造点。
+
+### 18.3 分层职责（共享组件独立）
+| 组件 | 归属 | 说明 |
+|---|---|---|
+| EnginePool | talksage-asr | 引擎常驻（共享） |
+| SpeakerIdentifier | talksage-pipeline::speaker | wespeaker 声纹 + 在线聚类（共享） |
+| PluginContext | talksage-plugins | LLM + 知识库（共享） |
+| SessionStore | talksage-session | SQLite 会话/历史/质量 meta |
+| QualityParams | talksage-session | 噪音阈值（可配置/自动检测） |
+| RuntimeParams | talksage-pipeline | 运行期可调（每会话） |
+
+### 18.4 架构图
+- 生成：python scripts/generate_architecture.py → docs/architecture.png
+- 风格仿 WhisperLiveKit（Clients / Adapter·事件总线 / Pipeline / Shared Components）。
+
+### 18.5 后续扩展位
+- headless 多会话：ServerState 从单管道 → 会话表（每会话一个 pipeline，共享 EnginePool/SpeakerIdentifier）
+- 固定语料转写评测（WER/RTF/延迟）：复用录音闭环 + EnginePool
+- 免注册说话人分离（sherpa diarization）：与现声纹方案互补

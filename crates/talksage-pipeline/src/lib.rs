@@ -13,13 +13,31 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
-use talksage_asr::{EngineKind, SherpaStreamingEngine, StreamingASREngine};
+use talksage_asr::{EngineKind, EnginePool, SherpaStreamingEngine, StreamingASREngine};
 use talksage_audio::{AudioHub, Preprocessor};
 use talksage_config::{DenoiseConfig, VadConfig};
 use talksage_core::{DomainEvent, StatusStage, TranscriptSegment};
 use talksage_plugins::AnalyzerPlugin;
 
 pub mod speaker;
+
+/// 运行期可调参数（监听中可实时修改，无需重启；跨线程共享）。
+///
+/// 参考 WhisperLiveKit 的"会话状态与计算解耦"思想：把运行期可调状态集中管理，
+/// 未来新增参数（实时切换 VAD 灵敏度、降噪强度等）只需在此扩展。
+#[derive(Default)]
+pub struct RuntimeParams {
+    /// 噪音电平阈值（f32 bits；0 = 关闭）：块 RMS 低于该值的音频静音。
+    pub noise_level: Arc<AtomicU32>,
+}
+
+impl RuntimeParams {
+    pub fn with_noise_level(level: f32) -> Self {
+        Self {
+            noise_level: Arc::new(AtomicU32::new(level.clamp(0.0, 0.5).to_bits())),
+        }
+    }
+}
 
 /// 说话人识别配置（可选）。
 #[derive(Clone)]
@@ -84,11 +102,13 @@ pub struct LivePipelineConfig {
     pub plugin_ctx: talksage_plugins::PluginContext,
     /// 录音目录（Some 时监听期间把每条流的原始音频保存为 `{ts}_{speaker_label}.wav`）。
     pub recording_dir: Option<PathBuf>,
-    /// 运行时噪音电平阈值（f32 bits，0 = 不启用）：监听中可实时调节。
-    /// 块 RMS 低于该值的音频在进入 VAD/ASR 前被静音（抑制背景噪音）。
-    pub noise_level: Arc<AtomicU32>,
+    /// 运行期可调参数（噪音电平阈值等，监听中实时可调）。
+    pub runtime: Arc<RuntimeParams>,
     /// 说话人识别（可选；None = 无声纹/模型，保持流默认标签）。
     pub speaker: Option<SpeakerConfig>,
+    /// ASR 引擎池（Some = 引擎常驻复用，监听热启动；None = 每次新建）。
+    /// 参考 WhisperLiveKit 引擎单例设计。
+    pub engine_pool: Option<Arc<EnginePool>>,
 }
 
 /// 实时管道：持有组件并在专用线程中运行事件循环。
@@ -96,18 +116,18 @@ pub struct LivePipeline {
     cfg: Arc<LivePipelineConfig>,
     tx_stop: Option<mpsc::Sender<()>>,
     handle: Option<std::thread::JoinHandle<()>>,
-    /// 运行时噪音电平阈值（f32 bits；与 cfg 共享，`set_noise_level` 实时更新）。
-    noise_level: Arc<AtomicU32>,
+    /// 运行期参数（与 cfg 共享，`set_noise_level` 实时更新）。
+    runtime: Arc<RuntimeParams>,
 }
 
 impl LivePipeline {
     pub fn new(cfg: LivePipelineConfig) -> Self {
-        let noise_level = cfg.noise_level.clone();
+        let runtime = cfg.runtime.clone();
         Self {
             cfg: Arc::new(cfg),
             tx_stop: None,
             handle: None,
-            noise_level,
+            runtime,
         }
     }
 
@@ -115,13 +135,13 @@ impl LivePipeline {
     /// 无需停止监听，下一音频块即生效。
     pub fn set_noise_level(&self, level: f32) {
         let level = level.clamp(0.0, 0.5);
-        self.noise_level.store(level.to_bits(), Ordering::Relaxed);
+        self.runtime.noise_level.store(level.to_bits(), Ordering::Relaxed);
         log::info!("运行时噪音电平阈值已更新: {level:.4}");
     }
 
     /// 当前噪音电平阈值。
     pub fn noise_level(&self) -> f32 {
-        f32::from_bits(self.noise_level.load(Ordering::Relaxed))
+        f32::from_bits(self.runtime.noise_level.load(Ordering::Relaxed))
     }
 
     /// 在专用线程中启动管道；返回后可用 `stop()` 停止。
@@ -222,7 +242,8 @@ enum InputKind {
 /// 单条流的运行时状态。
 struct StreamWorker {
     vad: VoiceActivityDetector,
-    engine: SherpaStreamingEngine,
+    /// ASR 引擎（Option 以便归还引擎池）。
+    engine: Option<SherpaStreamingEngine>,
     preprocessor: Preprocessor,
     mic_device: Option<String>,
     input_kind: InputKind,
@@ -264,14 +285,18 @@ struct StreamWorker {
     non_speech_rms_sum: f64,
     /// 非语音块数。
     non_speech_blocks: u64,
-    /// 运行时噪音电平阈值（f32 bits；0 = 不启用）。
-    noise_level: Arc<AtomicU32>,
+    /// 运行期可调参数（噪音电平阈值等）。
+    runtime: Arc<RuntimeParams>,
     /// 说话人识别器（共享；None = 未启用）。
     speaker: Option<speaker::SharedSpeaker>,
     /// 当前语音段音频缓冲（说话人识别用，≤30s）。
     seg_audio: Vec<f32>,
     /// 最近一块 RMS（f32 bits；Level 事件用）。
     level: Arc<AtomicU32>,
+    /// ASR 引擎池（Some = 引擎常驻复用，shutdown 时归还）。
+    engine_pool: Option<Arc<EnginePool>>,
+    /// 引擎模型目录（归还引擎池用）。
+    engine_dir: Option<PathBuf>,
 }
 
 impl StreamWorker {
@@ -283,9 +308,10 @@ impl StreamWorker {
         vad_model: &PathBuf,
         chunk_ms: u64,
         recording_path: Option<PathBuf>,
-        noise_level: Arc<AtomicU32>,
+        runtime: Arc<RuntimeParams>,
         speaker: Option<speaker::SharedSpeaker>,
         level: Arc<AtomicU32>,
+        engine_pool: Option<Arc<EnginePool>>,
     ) -> anyhow::Result<Self> {
         let (threshold, min_speech, min_silence, window, max_speech) = vad_cfg.effective();
         log::info!(
@@ -294,7 +320,11 @@ impl StreamWorker {
             vad_cfg.preset,
         );
         let vad = create_vad(vad_model, threshold, min_speech, min_silence, window, max_speech)?;
-        let engine = SherpaStreamingEngine::new(cfg.engine_kind, &cfg.model_dir, asr_threads.max(1) as i32)?;
+        // ASR 引擎：优先从引擎池复用（热启动，参考 WhisperLiveKit 引擎单例），否则新建
+        let engine = match &engine_pool {
+            Some(pool) => pool.acquire(cfg.engine_kind, &cfg.model_dir, asr_threads.max(1) as i32)?,
+            None => SherpaStreamingEngine::new(cfg.engine_kind, &cfg.model_dir, asr_threads.max(1) as i32)?,
+        };
         let preprocessor = Preprocessor::new(
             denoise.enabled,
             denoise.highpass,
@@ -338,7 +368,6 @@ impl StreamWorker {
 
         Ok(Self {
             vad,
-            engine,
             preprocessor,
             mic_device,
             input_kind,
@@ -366,10 +395,13 @@ impl StreamWorker {
             final_segments: 0,
             non_speech_rms_sum: 0.0,
             non_speech_blocks: 0,
-            noise_level,
+            runtime,
             speaker,
             seg_audio: Vec::new(),
             level,
+            engine_pool,
+            engine_dir: Some(cfg.model_dir.clone()),
+            engine: Some(engine),
         })
     }
 
@@ -460,7 +492,7 @@ impl StreamWorker {
         }
 
         // 运行时噪音电平阈值（监听中可调，无需重启）：块能量低于门槛 → 静音（抑制背景噪音）
-        let nl = f32::from_bits(self.noise_level.load(Ordering::Relaxed));
+        let nl = f32::from_bits(self.runtime.noise_level.load(Ordering::Relaxed));
         if nl > 0.0 && block_rms < nl {
             log::debug!("噪音电平阈值={nl:.5} 静音块 RMS={block_rms:.5}");
             chunk.fill(0.0);
@@ -474,7 +506,9 @@ impl StreamWorker {
         if self.vad.detected() && !self.in_speech {
             self.in_speech = true;
             self.last_partial.clear();
-            self.engine.reset();
+            if let Some(e) = &mut self.engine {
+                e.reset();
+            }
             self.seg_start_ms = now_ms();
             self.seg_samples = 0;
             self.seg_rms_acc = 0.0;
@@ -493,19 +527,21 @@ impl StreamWorker {
                     self.seg_audio.extend_from_slice(&chunk[..chunk.len().min(remain)]);
                 }
             }
-            if let Some(text) = self.engine.accept(&chunk) {
-                let text = text.trim().to_string();
-                if !text.is_empty() && text != self.last_partial {
-                    self.last_partial = text.clone();
-                    emit(DomainEvent::Segment {
-                        speaker_id: self.speaker_id,
-                        speaker_label: self.speaker_label.clone(),
-                        text,
-                        is_partial: true,
-                        ts_ms: now_ms(),
-                        duration_ms: 0,
-                        rms: 0.0,
-                    });
+            if let Some(engine) = &mut self.engine {
+                if let Some(text) = engine.accept(&chunk) {
+                    let text = text.trim().to_string();
+                    if !text.is_empty() && text != self.last_partial {
+                        self.last_partial = text.clone();
+                        emit(DomainEvent::Segment {
+                            speaker_id: self.speaker_id,
+                            speaker_label: self.speaker_label.clone(),
+                            text,
+                            is_partial: true,
+                            ts_ms: now_ms(),
+                            duration_ms: 0,
+                            rms: 0.0,
+                        });
+                    }
                 }
             }
         }
@@ -523,8 +559,13 @@ impl StreamWorker {
             return;
         }
         self.in_speech = false;
-        self.engine.finish();
-        let final_text = self.engine.accept(&[]).unwrap_or_default().trim().to_string();
+        let final_text = match &mut self.engine {
+            Some(engine) => {
+                engine.finish();
+                engine.accept(&[]).unwrap_or_default().trim().to_string()
+            }
+            None => String::new(),
+        };
         if !final_text.is_empty() {
             // 段统计：时长（VAD 起点到当前）+ 段能量 RMS
             let duration_ms = if self.seg_start_ms > 0 {
@@ -587,7 +628,9 @@ impl StreamWorker {
             }
         }
         self.last_partial.clear();
-        self.engine.reset();
+        if let Some(e) = &mut self.engine {
+            e.reset();
+        }
         self.seg_audio.clear();
     }
 
@@ -619,10 +662,15 @@ impl StreamWorker {
         }
     }
 
-    /// 关闭流：收尾未完成的语音段 + 结束录音（停止监听/输入结束时调用）。
+    /// 关闭流：收尾未完成的语音段 + 结束录音 + 归还引擎（停止监听/输入结束时调用）。
     fn shutdown(&mut self, emit: &EventSink) {
         self.finish_speech(emit);
         self.stop();
+        // 归还 ASR 引擎到池（常驻复用；下次监听热启动）
+        if let (Some(pool), Some(dir), Some(engine)) = (self.engine_pool.take(), self.engine_dir.take(), self.engine.take()) {
+            pool.release(engine.kind(), &dir, engine);
+            log::debug!("流[{}] ASR 引擎已归还引擎池", self.speaker_label);
+        }
         if let Some(rec) = self.recorder.take() {
             let samples = rec.samples_written();
             match rec.finish() {
@@ -699,9 +747,10 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             &cfg.vad_model,
             cfg.chunk_ms,
             rec_path,
-            cfg.noise_level.clone(),
+            cfg.runtime.clone(),
             shared_speaker.clone(),
             level,
+            cfg.engine_pool.clone(),
         )?;
         w.start_input(cfg.chunk_ms)?;
         log::info!(

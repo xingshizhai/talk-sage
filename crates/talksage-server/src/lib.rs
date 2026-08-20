@@ -747,7 +747,7 @@ fn build_pipeline_config(config: &ConfigManager) -> Result<LivePipelineConfig> {
         } else {
             None
         },
-        noise_level: Arc::new(std::sync::atomic::AtomicU32::new(0.0f32.to_bits())),
+        runtime: Arc::new(talksage_pipeline::RuntimeParams::default()),
         // 说话人识别（headless 同启用）
         speaker: {
             let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
@@ -762,5 +762,6 @@ fn build_pipeline_config(config: &ConfigManager) -> Result<LivePipelineConfig> {
                 None
             }
         },
+        engine_pool: None,
     })
 }

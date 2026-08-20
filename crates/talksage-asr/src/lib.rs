@@ -3,8 +3,13 @@
 //! M1 PoC：基于 sherpa-onnx（Rust 绑定）的流式识别封装。
 //! 设计目标：`StreamingASREngine` trait 与传输/管道无关，
 //! 双引擎（英文 zipformer / 中文 paraformer）由配置选择。
+//!
+//! 引擎池（`EnginePool`）：参考 WhisperLiveKit 的"引擎单例"思想——
+//! 模型只加载一次，监听会话间复用（热启动），避免每次监听重复加载模型。
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use sherpa_onnx::{
     OnlineModelConfig, OnlineParaformerModelConfig, OnlineRecognizer, OnlineRecognizerConfig,
     OnlineStream, OnlineTransducerModelConfig,
@@ -146,5 +151,123 @@ mod tests {
         assert_eq!(EngineKind::from_name("zipformer-en"), Some(EngineKind::ZipformerEn));
         assert_eq!(EngineKind::from_name("paraformer-zh"), Some(EngineKind::ParaformerZh));
         assert_eq!(EngineKind::from_name("unknown"), None);
+    }
+}
+
+/// 每类 (kind, model_dir) 引擎在池中的最大缓存数（防无限累积）。
+const POOL_MAX_PER_KEY: usize = 4;
+
+/// 引擎池：按 (kind, model_dir) 缓存已加载的流式引擎，会话间复用。
+///
+/// 参考 WhisperLiveKit 的引擎单例设计：模型只加载一次，后续监听
+/// 直接从池中取已就绪的引擎（热启动，毫秒级），归还时自动 reset。
+///
+/// 线程安全（内部 Mutex）；`SherpaStreamingEngine` 为 Send（OnlineRecognizer/
+/// OnlineStream 均为 Send+Sync），可跨线程借出/归还。
+#[derive(Default)]
+pub struct EnginePool {
+    inner: Mutex<HashMap<String, Vec<SherpaStreamingEngine>>>,
+}
+
+impl EnginePool {
+    /// 创建空池（常驻于应用状态，跨监听复用）。
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn key(kind: EngineKind, model_dir: &Path) -> String {
+        format!("{}|{}", kind.display_name(), model_dir.display())
+    }
+
+    /// 借出引擎：池中有缓存则复用（已 reset），否则新建并加载模型。
+    pub fn acquire(&self, kind: EngineKind, model_dir: &Path, num_threads: i32) -> anyhow::Result<SherpaStreamingEngine> {
+        let key = Self::key(kind, model_dir);
+        if let Some(e) = self.inner.lock().unwrap().get_mut(&key).and_then(|v| v.pop()) {
+            log::debug!("引擎池命中: {key}");
+            return Ok(e);
+        }
+        log::debug!("引擎池未命中，新建: {key}");
+        SherpaStreamingEngine::new(kind, model_dir, num_threads)
+    }
+
+    /// 归还引擎：reset 清空识别状态后入池（超出容量则丢弃）。
+    pub fn release(&self, kind: EngineKind, model_dir: &Path, mut engine: SherpaStreamingEngine) {
+        engine.reset();
+        let key = Self::key(kind, model_dir);
+        let mut inner = self.inner.lock().unwrap();
+        let v = inner.entry(key).or_default();
+        if v.len() < POOL_MAX_PER_KEY {
+            v.push(engine);
+        } // 超限丢弃（内存释放）
+    }
+
+    /// 预加载（预热）：应用启动/首次监听前可调用，避免首段延迟。
+    pub fn warmup(&self, kind: EngineKind, model_dir: &Path, num_threads: i32) -> anyhow::Result<()> {
+        let engine = self.acquire(kind, model_dir, num_threads)?;
+        self.release(kind, model_dir, engine);
+        Ok(())
+    }
+
+    /// 池内引擎总数（测试/诊断用）。
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap().values().map(|v| v.len()).sum()
+    }
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+
+    /// 探测模型目录（真实模型缺失时跳过，避免失败）。
+    fn model_dir(kind: EngineKind) -> Option<std::path::PathBuf> {
+        if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
+            let dir = std::path::PathBuf::from(d);
+            let sub = match kind {
+                EngineKind::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
+                EngineKind::ZipformerEn => "sherpa-onnx-streaming-zipformer-en-2023-06-26",
+            };
+            let p = dir.join(sub);
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+        let candidates = [
+            std::path::PathBuf::from("models/sherpa-onnx-streaming-paraformer-zh"),
+            std::path::PathBuf::from("../models/sherpa-onnx-streaming-paraformer-zh"),
+            std::path::PathBuf::from("../../models/sherpa-onnx-streaming-paraformer-zh"),
+        ];
+        candidates.into_iter().find(|p| p.is_dir())
+    }
+
+    #[test]
+    fn acquire_release_reuses_engine() {
+        let Some(dir) = model_dir(EngineKind::ParaformerZh) else {
+            eprintln!("跳过：缺少 paraformer 模型");
+            return;
+        };
+        let pool = EnginePool::new();
+        // 第一次：创建（池空）
+        let e1 = pool.acquire(EngineKind::ParaformerZh, &dir, 1).expect("引擎创建失败");
+        assert_eq!(pool.len(), 0);
+        // 归还 → 入池
+        pool.release(EngineKind::ParaformerZh, &dir, e1);
+        assert_eq!(pool.len(), 1);
+        // 第二次：命中缓存，不再新建
+        let e2 = pool.acquire(EngineKind::ParaformerZh, &dir, 1).expect("复用失败");
+        assert_eq!(pool.len(), 0);
+        pool.release(EngineKind::ParaformerZh, &dir, e2);
+        // 不同 kind 互不影响
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn warmup_populates_pool() {
+        let Some(dir) = model_dir(EngineKind::ParaformerZh) else {
+            eprintln!("跳过：缺少 paraformer 模型");
+            return;
+        };
+        let pool = EnginePool::new();
+        pool.warmup(EngineKind::ParaformerZh, &dir, 1).expect("预热失败");
+        assert_eq!(pool.len(), 1);
     }
 }

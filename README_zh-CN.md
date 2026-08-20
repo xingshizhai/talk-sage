@@ -123,6 +123,8 @@ talksage serve --host 127.0.0.1 --port 8080
 
 ## 技术架构
 
+![拓思者架构图](docs/architecture.png)
+
 Rust workspace 单二进制（无 Python 运行时），所有载体共享一套领域事件总线：
 
 ```

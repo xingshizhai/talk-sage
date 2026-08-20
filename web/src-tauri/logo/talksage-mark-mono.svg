@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <clipPath id="kc"><circle cx="24" cy="32" r="17"></circle></clipPath>
+    <mask id="km"><circle cx="24" cy="32" r="17" fill="#fff"></circle><circle cx="40" cy="32" r="17" fill="#fff"></circle><g clip-path="url(#kc)"><circle cx="40" cy="32" r="17" fill="#000"></circle></g></mask>
+  </defs>
+  <g mask="url(#km)"><rect width="64" height="64" fill="currentColor"></rect></g>
+</svg>

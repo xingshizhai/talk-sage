@@ -4075,6 +4075,7 @@ name = "talksage-asr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "log",
  "sherpa-onnx",
  "talksage-core",
 ]
