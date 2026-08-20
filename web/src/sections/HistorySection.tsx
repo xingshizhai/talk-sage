@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { NotesTemplate, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "../lib/api";
 import { recordingUrl } from "../lib/transport";
+import { punctuateAndSplit } from "../lib/transcript";
 
 function formatTime(sec: number): string {
   const d = new Date(sec * 1000);
@@ -368,20 +369,29 @@ export default function HistorySection({
           })()}
 
           <div style={{ marginTop: 6 }}>
-            {detail.segments.map((s, i) => (
-              <div
-                key={i}
-                style={{
-                  marginBottom: 4,
-                  wordBreak: "break-word",
-                  padding: "1px 4px",
-                  borderRadius: 4,
-                  background: segActive(s.speaker_label, s.ts_ms, i, s.duration_ms) ? "var(--brief-soft)" : undefined,
-                }}
-              >
-                <b style={{ color: s.speaker_id === 1 ? "var(--client)" : "var(--me)" }}>[{s.speaker_label}]</b> {s.text}
-              </div>
-            ))}
+            {detail.segments.map((s, i) => {
+              const sentences = punctuateAndSplit(s.text);
+              return (
+                <div
+                  key={i}
+                  style={{
+                    marginBottom: 4,
+                    wordBreak: "break-word",
+                    padding: "1px 4px",
+                    borderRadius: 4,
+                    background: segActive(s.speaker_label, s.ts_ms, i, s.duration_ms) ? "var(--brief-soft)" : undefined,
+                  }}
+                >
+                  <b style={{ color: s.speaker_id === 1 ? "var(--client)" : "var(--me)" }}>[{s.speaker_label}]</b>{" "}
+                  {sentences.map((sent, j) => (
+                    <span key={j} style={{ color: "var(--text)" }}>
+                      {sent}
+                      {j < sentences.length - 1 && <span style={{ color: "var(--muted)" }}>｜</span>}
+                    </span>
+                  ))}
+                </div>
+              );
+            })}
           </div>
           {detail.terms.length > 0 && (
             <div style={{ marginTop: 6, color: "var(--text-2)" }}>

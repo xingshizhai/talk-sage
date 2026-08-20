@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitSentences, TranscriptAccumulator } from "./transcript";
+import { punctuateAndSplit, smartPunctuate, splitSentences, TranscriptAccumulator } from "./transcript";
 
 function seg(speaker: string, text: string, partial: boolean) {
   return { speaker_label: speaker, text, is_partial: partial };
@@ -98,5 +98,43 @@ describe("splitSentences", () => {
   it("handles empty and whitespace input", () => {
     expect(splitSentences("")).toEqual([]);
     expect(splitSentences("   ")).toEqual([]);
+  });
+});
+
+describe("smartPunctuate", () => {
+  it("adds question mark to question tails", () => {
+    expect(smartPunctuate("这个价格能再低一些吗")).toBe("这个价格能再低一些吗？");
+    expect(smartPunctuate("你们什么时候能交付呢")).toBe("你们什么时候能交付呢？");
+  });
+
+  it("breaks sentences at conjunctions", () => {
+    const out = smartPunctuate("我们确认下周一交付然后安排物流");
+    expect(out).toContain("，然后安排物流");
+  });
+
+  it("breaks long runs at subject/time words", () => {
+    const out = smartPunctuate("这个方案我们确认没有问题客户下周一可以签合同");
+    // 主语"我们"/"客户"前应断句
+    expect(out).toContain("这个方案我们确认没有问题");
+    expect(out).toContain("客户下周一可以签合同");
+  });
+
+  it("keeps existing punctuation untouched", () => {
+    const out = smartPunctuate("我们确认了。然后呢");
+    expect(out.startsWith("我们确认了。")).toBe(true);
+    expect(out).toContain("然后呢？");
+  });
+
+  it("does not double-punctuate text already ending with sentence mark", () => {
+    expect(smartPunctuate("好的，我们确认。")).toBe("好的，我们确认。");
+  });
+});
+
+describe("punctuateAndSplit", () => {
+  it("splits punctuated output into sentences", () => {
+    const parts = punctuateAndSplit("我们确认下周一交付三百台设备然后安排物流这个价格能再低一些吗");
+    expect(parts.length).toBeGreaterThanOrEqual(2);
+    // 含问句且以？结尾
+    expect(parts.some((p) => p.endsWith("？"))).toBe(true);
   });
 });

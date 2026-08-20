@@ -1,7 +1,7 @@
-// 实时转写卡片：3 视图模式（时间线 / 专注 / 密集）+ 自动滚动 + 按句分行。
+// 实时转写卡片：3 视图模式（时间线 / 专注 / 密集）+ 自动滚动 + 智能句读分句。
 
 import { useEffect, useRef } from "react";
-import { splitSentences } from "../lib/transcript";
+import { punctuateAndSplit } from "../lib/transcript";
 
 export type TranscriptMode = "timeline" | "focus" | "dense";
 
@@ -88,7 +88,7 @@ export default function TranscriptCard({
         )}
         {mode === "dense" ? (
           lines.map((l) => {
-            const sentences = splitSentences(l.text);
+            const sentences = punctuateAndSplit(l.text);
             return (
               <div key={l.key} style={{ fontSize: 12, color: "var(--text-2)", wordBreak: "break-word" }}>
                 <span style={{ color: l.speakerColor, fontWeight: 600 }}>[{l.speaker}]</span>{" "}
@@ -104,7 +104,7 @@ export default function TranscriptCard({
           })
         ) : (
           lines.map((l, i) => {
-            const sentences = splitSentences(l.text);
+            const sentences = punctuateAndSplit(l.text);
             return (
             <div
               key={l.key}

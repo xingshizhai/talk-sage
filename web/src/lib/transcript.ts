@@ -124,3 +124,106 @@ export function splitSentences(text: string): string[] {
   }
   return out;
 }
+
+// ── 中文智能句读（流式 ASR 无标点，按语言线索补 。，？，再分句）──
+
+/** 疑问尾词 → 句末加 ？ */
+const QUESTION_TAILS = ["吗", "呢", "吧"];
+/** 句末语助词（后接新主语/连词时前一句以句号收尾）。 */
+const STRONG_TAILS = ["啊", "呀", "哦", "了", "的", "吧", "么"];
+/** 连词/转折/因果/递进：出现时在前句末断句（逗号或句号）。 */
+const CONJUNCTIONS = ["但是", "不过", "可是", "然而", "所以", "因此", "因为", "然后", "接着", "另外", "而且", "并且", "同时", "还有", "就是", "反正", "毕竟", "虽然", "既然", "如果", "只要"];
+/** 主语/时间/称呼：句长足够时在此处开启新句。 */
+const SUBJECT_STARTS = ["我们", "你们", "他们", "客户", "老板", "经理", "张总", "李总", "王总", "刘总", "陈总", "今天", "明天", "后天", "下周", "本周", "上周", "月底", "这个", "那个", "这边", "那边"];
+/** 无任何线索时的最大单句长度（超过则在最近语助处断，否则逗号）。 */
+const NO_CLUE_LIMIT = 22;
+
+/** 是否以语助词结尾（用于决定断句用句号还是逗号）。 */
+function endsWithTail(s: string): boolean {
+  return STRONG_TAILS.some((t) => s.endsWith(t));
+}
+
+/**
+ * 给无标点（或极少标点）的转写文本插入中文标点：？/。，。
+ * - 句尾 吗/呢/吧 → 问号
+ * - 连词（然后/但是/所以…）出现 → 前句断（句号或逗号）
+ * - 主语/时间/称呼词（我们/客户/今天…）在句长足够时 → 新句
+ * - 无线索超长 → 最近语助处句号，否则逗号
+ * 已存在的标点保留。英文按空格自然分隔不受影响。
+ */
+export function smartPunctuate(text: string): string {
+  const raw = String(text ?? "");
+  if (!raw.trim()) return raw;
+  // 已有句末标点 → 直接返回（避免重复处理）
+  if (SENTENCE_END.test(raw.trim().slice(-1))) return raw;
+
+  let out = "";
+  let pending = "";
+
+  const flush = (punct: "" | "。" | "？" | "，") => {
+    const t = pending.trim();
+    if (t) {
+      out += t;
+      if (punct) out += punct;
+    }
+    pending = "";
+  };
+
+  let i = 0;
+  while (i < raw.length) {
+    const ch = raw[i];
+    // 已存在的标点：直接收尾当前句
+    if (SENTENCE_END.test(ch) || WEAK_BOUNDARY.test(ch)) {
+      flush(ch === "。" || ch === "！" || ch === "？" || ch === "…" || ch === "；" || ch === "\n" ? "" : "");
+      out += ch;
+      i++;
+      continue;
+    }
+    // 连词：前句断句
+    const conj = CONJUNCTIONS.find((c) => raw.startsWith(c, i));
+    if (conj) {
+      if (pending.trim()) {
+        out += pending.trim();
+        out += endsWithTail(pending) ? "。" : "，";
+        pending = "";
+      }
+      out += conj;
+      i += conj.length;
+      continue;
+    }
+    // 主语/时间/称呼：句长足够时新起句
+    const subj = SUBJECT_STARTS.find((c) => raw.startsWith(c, i));
+    if (subj && Array.from(pending).length >= 10) {
+      const t = pending.trim();
+      if (t) {
+        out += t;
+        out += endsWithTail(t) ? "。" : "，";
+        pending = "";
+      }
+      out += subj;
+      i += subj.length;
+      continue;
+    }
+    pending += ch;
+    i++;
+  }
+
+  // 收尾
+  const tail = pending.trim();
+  if (tail) {
+    // 疑问尾 → ？；语助尾且较长 → 。；其余超长 → ，
+    if (QUESTION_TAILS.some((t) => tail.endsWith(t))) {
+      out += tail + "？";
+    } else if (Array.from(tail).length >= NO_CLUE_LIMIT) {
+      out += tail + (endsWithTail(tail) ? "。" : "，");
+    } else {
+      out += tail;
+    }
+  }
+  return out;
+}
+
+/** 展示用：智能句读 + 分句（实时转写/历史详情统一入口）。 */
+export function punctuateAndSplit(text: string): string[] {
+  return splitSentences(smartPunctuate(text));
+}

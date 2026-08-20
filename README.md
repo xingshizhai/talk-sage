@@ -25,7 +25,7 @@
 
 ## Features
 
-- **Real-time streaming ASR** — Chinese (paraformer) + English (zipformer) dual streams, incremental partials, VAD segmentation; **sentence-level display** for readability; **denoise off by default** so faint/distant speech is still recognized (enable in Settings for noisy rooms)
+- **Real-time streaming ASR** — Chinese (paraformer) + English (zipformer) dual streams, incremental partials, VAD segmentation; **smart punctuation** (streaming ASR emits no punctuation → heuristic 。，？ from question tails / conjunctions / subject & time words, then sentence-split display); **denoise off by default** so faint/distant speech is still recognized (enable in Settings for noisy rooms)
 - **Scene modes** — one-click **Life / Meeting / Talk / Custom**: Life (sensitive VAD for short/faint speech, single stream, analysis plugins off), Meeting (dual stream + all plugins, default), Talk (dual stream + 300 ms min-commit); Custom lets you edit VAD / denoise / min-commit / engines / plugins / speaker / noise detection per-field (Settings → 场景模式)
 - **Multi-speaker identification** — voiceprint registration of the owner in Settings ("我的声音"), then every final segment is matched: owner → 「我」, others → 「客户1」「客户2」… (online clustering, labels reused)
 - **Live meeting intelligence** — term/acronym explanations, real-time translation (en↔zh), rule-based key-point aggregation (questions / requirements / decisions / actions / technical, with numeric & time heuristics), knowledge-base brief retrieval; History offers **AI-extracted key points** (LLM, needs config)
