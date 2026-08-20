@@ -114,10 +114,12 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> { /* ... */ }
 ### 3.3 数据流
 
 ```
-StreamWorker emit
+StreamWorker 产生 final 段
   → EventFilter 链（按 builtin_plugins() 的列表顺序）
        short_segment      : final 段 duration < min_ms → None
        cross_stream_dedup : 与另一条流重复 → None
+  │  被吞掉的事件到此为止：既不 emit，也不触发 observer
+  ↓
   → TranscriptState.apply + revision 戳（现有 runtime.rs）
   → SessionWriter 落库（只 committed）
   → SegmentObserver 分发
@@ -127,7 +129,18 @@ StreamWorker emit
   SessionFinalizer 链：session_quality → webhook → markdown_export → trio_notes
 ```
 
-`EventSink` 已是 `Arc<dyn Fn(DomainEvent) + Send + Sync>`，filter 链天然可组合；`runtime.rs` 中包装 sink 做 revision 戳的位置即插入点。
+**filter 挂在事件产生点，不是 sink。** 必须显式说明，因为现状两个待迁移功能的作用域不一致：
+
+| 功能 | 现状抑制事件 | 现状抑制插件 |
+|---|---|---|
+| `short_segment`（`lib.rs:646` 提前 `return`） | 是 | 是 |
+| `cross_stream_dedup`（emit 包装内 `return`） | 是 | **否** |
+
+`on_final`（插件分发）在 `lib.rs:713` 紧跟 `emit` 之后调用，绕过了 emit 包装。因此跨流回声重复段虽不进 UI 和数据库，却仍会触发术语/翻译/简报插件，可能带来重复的 LLM 调用 —— 这是既存的隐性缺陷。
+
+若把 filter 挂在 sink 上，`short_segment` 会退化成与 dedup 一致（短段开始触发插件），属于回归。因此 filter 统一放在产生点，位于 `emit` 与 `on_final` 之前。
+
+**已决策的行为变更：** 本次重构顺带修正上述缺陷 —— 跨流回声重复段从此不再触发插件。特征化测试（§6）须将这一差异记为预期变更，而非回归。
 
 ### 3.4 两条定死的语义
 
