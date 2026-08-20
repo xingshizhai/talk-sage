@@ -96,6 +96,9 @@ mod tests {
         assert!(filter_with(0).filter(seg(1, false)).is_some());
     }
 
+    /// 契约测试（防御性），不是现网覆盖：产生点的 filter 链**只喂 final 段**
+    /// （见 `EventFilter` 文档），partial 与插件自产事件根本到不了这里。
+    /// 锁住的是「万一以后有人把别的产生点接上来，这个 filter 不会乱吞」。
     #[test]
     fn never_touches_partials_or_other_events() {
         // partial 段时长恒为 0，绝不能被当成短段吞掉

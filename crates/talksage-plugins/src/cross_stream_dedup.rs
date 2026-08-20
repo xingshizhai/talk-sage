@@ -118,6 +118,9 @@ mod tests {
         assert!(f.filter(seg(1, "完全不同的一句话", 1200)).is_some());
     }
 
+    /// 契约测试（防御性），不是现网覆盖：产生点的 filter 链**只喂 final 段**
+    /// （见 `EventFilter` 文档），partial 根本到不了这里。锁住的是「万一以后
+    /// 有人把 partial 也接进来，hypothesis 文本不会被当成回声吞掉」。
     #[test]
     fn partials_are_never_deduped() {
         let f = CrossStreamDedupFilter::default();

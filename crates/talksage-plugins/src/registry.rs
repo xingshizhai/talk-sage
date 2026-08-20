@@ -58,10 +58,25 @@ use std::sync::Arc;
 use talksage_core::{DomainEvent, TranscriptSegment};
 use crate::PluginContext;
 
-/// 快路径钩子：每个事件都过。
+/// 快路径钩子：在产生点变换或吞掉 final 段。
+///
+/// **实际到达这条链的只有 final 段。** 全仓只有一处 `apply_filters` 调用点 ——
+/// `StreamWorker::finish_speech` 里 emit 与 on_final 之前 —— 而那里只处理
+/// committed 段。有意不过链的两类事件：
+/// - **插件自己 emit 的事件**（Metrics / Nudge / Term / Translation …）：设计
+///   §3.4 S1，插件产物直接进 sink，不回灌 filter 链，否则会形成递归且难以推理。
+/// - **partial（hypothesis）段**：还会被后续 partial 覆盖的猜测文本，不做过滤；
+///   过滤/去重只对已 committed 的段有意义。
+///
+/// filter 的类型是 `DomainEvent -> Option<DomainEvent>`：既能吞（None），
+/// 也能改写（返回改过的事件）。改写后的事件是唯一真相 —— sink、observer、
+/// 统计计数器都取它。
 ///
 /// 签名里既没有 Result 也没有 PluginContext —— 这是刻意的：filter 必须是
 /// 纯函数、不可失败、不可阻塞。想做 IO 或会失败的活，去 SegmentObserver。
+///
+/// 实现应对非 final-Segment 的输入原样放行：链条本身不保证只喂 final 段，
+/// 这条防御让「以后有人接上别的产生点」不至于变成静默的行为变更。
 pub trait EventFilter: Send + Sync {
     /// 返回 None 表示吞掉该事件：既不进 sink，也不触发 observer。
     fn filter(&self, ev: DomainEvent) -> Option<DomainEvent>;
