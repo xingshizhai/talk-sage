@@ -725,10 +725,14 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
     // 会话指标 + 实时提示（借鉴 Call.md conversation-metrics / nudge-engine）：
     // 包装事件流——final 段事件聚合进 seg_log，随之推送 Metrics 事件；
     // NudgeEngine 按规则（2min 冷却）评估并推送 Nudge 事件。
+    // 跨流回显去重：双流（麦克风 + 系统回环）会把同一语音各识别一次——
+    // 与另一条流时间窗内内容高度相似的 final 段只保留先到的（后到的丢弃）。
     let seg_log: Arc<Mutex<Vec<TranscriptSegment>>> = Arc::new(Mutex::new(Vec::new()));
+    let recent_finals: Arc<Mutex<std::collections::VecDeque<(u32, String, u64)>>> =
+        Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(32)));
     let nudge_engine: Arc<Mutex<talksage_core::NudgeEngine>> = Arc::new(Mutex::new(talksage_core::NudgeEngine::default()));
     let session_start = Instant::now();
-    let (seg_log_sink, nudge_sink) = (seg_log.clone(), nudge_engine.clone());
+    let (seg_log_sink, recent_sink, nudge_sink) = (seg_log.clone(), recent_finals.clone(), nudge_engine.clone());
     let emit_raw = emit.clone();
     let emit: EventSink = Arc::new(move |ev: DomainEvent| {
         if let DomainEvent::Segment {
@@ -741,6 +745,25 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             ..
         } = &ev
         {
+            // 跨流回显去重（"我" vs "客户" 同一语音被双录）
+            {
+                let mut recent = recent_sink.lock().unwrap();
+                let is_echo = recent.iter().any(|(sp, t, ts)| {
+                    *sp != *speaker_id && talksage_core::is_echo_duplicate(t, text, ts_ms.saturating_sub(*ts))
+                });
+                if is_echo {
+                    log::info!(
+                        "跨流回显去重: 丢弃[{}] 文本={}（与另一条流重复）",
+                        speaker_label,
+                        text.chars().take(40).collect::<String>()
+                    );
+                    return; // 不 emit（所有消费者都看不到重复段）
+                }
+                recent.push_back((*speaker_id, text.clone(), *ts_ms));
+                if recent.len() > 32 {
+                    recent.pop_front();
+                }
+            }
             seg_log_sink.lock().unwrap().push(TranscriptSegment {
                 speaker_id: *speaker_id,
                 speaker_label: speaker_label.clone(),

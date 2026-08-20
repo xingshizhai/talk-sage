@@ -220,6 +220,68 @@ fn dual_stream_user_and_client_both_produce_segments() {    let Some(root) = mod
     eprintln!("双流测试：user_finals={user_finals}, client_finals={client_finals}");
 }
 
+/// 跨流回显去重：同一 wav 同时喂 user 与 client 流（模拟麦克风 + 系统回环双录），
+/// 相同内容只保留一条——同一 final 文本不应同时出现在两个说话人。
+#[test]
+fn cross_stream_echo_dedup_keeps_single_copy() {
+    let Some(root) = model_root() else {
+        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
+        return;
+    };
+    let wav = zh_model_dir(&root).join("0.wav");
+    if !vad_model(&root).is_file() || !wav.is_file() {
+        eprintln!("跳过：模型/VAD/测试音频不完整");
+        return;
+    }
+    // 控制组：单流（该音频应有的段数）
+    let single = run_and_collect(zh_file_pipeline(&root, &wav));
+    let single_finals: Vec<String> = single
+        .iter()
+        .filter_map(|e| match e {
+            DomainEvent::Segment { text, is_partial: false, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!single_finals.is_empty(), "单流应产生 final 段");
+
+    // 双流：同一 wav 同时喂两条流（内容完全相同的回显场景）
+    let mut cfg = zh_file_pipeline(&root, &wav);
+    cfg.client = Some(StreamConfig {
+        engine_kind: EngineKind::ParaformerZh,
+        model_dir: zh_model_dir(&root),
+        input: AudioInput::File(wav),
+        speaker_id: 1,
+        speaker_label: "客户".into(),
+    });
+    let evs = run_and_collect(cfg);
+    let finals: Vec<(u32, String)> = evs
+        .iter()
+        .filter_map(|e| match e {
+            DomainEvent::Segment { speaker_id, text, is_partial: false, .. } => Some((*speaker_id, text.clone())),
+            _ => None,
+        })
+        .collect();
+    assert!(!finals.is_empty(), "双流去重后仍应有转写");
+
+    // 同一文本不应同时出现在两个说话人
+    let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for (sp, t) in &finals {
+        if let Some(prev) = seen.get(t) {
+            assert_eq!(prev, sp, "同一文本出现在不同说话人（回显去重失效）: {t}");
+        } else {
+            seen.insert(t.clone(), *sp);
+        }
+    }
+    // 去重后总段数不超过单流段数
+    assert!(
+        finals.len() <= single_finals.len(),
+        "回显未去重: 双流 {} 段 > 单流 {} 段",
+        finals.len(),
+        single_finals.len()
+    );
+    eprintln!("跨流去重：单流 {} 段，双流去重后 {} 段", single_finals.len(), finals.len());
+}
+
 /// 插件集成：英文客户文件 + term_explainer（mock LLM）+ translator → Term/Translation 事件。
 #[test]
 fn plugins_emit_term_and_translation_events() {

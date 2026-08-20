@@ -209,6 +209,31 @@ pub fn edit_distance<T: PartialEq>(a: &[T], b: &[T]) -> usize {
     prev[ll]
 }
 
+/// 文本相似度 0..1（1 - 编辑距离 / 较长者长度；空文本为 0）。
+pub fn text_similarity(a: &str, b: &str) -> f32 {
+    let (ra, rb): (Vec<char>, Vec<char>) = (a.trim().chars().collect(), b.trim().chars().collect());
+    if ra.is_empty() || rb.is_empty() {
+        return 0.0;
+    }
+    let max_len = ra.len().max(rb.len());
+    1.0 - edit_distance(&ra, &rb) as f32 / max_len as f32
+}
+
+/// 跨流回显去重判定：同一语音被麦克风 + 系统回环双录时，两条流会出现
+/// 时间接近、内容高度相似的 final 段——此时只保留先到的。
+///
+/// 条件：时间差 ≤ 3s，文本长度 ≥ 4，相似度 ≥ 0.9（回显通常几乎逐字一致）。
+pub fn is_echo_duplicate(prev_text: &str, new_text: &str, time_gap_ms: u64) -> bool {
+    if time_gap_ms > 3_000 {
+        return false;
+    }
+    let (a, b) = (prev_text.trim(), new_text.trim());
+    if a.chars().count() < 4 || b.chars().count() < 4 {
+        return false; // 短句（"好的/嗯"）不做去重，避免误杀
+    }
+    text_similarity(a, b) >= 0.9
+}
+
 /// 字符错误率 CER（中文按字符）：`ref` 为参考文本，`hyp` 为转写结果。
 /// 返回 0..1（0 = 完全正确）。
 pub fn cer(reference: &str, hypothesis: &str) -> f32 {
@@ -341,5 +366,29 @@ mod tests {
         let wer1 = wer("we need samples", "we need");
         assert!(wer1 > 0.0 && wer1 < 1.0, "WER 应介于 0-1: {wer1}");
         assert!((wer("hello world", "hello world") - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn echo_dedup_detects_identical_and_rejects_distinct() {
+        // 相同/几乎相同 → 判定重复（回显）
+        assert!(is_echo_duplicate("我们确认下周一交付", "我们确认下周一交付", 500));
+        assert!(is_echo_duplicate("我们确认下周一交付三百台设备", "我们确认下周一交付三百台设备啊", 2_000));
+        // 时间窗 3s 外 → 不判重
+        assert!(!is_echo_duplicate("我们确认下周一交付", "我们确认下周一交付", 5_000));
+        // 短句不判重（避免误杀"好的/嗯"）
+        assert!(!is_echo_duplicate("好的", "好的", 500));
+        assert!(!is_echo_duplicate("嗯嗯", "嗯嗯", 500));
+        // 内容不同 → 不判重
+        assert!(!is_echo_duplicate("我们确认下周一交付", "客户要求周五前报价", 500));
+        // 相似但不足 0.9 → 不判重
+        assert!(!is_echo_duplicate("我们确认下周一交付三百台设备", "我们确认下个月交付三百台设备", 500));
+    }
+
+    #[test]
+    fn text_similarity_basics() {
+        assert_eq!(text_similarity("", "abc"), 0.0);
+        assert_eq!(text_similarity("abc", "abc"), 1.0);
+        assert!((text_similarity("abcd", "abce") - 0.75).abs() < 1e-6);
+        assert!(text_similarity("我们确认交期", "我们确认价格") < 0.9);
     }
 }
