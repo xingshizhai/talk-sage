@@ -21,6 +21,11 @@ fn skip(reason: &str) {
     eprintln!("跳过：{reason}");
 }
 
+/// 可选引擎（whisper / qwen3 等，不在 `deps` 必需集里）缺失：始终跳过，
+/// 不受 `TALKSAGE_REQUIRE_MODELS` 影响 —— CI 不为可选引擎拉数百 MB 模型。
+fn skip_optional(reason: &str) {
+    eprintln!("跳过（可选引擎）：{reason}");
+}
 
 fn model_root() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
@@ -96,7 +101,7 @@ fn whisper_offline_segment_engine_recognizes_audio() {
     let model_dir = root.join("sherpa-onnx-whisper-base");
     let wav = root.join("sherpa-onnx-streaming-paraformer-zh").join("0.wav");
     if !model_dir.is_dir() || !wav.is_file() {
-        return skip("whisper-base 模型或测试音频不完整");
+        return skip_optional("whisper-base 模型未下载（download_models.py whisper-base）");
     }
     let mut engine = talksage_asr::OfflineSegmentEngine::new(EngineKind::WhisperBase, &model_dir, 2)
         .expect("创建 whisper-base 引擎失败");

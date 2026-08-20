@@ -10,6 +10,20 @@ use tower::ServiceExt;
 use talksage_core::DomainEvent;
 use talksage_server::{build_router, ServerState};
 
+/// 资源缺失：默认打印并跳过；`TALKSAGE_REQUIRE_MODELS=1` 时直接失败，
+/// 避免 CI 上「因跳过而全绿」掩盖回归。
+fn skip(reason: &str) {
+    let require = matches!(
+        std::env::var("TALKSAGE_REQUIRE_MODELS").ok().as_deref(),
+        Some("1") | Some("true")
+    );
+    assert!(
+        !require,
+        "集成测试资源缺失（TALKSAGE_REQUIRE_MODELS=1 要求必须真实运行）: {reason}"
+    );
+    eprintln!("跳过：{reason}");
+}
+
 fn test_state() -> ServerState {
     let config = Arc::new(talksage_config::ConfigManager::load(None, None).unwrap());
     let sessions = Arc::new(talksage_session::SessionStore::open(":memory:").unwrap());
@@ -215,13 +229,11 @@ async fn openai_transcribe_rejects_missing_file() {
 #[tokio::test]
 async fn openai_transcribe_wav_returns_text() {
     let Some(root) = models_root() else {
-        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
-        return;
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
     };
     let wav = root.join("sherpa-onnx-streaming-paraformer-zh").join("0.wav");
     if !wav.is_file() {
-        eprintln!("跳过：测试音频不完整");
-        return;
+        return skip("测试音频不完整");
     }
     let wav_bytes = std::fs::read(&wav).unwrap();
     let body = multipart_wav(&wav_bytes, "paraformer-zh");
