@@ -1,8 +1,8 @@
 # TalkSage v2 架构设计（推翻重设计）
 
-**日期：** 2026-08（初版）
-**状态：** 设计定稿，M0/M1 已实施
-**旧版对照：** 旧 Python/PySide6 实现（v1）已随 v2 重写从仓库移除（git 历史可查）
+**日期：** 2026-08（初版）；2026-08-20 修订（共享服务 / 采样时钟 / 有界采集）
+**状态：** 已实施。M0–M3 主路径可用；架构优化阶段 1–3 已落地（见 §19）。阶段 4（版本化协议 / 多 task 拆分）按需再做。
+**对照：** 旧 Python/PySide6 实现（v1）已随 v2 重写从仓库移除（git 历史可查）
 
 ---
 
@@ -53,33 +53,53 @@ TalkSage 是一款**实时个人 AI 会议助理**：在视频会议或面对面
 
 ## 4. 总体架构
 
-```
-┌─ 载体 1（默认）：Tauri 2 原生壳 ──────────────────────────────┐
-│                                                                │
-│   React UI（web/，Vite + React + TS）                          │
-│      ▲ 统一 API 抽象（lib/api.ts：IPC 适配器）                 │
-│      │                                                         │
-│   Tauri IPC（command + event）                                 │
-│      │                                                         │
-│   Rust 核心域（crates/*，同进程）                               │
-│     audio（采集/混音/VAD/录音） │ asr（streaming 双引擎）        │
-│     pipeline（快慢路径） │ plugins │ session │ llm │ knowledge  │
-│                                                                │
-│   原生能力：托盘、窗口置顶/透明、屏享隐形、回环直采（壳内）       │
-└────────────────────────────────────────────────────────────────┘
-                          ▲ 同一套 UI 与核心域
-                          │ 传输层可插拔
-┌─ 载体 2（预留）：headless 服务 + 浏览器 ───────────────────────┐
-│   React UI（同一套）                                           │
-│      ▲ HTTP /api + WebSocket /ws                              │
-│   talksage-server（axum，默认 127.0.0.1）                      │
-│      ▲                                                        │
-│   Rust 核心域（同一套 crates/*，独立进程）                      │
-│   capture-agent（可选原生进程，补系统回环采集）                  │
-└────────────────────────────────────────────────────────────────┘
+适配器（Tauri IPC / Axum / CLI）**不装配管道**。监听、导入、bench、OpenAI 转写都经 `TalkSageService` → `SessionRuntime` → `LivePipeline`。
+
+```mermaid
+flowchart TB
+    accTitle: TalkSage dual-carrier architecture
+    accDescr: Tauri desktop and headless server share TalkSageService; SessionRuntime wraps LivePipeline and talks to engines, plugins, and SQLite.
+
+    subgraph desktop [载体 1：Tauri 2 原生壳]
+        reactUi[React UI]
+        ipc[Tauri IPC]
+        reactUi --> ipc
+    end
+
+    subgraph headless [载体 2：headless + 浏览器]
+        browserUi[同一套 React UI]
+        httpWs[HTTP /api + WebSocket /ws]
+        browserUi --> httpWs
+        openaiClient[OpenAI 兼容客户端]
+        openaiClient --> httpWs
+    end
+
+    subgraph adapters [传输适配器]
+        tauriAdapter[web/src-tauri]
+        axumAdapter[talksage-server]
+        cliAdapter[talksage-cli]
+        ipc --> tauriAdapter
+        httpWs --> axumAdapter
+    end
+
+    service[TalkSageService]
+    runtime[SessionRuntime]
+    pipeline[LivePipeline / StreamWorker]
+    pool[EnginePool]
+    db[(SQLite + WAV)]
+
+    tauriAdapter --> service
+    axumAdapter --> service
+    cliAdapter --> service
+    service --> runtime
+    runtime --> pipeline
+    pipeline --> pool
+    service --> db
+    runtime -->|DomainEvent + Snapshot| tauriAdapter
+    runtime -->|DomainEvent + Snapshot| axumAdapter
 ```
 
-**关键决策**：核心域是"库"，载体是"壳"。Tauri 模式下 IPC 直连（少一跳、回环壳内采集）；headless 模式下 HTTP/WS 暴露（支持手机/平板浏览器访问、团队部署，回环由可选 capture-agent 补上）。此双载体设计与 DSH 的 webserver 文档描述一致——"same Web UI can run in a browser or in an Electron shell carrying fetch over an IPC bridge"。
+**关键决策**：核心域是「库」，载体是「壳」。Tauri 模式下 IPC 直连（少一跳、回环壳内采集）；headless 模式下 HTTP/WS 暴露。两种载体和 CLI **共用同一个 `TalkSageService`**，避免各自 `build_llm` / `build_pipeline_config` / 落库。独立 `capture-agent` 进程仍是预留（当前 Windows 回环在 `talksage-audio` 同进程采集）。
 
 ---
 
@@ -105,29 +125,29 @@ TalkSage 是一款**实时个人 AI 会议助理**：在视频会议或面对面
 ```
 talksage/
 ├── crates/
-│   ├── talksage-cli/          # launcher：web / serve / import / record / doctor
-│   ├── talksage-core/         # 领域模型与事件类型（与传输无关）
-│   ├── talksage-audio/        # AudioHub：采集抽象、流式 VAD、混音/闪避/限幅、录音器
-│   ├── talksage-asr/          # sherpa-onnx 封装：streaming 双引擎、说话人 embedding、GPU 探测
-│   ├── talksage-pipeline/     # 编排：快路径（ASR→缩写→检索→要点）+ 慢路径（LLM）
-│   ├── talksage-plugins/      # term_explainer / brief_retriever / translator / notes
-│   ├── talksage-session/      # SQLite + Markdown 导出 + 录音文件索引 + 历史检索
-│   ├── talksage-llm/          # OpenAI 兼容 Provider 抽象 + 流式
+│   ├── talksage-cli/          # launcher：run / serve / listen / import / bench / doctor
+│   ├── talksage-core/         # DomainEvent、AudioClock、TranscriptState、DeliveryClass
+│   ├── talksage-audio/        # AudioHub / LoopbackCapture、有界采集队列、WAV
+│   ├── talksage-asr/          # SegmentEngine（流式 + 离线段级）+ EnginePool
+│   ├── talksage-pipeline/     # TalkSageService、SessionRuntime、LivePipeline、speaker
+│   ├── talksage-plugins/      # term_explainer / brief_retriever / translator
+│   ├── talksage-notes/        # 会后纪要 / 三段式智能纪要
+│   ├── talksage-session/      # SQLite + Markdown 导出 + 录音索引 + 质量评估
+│   ├── talksage-llm/          # OpenAI 兼容 Provider（complete，15s 超时）
 │   ├── talksage-knowledge/    # 简报知识库检索（Jaccard，预留向量）
-│   ├── talksage-import/       # 导入 + 重转写 + 离线 diarization
-│   ├── talksage-config/       # 分层配置
-│   ├── talksage-server/       # （可选）axum 适配器：REST + WS + 静态托管 + auth 抽象
-│   └── talksage-tauri/        # （可选）Tauri 适配器：command/event 桥接
-├── capture-agent/             # （可选）双平台回环采集进程（WASAPI / ScreenCaptureKit）
+│   ├── talksage-config/       # 分层配置 + 场景模式
+│   ├── talksage-logging/      # 文件日志
+│   └── talksage-server/       # axum 适配器：REST + WS + OpenAI 转写 API
 ├── web/                       # React SPA
-│   ├── src/pages/             # 会议页 / 历史页 / 设置页 / 向导
-│   ├── src/sections/          # 上下文 / 转写 / 术语 / 翻译 / 要点 / 简报
-│   ├── src/lib/api.ts         # 统一 API 抽象（IPC 适配器 ↔ HTTP 适配器）
-│   └── src/lib/ws.ts          # 事件订阅（IPC 事件 ↔ WS 消息）
-├── models/                    # streaming 模型清单与下载脚本
+│   ├── src/lib/api.ts         # 统一 API（IPC ↔ HTTP）
+│   ├── src/lib/transcript.ts  # 前端累加器（按 speaker 持有 hypothesis）
+│   └── src-tauri/             # Tauri 适配器（同进程调 TalkSageService）
+├── models/                    # 模型清单与下载脚本
 ├── docs/
 └── talksage.toml              # 用户配置
 ```
+
+未单独成 crate（设计预留、现阶段不拆）：`talksage-import`（CLI `import` + `StartListen::import_file`）、`talksage-tauri`（代码在 `web/src-tauri`）、`capture-agent` 独立进程。
 
 **参考映射（旧版 → v2）**：
 
@@ -146,35 +166,30 @@ talksage/
 
 ## 7. 核心数据流与延迟预算
 
-### 7.1 实时链路（Tauri 模式，默认）
+### 7.1 实时链路（双流独立，不混音）
 
+用户流（麦克风）与客户流（Windows WASAPI 回环 / 文件）**各有一条** `StreamWorker`：独立 VAD、独立 ASR、独立 `AudioClock`。不是先混音再识别。跨流同一句话由 echo-dedup 只留一份。
+
+```mermaid
+flowchart LR
+    accTitle: TalkSage realtime dual-stream pipeline
+    accDescr: Mic and loopback each go through a bounded capture queue into an independent StreamWorker; committed text feeds plugins and SQLite.
+
+    mic[麦克风 cpal] --> q1[CaptureTx 容量 32]
+    loop[系统回环 WASAPI] --> q2[CaptureTx 容量 32]
+    file[文件 / import / bench] --> swUser
+    q1 --> swUser[StreamWorker 用户]
+    q2 --> swClient[StreamWorker 客户]
+    swUser --> vad1[VAD + ASR]
+    swClient --> vad2[VAD + ASR]
+    vad1 --> ts[TranscriptState]
+    vad2 --> ts
+    ts -->|committed| plugins[插件骨架同步 / LLM 独立线程]
+    ts -->|committed| sqlite[SQLite]
+    ts -->|Segment + Snapshot| ui[React UI]
 ```
-麦克风（壳内 cpal） ──┐
-系统回环（壳内 WASAPI/SCK） ──┤→ AudioHub（混音/闪避/限幅）
-                          │
-                          ▼
-                 流式 VAD 端点检测（sherpa-onnx VAD）
-                          │  语音段（增量流）
-                          ▼
-        DualStreamingASR：client→zipformer-en / user→paraformer-zh
-                          │  增量文本（<500ms 端到端）
-                          ▼
-   ┌── 快路径（全本地）──────────────┐
-   │ 缩写检测（规则）→ 术语骨架        │
-   │ 关键词 → 简报检索（Jaccard）     │
-   │ 关键短语/问句/决策（本地规则）    │
-   │ 说话人 embedding 聚类（可选）    │
-   └──────────┬───────────────────┘
-              ▼ 领域事件（IPC 推送）
-          React UI 即时渲染（先骨架）
-              │
-   ┌── 慢路径（LLM 异步）────────────┐
-   │ 术语解释终稿（冷却+去重）        │
-   │ 实时翻译（流式输出）             │
-   │ 要点提炼 / 纪要（模板化）        │
-   └──────────┬───────────────────┘
-              ▼ 领域事件（填充更新，按 result_id 原地更新）
-```
+
+时间戳：`ts_ms = origin_ms + AudioClock::samples_to_ms(end_sample)`（会话墙钟原点 + 采样位置），`duration_ms` 由段采样数换算，不再用 `now_ms() - seg_start_ms`。History 回放公式 `(ts_ms - duration_ms - started_at*1000)` 仍可用。
 
 ### 7.2 延迟预算（快路径目标）
 
@@ -194,33 +209,33 @@ talksage/
 
 ### 8.1 音频域（talksage-audio）
 
-- **采集抽象**：`CaptureSource` trait（麦克风 / 系统回环 / 文件），平台实现放 `platform/`（参考 DSH 按平台分文件、Meetily `audio/devices/platform/`）
-- **混音**：双流环形缓冲窗口对齐（参考 Meetily `pipeline.rs`：窗口零填充、溢出告警）；RMS 闪避 + 软削波（参考 `audio_processing.rs` 的 True-Peak 限幅 10ms lookahead、EBU R128 响度，Rust 侧用 `ebur128` crate）
-- **流式 VAD**：sherpa-onnx VAD 端点检测，替代旧版固定 3 秒块
-- **录音器**：增量 checkpoint 保存（30s 一段，崩溃可恢复，参考 Meetily `incremental_saver.rs`）；音频文件入 SQLite 索引
-- **设备/权限**：设备枚举（输入/回环候选）、macOS 麦克风+屏幕录制权限引导、Windows WASAPI loopback
+- **采集**：`AudioHub`（cpal 麦克风）与 `LoopbackCapture`（Windows WASAPI）；文件输入在 pipeline 里切块，不经采集回调
+- **有界队列**：`CaptureTx` = `sync_channel(32)`，回调只 `try_send`；满载记 overrun、丢帧，**不阻塞**系统音频回调。收尾时 overrun>0 打 warn
+- **预处理**：高通 + 块级噪声门（`Preprocessor`）；双流**不混音**，各自进 VAD
+- **流式 VAD**：silero-vad（sherpa-onnx），替代旧版固定 3 秒块
+- **录音器**：每流一份 WAV（原始 PCM）；停止路径等待文件头回填（见 §19.6 超时）
+- **设备/权限**：设备枚举；Windows 回环走 WASAPI；macOS 系统音频仍为产品项（ScreenCaptureKit / 虚拟声卡）
 
 ### 8.2 ASR 域（talksage-asr）
 
-- **统一运行时**：sherpa-onnx（Rust 绑定），模型为 ONNX（从 k2-fsa 官方 HF 仓库下载，`models/` 清单 + 下载脚本）
-- **双流式引擎**：
-  - client（英文）→ streaming zipformer（en）或 streaming whisper 变体
-  - user（中文）→ streaming paraformer-zh
-- **流式接口**：`StreamingASREngine`：`accept(audio_chunk) -> Vec<PartialResult>`（增量出字）
-- **后端探测**：启动时探测 CUDA（NVIDIA）/ CoreML（Apple GPU）/ CPU，自动选择推理后端与模型档位（CPU 用小模型，GPU 可升档）
-- **说话人 embedding**：3dspeaker 类 embedding 模型；实时双流隐式分离为主（麦=我/回环=客户），回环内多人用 embedding 聚类；离线（导入/重转写）做完整 diarization
-- **后处理**：增量文本清洗（重复/幻觉），参考 Meetily `clean_repetitive_text`；`no_speech` 阈值调参防幻觉
+- **统一运行时**：sherpa-onnx（Rust 绑定），模型为 ONNX（`models/` 清单 + 下载脚本）
+- **段级接口**：`SegmentEngine`（流式与离线同一 trait）
+  - 流式 paraformer-zh / zipformer-en：`accept` 出 hypothesis，`finish` 出 committed
+  - 离线 Whisper base/small、Qwen3-ASR：`accept` 只攒音频，VAD 段结束 `finish()` 整段识别（无 partial）
+- **引擎池**：`EnginePool` 按 `(kind, model_dir)` 缓存 `Box<dyn SegmentEngine>`，监听会话间 `reset` 复用
+- **说话人**：实时以双流标签为主（麦=我 / 回环=客户）；wespeaker 声纹默认关闭（回环双采下在线聚类易刷「客户 N」）
+- **GPU**：配置里有 `backend = auto`；CUDA / CoreML 真正接线仍是产品项，不是本轮架构门
 
 ### 8.3 管道与插件（talksage-pipeline / talksage-plugins）
 
-- **插件抽象**：`Plugin` trait：`should_trigger(segment) -> bool`、`analyze_stream(segment, ctx) -> AsyncStream<PluginResult>`（骨架→最终，`result_id` 原地更新，沿用旧版模式）
-- **插件清单（v2 全量）**：
+- **入口**：`TalkSageService::start` / `finish`；内部 `SessionRuntime` 包装 `LivePipeline`（适配器不得 `LivePipeline::new`）
+- **插件抽象**：`AnalyzerPlugin`：`should_trigger`、`skeleton`（同步、无 HTTP）、`run`（独立线程，可含 LLM）；默认 `accepts_speculative() = false`，只消费 committed
+- **插件清单**：
   - `term_explainer`：英文缩写 → 本地骨架 + LLM 终稿（冷却 + 会话去重）
   - `brief_retriever`：客户发言 → 知识库片段（冷却）
-  - `translator`：中英互译，LLM 流式输出（低延迟 provider 如 Groq 优先）
-  - `key_point_extractor`：关键短语/需求/技术方案要点（本地规则 + LLM 增强）
-  - `notes`：会后纪要（模板化，见 §8.6）
-- **上下文状态**：话题 / 未决问题 / 近期决策跟踪（沿用旧版启发式，可 LLM 增强）
+  - `translator`：中英互译（`complete`，非 token 流式）
+- **会后**：纪要 / 三段式智能纪要在 `talksage-notes`；Webhook 在 `stop` 之后后台线程，不占实时路径
+- **落库**：final 段 / 术语 / 翻译 的 SQLite 写入集中在 Service 的 `persist_domain_event`（独立 SessionWriter task 后置）
 
 ### 8.4 会话域（talksage-session）
 
@@ -231,8 +246,9 @@ talksage/
 
 ### 8.5 LLM 域（talksage-llm）
 
-- `LLMProvider` trait：`complete` / `stream`（OpenAI 兼容：DeepSeek/Kimi/Groq/MiniMax/Ollama…）
-- 流式翻译/术语填充走 `stream`；后台任务带取消（CancellationToken，参考 Meetily `summary/service.rs`）
+- `LLMProvider` trait：`complete`（OpenAI 兼容：DeepSeek/Kimi/Groq/Ollama…）
+- `ureq` 请求超时 15s；插件 `run` 在独立线程，停止后 `cancel` 则丢弃迟到结果。音频回调禁止 HTTP
+- token 级 `stream` 仍为预留（翻译/术语目前一次 `complete`）
 
 ### 8.6 纪要模板化（talksage-plugins/notes）
 
@@ -249,24 +265,38 @@ talksage/
 
 ## 9. 事件协议（与传输无关）
 
-所有领域事件为纯数据（serde 序列化），IPC 与 WS 传同一结构：
+所有领域事件为纯数据（serde 序列化），IPC 与 WS 传同一结构。`DomainEvent::delivery_class()` 标明可靠性（实现可后置到独立 writer）：
+
+| DeliveryClass | 含义 | 典型事件 |
+|---|---|---|
+| Ephemeral | 可覆盖、可丢 | `Level`、hypothesis（`Segment { is_partial: true }`） |
+| Replayable | 可从快照重建 | `Snapshot`、`Status`、`Metrics`、插件骨架 |
+| Durable | 必须持久化 | committed `Segment`、`SessionStats`、插件 Final |
 
 ```rust
-// talksage-core/src/events.rs
 enum DomainEvent {
-    Segment { speaker_id: u32, text: String, is_partial: bool, ts_ms: u64 },
-    Term { result_id: String, status: Skeleton|Final, content: String },
-    Translation { result_id: String, status: Skeleton|Final, direction: ZhEn|EnZh, content: String },
-    KeyPoint { result_id: String, status: Skeleton|Final, category: String, content: String },
-    Brief { source: String, text: String },
-    State { topic: String, open_questions: Vec<String>, decisions: Vec<String> },
-    Status { stage: AsrLoading|AsrReady|Recording|Importing, message: String },
-    Level { mic_rms: f32, loopback_rms: f32 },
-    // …
+    Segment {
+        speaker_id: u32, speaker_label: String, text: String,
+        is_partial: bool, ts_ms: u64, duration_ms: u64, rms: f32,
+        revision: u64, start_sample: u64, end_sample: u64,
+    },
+    Snapshot { /* committed + 每说话人 hypothesis + revision + stage */ },
+    Term { result_id, status: Skeleton|Final, content },
+    Translation { … },
+    KeyPoint { … },
+    Brief { … },
+    State { … },
+    Status { stage, message },
+    Level { mic_rms, loopback_rms },
+    SessionStats { … },
+    Metrics { … },
+    Nudge { … },
 }
 ```
 
-前端订阅流：`subscribe(handler) -> Unsubscribe`（IPC 事件 / WS 消息适配器统一）。
+- **committed vs hypothesis**：插件与 SQLite 只消费 `is_partial: false`。Rust `TranscriptState` 与前端 `transcript.ts` 都按 speaker 持有一条可覆盖尾巴。
+- **订阅快照**：headless WS 在订阅前先发当前 `DomainEvent::Snapshot`，避免刷新丢实时态。
+- 前端：`subscribe(handler)`（IPC 事件 / WS 消息适配器统一）。
 
 ---
 
@@ -274,7 +304,8 @@ enum DomainEvent {
 
 - **分区**：上下文 / 实时转写（说话人着色、增量渲染） / 术语卡片 / 翻译区 / 要点区 / 简报区；虚拟化长转写（参考 Meetily `VirtualizedTranscriptView`）
 - **统一 API 抽象**：`lib/api.ts` 定义 `AudioCapture` / `SessionApi` / `HistoryApi` / `SettingsApi` 接口，IPC 与 HTTP 两套实现
-- **音频**：Tauri 模式音频全在壳内（前端只收事件 + 控制命令）；headless 模式麦克风走 `getUserMedia` + WS 上行
+- **音频**：Tauri 模式音频全在壳内（前端只收事件 + 控制命令）；headless 模式当前同样由服务端采集（浏览器 `getUserMedia` 上行仍为预留）
+- **转写累加器**：`lib/transcript.ts` 按 `speaker_label` 持有 hypothesis；收到 `snapshot` 时 `reset` + `applySnapshot` 重建行
 - **状态管理**：轻量 context + reducer（参考 Meetily `SidebarProvider` 模式，无需重型框架）
 - **录音回放**：Web Audio 播放（音频文件经宿主提供）
 
@@ -363,7 +394,7 @@ token = ""
 | **M1 实时转写** | 采集（麦+回环）→ 流式 VAD → streaming 双引擎 → 增量上屏（说话人双流着色） | 核心价值闭环 |
 | **M2 会议辅助** | 术语/简报/要点/上下文 + 翻译插件 + SQLite 会话 + 历史页 | 旧版功能等价 + 翻译 |
 | **M3 产品化** | 录音回放、重转写、纪要模板化、设置页/向导、双平台打包 | 可日常使用 |
-| **M4（预留）** | headless 服务 + capture-agent + 鉴权 → 多设备/团队 | 浏览器/手机访问 |
+| **M4（预留）** | 多设备鉴权、版本化 Delta/resync、macOS 系统音频 | 浏览器断网恢复不丢 committed；未出现该需求前阶段 1–3 即可发布 |
 
 ---
 
@@ -394,10 +425,9 @@ token = ""
 参考 WhisperLiveKit 的"引擎单例 + 会话/计算解耦"思想完成以下演进：
 
 ### 18.1 ASR 引擎池（EnginePool）—— 引擎常驻、监听热启动
-- 	alksage-asr::EnginePool：按 (kind, model_dir) 缓存已加载的流式引擎，
-  跨监听会话复用；归还时自动 reset。模型**只加载一次**，第二次开始监听毫秒级就绪。
-- 桌面端常驻于 AppState.engine_pool；headless 服务后续接入同一池支持多用户。
-- 详见 crates/talksage-asr/src/lib.rs 的 pool_tests（acquire/release/warmup）。
+- `talksage-asr::EnginePool`：按 `(kind, model_dir)` 缓存 `Box<dyn SegmentEngine>`，跨监听会话复用；归还时 `reset`。模型只加载一次，第二次监听毫秒级就绪。
+- 桌面 / headless / CLI listen 共用 `TalkSageService` 持有的池。
+- 详见 `crates/talksage-asr/src/lib.rs` 的 `pool_tests`（acquire/release/warmup）。
 
 ### 18.2 RuntimeParams —— 运行期参数集中
 - RuntimeParams { noise_level: Arc<AtomicU32> } 取代散落的运行期字段；
@@ -407,6 +437,8 @@ token = ""
 ### 18.3 分层职责（共享组件独立）
 | 组件 | 归属 | 说明 |
 |---|---|---|
+| TalkSageService | talksage-pipeline | 配置 / 启停 / 插件 / 落库（适配器共用） |
+| SessionRuntime | talksage-pipeline | 包装 LivePipeline；TranscriptState + 快照 |
 | EnginePool | talksage-asr | 引擎常驻（共享） |
 | SpeakerIdentifier | talksage-pipeline::speaker | wespeaker 声纹 + 在线聚类（共享） |
 | PluginContext | talksage-plugins | LLM + 知识库（共享） |
@@ -415,20 +447,22 @@ token = ""
 | RuntimeParams | talksage-pipeline | 运行期可调（每会话） |
 
 ### 18.4 架构图
-- 生成：python scripts/generate_architecture.py → docs/architecture.png
-- 风格仿 WhisperLiveKit（Clients / Adapter·事件总线 / Pipeline / Shared Components）。
+- 结构图以本文 §4 / §7.1 / §19 的 Mermaid 为准（可 diff）。
+- 位图：`python scripts/generate_architecture.py` → `docs/architecture.png`（风格仿 WhisperLiveKit）。
 
 ### 18.5 后续扩展位
-- ~~固定语料转写评测（WER/RTF/延迟）~~ ✅ 已实现：`talksage bench`（crates/talksage-cli，EnginePool 热启动 + core::cer/wer 指标）
-- ~~最小提交时长 / ASR 合并参数~~ ✅ 已实现：`audio.min_segment_ms`（见 §18.7）
-- headless 多会话：ServerState 从单管道 → 会话表（每会话一个 pipeline，共享 EnginePool/SpeakerIdentifier）
+- ~~固定语料转写评测（WER/RTF/延迟）~~ ✅ `talksage bench`（EnginePool 热启动 + core::cer/wer）
+- ~~最小提交时长 / ASR 合并参数~~ ✅ `audio.min_segment_ms`（见 §18.7）
+- ~~入口统一 / 采样时钟 / 有界采集~~ ✅ 2026-08-20 阶段 1–3（见 §19）
+- headless 多会话：ServerState 从单管道 → 会话表（每会话一个 Runtime，共享 EnginePool）
 - 免注册说话人分离（sherpa diarization）：与现声纹方案互补
+- 版本化 DTO / Delta / 序号 resync：仅当长会议 WS 或浏览器断网恢复成为真实需求
 
 ### 18.6 OpenAI 兼容转写 API（headless，对接既有生态）
 - 路由：`GET /v1/models`（列出 paraformer-zh / zipformer-en）、`POST /v1/audio/transcriptions`
 - 输入：multipart（`file`=PCM wav 任意采样率自动重采样 16k；`model`；`response_format`=json|text|verbose_json；`language` 暂忽略）
 - 鉴权：`Authorization: Bearer <token>` 或 `X-Talksage-Token`（`TALKSAGE_SERVER_TOKEN` 启用）
-- 实现：与 `talksage bench` 共用 `talksage_pipeline::offline::transcribe_file`（引擎池热启动，同一套 VAD+ASR 管道），转写在 blocking 线程池执行
+- 实现：与 `talksage bench` 共用 `talksage_pipeline::offline::transcribe_file` → `SessionRuntime`（引擎池热启动，同一套 VAD+ASR），转写在 blocking 线程池执行
 - verbose_json 输出段级时间轴（相对音频起点）、RTF、首词延迟
 - 测试：server_api.rs（真实 wav multipart → 文本；非法音频 400；缺 file 400；无鉴权 401）
 
@@ -436,8 +470,8 @@ token = ""
 - 配置：`[audio] min_segment_ms = 400`（ms；0/缺省 = 不限制），桌面设置页「ASR 转写 → 最短提交时长」可调
 - 管道：`LivePipelineConfig.min_commit_ms` → `StreamWorker`，`finish_speech` 中 final 段时长 < 阈值时**丢弃**（不 emit、不计数、不触发插件），日志打 `短段丢弃`
 - 动机：噪音会话中偶发的"哒/咔"短段会污染转写与历史；400~800ms 阈值可在不丢正常语句的前提下滤掉
-- 覆盖：桌面（Tauri start_listen）、headless 监听（server build_pipeline_config）、CLI listen 均读配置；
-  `talksage bench` / OpenAI 转写 API（offline::transcribe_file）固定 `min_commit_ms=0`（评测/API 保持原始输出）
+- 覆盖：桌面 / headless / CLI listen / import 均经 `TalkSageService` 读场景与 `min_commit_ms`；
+  `talksage bench` / OpenAI 转写 API（`offline::transcribe_file`）固定 `min_commit_ms=0`（评测/API 保持原始输出）
 - 测试：pipeline_live.rs `min_commit_ms_suppresses_short_segments`（60s 阈值 → 0 final；0 阈值 → 有 final）；config `user_file_overrides_defaults` 校验 toml 读取
 
 ### 18.8 会中会话指标 + 实时提示 + 三段式纪要（借鉴 Call.md）
@@ -449,7 +483,7 @@ token = ""
 
 ### 18.9 会议结束 Webhook + Markdown 导出（借鉴 Call.md）
 - **Webhook（SSRF 防护）**：`talksage-core::webhook`——`validate_webhook_url`（仅 http/https；拒绝回环/私网/链路本地 IP、localhost、`.local`、解析到私网的主机名；解析失败放行避免离线误伤）+ `post_webhook`（ureq 直连、禁环境代理、10s 超时）+ `trigger_webhooks`（逐条结果）
-- 配置：`[webhooks] enabled + urls`（设置页「Webhook」tab，每行一个 URL）；会话结束时（Tauri `stop_listen` / server `stop_listen_api`，后台线程）构建 payload（会议元数据 + 会话指标 + 质量 + 纪要/智能纪要 + 完整转写）推送
+- 配置：`[webhooks] enabled + urls`（设置页「Webhook」tab，每行一个 URL）；会话结束时（`TalkSageService::finish` 后台线程）构建 payload 推送
 - **Markdown 导出**：`talksage_session::export_markdown` 单文件（概览/指标 → 会议纪要 → 智能纪要 → 转写）；入口 Tauri `export_session_markdown`（写入 `<data_dir>/exports/session-{id}.md`）+ server `GET /api/session/{id}/export`；历史页「导出 Markdown」按钮（blob 下载 + 桌面端显示落盘路径）
 - 测试：core webhook 4 项（URL 校验含云元数据端点拒绝 + 本地 TcpListener 端到端 POST）；session payload/export 单测；server export API 集成测试
 
@@ -457,6 +491,65 @@ token = ""
 - 配置：`[scene] mode = "life"|"meeting"|"talk"|"custom"` + `[scene.custom]` 全量参数
 - `SceneParams`：VAD 预设与覆盖（threshold/最小语音/段尾静音/最长语音）、降噪开关与门限、最短提交时长、用户/客户引擎与双流开关、术语/翻译/简报开关、说话人识别、噪音自动检测
 - 内置模板：`scene_params(mode)`——生活（Sensitive VAD 0.35/0.15s/0.3s、单流、插件关）、会议（Standard、双流、插件全开；= 历史默认，行为不突变）、会谈（Standard、双流、min_segment 300ms）；`SceneConfig::effective()` 自定义模式用 custom，否则用模板
-- 应用：Tauri / server / CLI 的 pipeline 构建统一取 `snapshot.scene.effective()` → `to_vad_config()`/`to_denoise_config()` + 引擎/客户流/插件/说话人开关 + `min_commit_ms`；质量评估 auto_detect 跟随场景
+- 应用：`TalkSageService` 构建管道时取 `snapshot.scene.effective()` → VAD/降噪 + 引擎/客户流/插件/说话人开关 + `min_commit_ms`；质量评估 auto_detect 跟随场景
 - 前端：设置页「场景模式」tab（4 模式按钮 + 非自定义只读摘要 + 自定义全量编辑），保存 `scene.{mode,custom}`
 - 测试：config 4 项（会议模板=历史默认、生活/会谈差异、toml roundtrip、custom 持久化）；端到端：mode=life → VAD 日志 preset=Sensitive 生效
+
+---
+
+## 19. 架构演进 v2.2（2026-08-20）：共享服务、时钟与背压
+
+阶段 1–3 已落地（提交 `8b87c67`）。**零个新 crate**；`LivePipeline` 仍在，由兼容层包住。Whisper / Qwen3 继续走 VAD 切段 + `finish()`，不叠 AlignAtt。
+
+### 19.1 为何改
+
+| 问题 | 后果 |
+|---|---|
+| Tauri / Server / CLI 各自装配 Pipeline、LLM、落库 | headless 客户流曾静默改用麦克风；CLI `listen` 不用 `EnginePool` |
+| 段时间戳用 `SystemTime::now()` | 实时 / 回放 / bench 时间轴不一致 |
+| 采集 `mpsc` 无界；`stop()` 无界 `join` | ASR 慢于实时时内存可涨；停止可卡死 UI |
+
+### 19.2 入口：TalkSageService
+
+`talksage-pipeline::TalkSageService` 持有 `ConfigManager`、可选 `SessionStore`、`EnginePool`。适配器只做传输。
+
+| 入口 | 路径 |
+|---|---|
+| 桌面 / headless 监听 | `StartListen::desktop()` → `service.start` → `SessionRuntime` |
+| CLI `listen` | 同上（共用引擎池）；`--client` 才开双流，否则 `ClientCapture::Off` |
+| CLI `import` | `StartListen::import_file` → Service（不再自建 Pipeline） |
+| bench / OpenAI `/v1/audio/transcriptions` | `offline::transcribe_file` → `SessionRuntime` |
+
+`ClientCapture::Auto`：场景允许客户流且 Windows → 回环；非 Windows **明确降级为单流并记日志**，不改用麦克风。
+
+### 19.3 SessionRuntime 与 TranscriptState
+
+`SessionRuntime` 包装 `LivePipeline`：拦截 `Segment` → `TranscriptState::apply` → 盖 `revision`。`snapshot()` 供 WS 订阅时先发当前态。适配器不得 `LivePipeline::new`。
+
+```text
+committed: Vec<TranscriptSegment>     // SQLite / 插件只读这个
+hypothesis: HashMap<speaker_id, span> // 每流一条可覆盖尾巴；离线引擎恒空
+revision / processed_until_sample / committed_until_sample
+```
+
+### 19.4 采样时钟
+
+每条 `StreamWorker` 一个 `AudioClock`。`ts_ms = origin_ms + samples_to_ms(end_sample)`，`duration_ms` 由段采样数换算。墙上时钟只测耗时。
+
+### 19.5 有界采集
+
+`CaptureTx`：`sync_channel(32)` + `try_send`。满载 overrun（第 1 次及每 32 次打日志）并丢帧，**不阻塞** cpal / WASAPI 回调。VAD→ASR / 分析 / UI 仍走现有线程，不铺六条 channel。
+
+### 19.6 停止与 LLM
+
+- `stop_with_timeout` 默认 5s：`AtomicBool` 取消 + 旁路 `join`；超时 warn 并返回 `false`，不卡 UI。ASR `finish()` 不可中断，超时是安全网。
+- 插件骨架同步、本地、无 HTTP；`run` 独立线程。`ureq` 15s 超时；会话已停或超时则丢弃结果。
+- 独立 SessionWriter task **未做**：落库仍在 Service 的事件 sink 里（pipeline 线程上写 committed）。
+
+### 19.7 明确不做（现阶段）
+
+- 把 TalkSage 做成多用户 STT 服务器；拆 `talksage-protocol` / 六个 Tokio task
+- AlignAtt / token 级 CommitPolicy
+- 有界队列铺到 VAD→ASR / 分析 / UI
+- 版本化 Delta + 序号 resync（阶段 4，按需）
+

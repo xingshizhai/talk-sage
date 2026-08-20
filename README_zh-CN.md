@@ -185,8 +185,7 @@ cd web && npx vitest run       # 前端 27 用例
 
 ## 文档
 
-- [architecture-v2.md](docs/architecture-v2.md) — v2 设计：双载体、延迟预算、快慢路径
-- [architecture-optimization.md](docs/architecture-optimization.md) — 下一阶段架构：共享应用服务、会话运行边界、采样时钟；吸收 WhisperLiveKit 的边界，不照搬其服务端形态
+- [architecture-v2.md](docs/architecture-v2.md) — v2 设计：双载体、共享服务、采样时钟、有界采集
 - [BUILDING.md](docs/BUILDING.md) — 编译与打包指南
 - [RECORDING.md](docs/RECORDING.md) — 录音/裁剪/回归闭环
 - [LOGGING.md](docs/LOGGING.md) — 结构化日志与排障

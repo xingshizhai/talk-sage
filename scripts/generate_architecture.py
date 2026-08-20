@@ -84,7 +84,7 @@ def section_box(x, y, w, h, title, bg=C_PANEL, border=C_BORDER, title_color=C_ME
 # ═══════════ Title ═══════════
 ax.text(10, 11.7, "拓思者 (TalkSage) Architecture — AI 会议助理", ha="center", va="center",
         fontsize=15, color=C_TEXT, fontweight="bold", family="sans-serif")
-ax.text(10, 11.3, "本地实时转写 · 说话人识别 · 会议智能分析 · 录音闭环 · 双载体（Tauri / headless）",
+ax.text(10, 11.3, "本地实时转写 · TalkSageService 统一入口 · 采样时钟 · 有界采集 · 双载体（Tauri / headless）",
         ha="center", va="center", fontsize=7, color=C_TEXTDIM, family="sans-serif")
 
 # ═══════════ Left: Clients ═══════════
@@ -97,21 +97,21 @@ box(0.3, 7.3, 3.2, 0.5, "麦克风电平 · 噪音电平阈值 · 声音标识",
 box(0.3, 6.5, 3.2, 0.5, "系统托盘 / 菜单栏（窗口恢复）", color=C_BRIEF, fontsize=6.5)
 
 # ═══════════ Centre: Adapter / Event bus ═══════════
-section_box(4.0, 5.0, 3.9, 5.8, "Adapter / DomainEvent 总线", border=C_CLIENT, bg=C_PANEL2)
-box(4.3, 9.9, 3.3, 0.6, "Commands: start/stop · set_noise_level\n声纹 · 会话 · 回放", color=C_CLIENT, fontsize=6, bold=True)
-box(4.3, 9.0, 3.3, 0.6, "DomainEvent（serde tag）\nsegment/term/translation/key_point\nbrief/status/level/session_stats", color=C_TERM, fontsize=5.5)
-box(4.3, 7.4, 3.3, 1.0, "RuntimeParams（实时可调）\n噪音电平阈值 → pipeline", color=C_BRIEF, fontsize=6)
-box(4.3, 6.2, 3.3, 0.8, "SessionStore（SQLite）\n段+统计+质量 meta", color=C_LIVE, fontsize=6)
+section_box(4.0, 5.0, 3.9, 5.8, "TalkSageService / DomainEvent", border=C_CLIENT, bg=C_PANEL2)
+box(4.3, 9.9, 3.3, 0.6, "start / finish / import\n（适配器不装配管道）", color=C_CLIENT, fontsize=6, bold=True)
+box(4.3, 9.0, 3.3, 0.6, "DomainEvent + Snapshot\nsegment revision / samples\nterm / translation / stats", color=C_TERM, fontsize=5.5)
+box(4.3, 7.4, 3.3, 1.0, "SessionRuntime\nTranscriptState + AudioClock", color=C_BRIEF, fontsize=6)
+box(4.3, 6.2, 3.3, 0.8, "SessionStore（SQLite）\n只写 committed", color=C_LIVE, fontsize=6)
 box(4.3, 5.4, 3.3, 0.5, "Recordings（wav 回放）", color=C_LIVE, fontsize=6)
 
 # ═══════════ Right: Pipeline ═══════════
 section_box(8.2, 4.6, 11.6, 6.8, "talksage-pipeline（实时管道 · 每流独立）", border=C_LIVE, bg="#10181a")
 
 # 上行：音频链路
-box(8.5, 9.8, 2.0, 0.8, "AudioHub\nmic (cpal) / loopback", color=C_LIVE, bg=C_BOX_BG3, fontsize=6.5, bold=True)
+box(8.5, 9.8, 2.0, 0.8, "CaptureTx(32)\nmic / loopback", color=C_LIVE, bg=C_BOX_BG3, fontsize=6.5, bold=True)
 box(10.9, 9.8, 2.0, 0.8, "Preprocessor\n高通 · 噪声门", color=C_LIVE, bg=C_BOX_BG3, fontsize=6.5)
 box(13.3, 9.8, 2.0, 0.8, "VAD\nsilero 分段", color=C_LIVE, bg=C_BOX_BG3, fontsize=6.5)
-box(15.7, 9.8, 2.4, 0.8, "Streaming ASR\nsherpa · 引擎池常驻", color=C_ME, bg=C_BOX_BG, fontsize=6.5, bold=True)
+box(15.7, 9.8, 2.4, 0.8, "SegmentEngine\n流式 / 离线段级 · 池", color=C_ME, bg=C_BOX_BG, fontsize=6.5, bold=True)
 arrow(10.5, 10.2, 10.9, 10.2, color=C_TEXTDIM)
 arrow(12.9, 10.2, 13.3, 10.2, color=C_TEXTDIM)
 arrow(15.3, 10.2, 15.7, 10.2, color=C_TEXTDIM)
@@ -146,7 +146,7 @@ arrow(3.7, 9.0, 4.0, 9.0, color=C_ME, lw=2)
 ax.text(3.75, 9.25, "invoke / WS", fontsize=5.5, color=C_ME, family=["DejaVu Sans Mono", "Microsoft YaHei"])
 # Adapter → Pipeline
 arrow(7.9, 9.0, 8.2, 9.0, color=C_LIVE, lw=2)
-ax.text(7.92, 9.3, "start_listen / cfg", fontsize=5.5, color=C_LIVE, family=["DejaVu Sans Mono", "Microsoft YaHei"])
+ax.text(7.92, 9.3, "Service.start", fontsize=5.5, color=C_LIVE, family=["DejaVu Sans Mono", "Microsoft YaHei"])
 # Pipeline → Adapter (events)
 arrow(8.2, 7.2, 7.9, 7.2, color=C_TERM, lw=2)
 ax.text(7.92, 7.5, "DomainEvent", fontsize=5.5, color=C_TERM, family=["DejaVu Sans Mono", "Microsoft YaHei"])
@@ -158,8 +158,8 @@ arrow(6.0, 7.4, 6.0, 4.8, color=C_BRIEF, lw=1.4, style="<->")
 # Legend
 ax.text(0.3, 5.2, "数据流:", fontsize=7, color=C_TEXT, fontweight="bold", family=["DejaVu Sans Mono", "Microsoft YaHei"])
 for i, (label, color) in enumerate([
-    ("控制（invoke / WS / start_listen）", C_ME),
-    ("音频（PCM → VAD → ASR）", C_LIVE),
+    ("控制（invoke / WS / TalkSageService）", C_ME),
+    ("音频（有界队列 → VAD → ASR）", C_LIVE),
     ("事件（DomainEvent 推送）", C_TERM),
     ("运行期调节（RuntimeParams）", C_BRIEF),
 ]):

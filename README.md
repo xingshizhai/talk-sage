@@ -183,8 +183,7 @@ Real-model integration tests cover: Chinese/English ASR recognition, dual-stream
 
 ## Documentation
 
-- [architecture-v2.md](docs/architecture-v2.md) — v2 design: dual carriers, latency budget, fast/slow paths
-- [architecture-optimization.md](docs/architecture-optimization.md) — next-step architecture: shared application service, session runtime, sample clock; borrows WhisperLiveKit boundaries, not its server shape
+- [architecture-v2.md](docs/architecture-v2.md) — v2 design: dual carriers, shared service, sample clock, bounded capture
 - [BUILDING.md](docs/BUILDING.md) — build & packaging guide
 - [RECORDING.md](docs/RECORDING.md) — recording / trim / regression loop
 - [LOGGING.md](docs/LOGGING.md) — structured logging & debugging
