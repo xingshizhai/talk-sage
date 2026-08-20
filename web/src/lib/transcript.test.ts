@@ -50,6 +50,20 @@ describe("TranscriptAccumulator", () => {
     expect(lines[1]).toMatchObject({ speakerLabel: "我", text: "好的，明白。", isPartial: false });
   });
 
+  it("双流 partial 各自独立行：同一时刻两条流的增量不互相覆盖", () => {
+    const acc = new TranscriptAccumulator();
+    acc.push(seg("我", "我们确认下周一", true));
+    acc.push(seg("客户", "We need NPI", true));
+    acc.push(seg("我", "我们确认下周一交付", true));
+    acc.push(seg("客户", "We need NPI samples", true));
+    const lines = acc.getLines();
+    // 两条流 partial 应各占一行（修复前：全局 lastPartialKey 会让它们互相覆盖同一行）
+    expect(lines).toHaveLength(2);
+    expect(lines.find((l) => l.speakerLabel === "我")?.text).toBe("我们确认下周一交付");
+    expect(lines.find((l) => l.speakerLabel === "客户")?.text).toBe("We need NPI samples");
+    expect(lines.every((l) => l.isPartial)).toBe(true);
+  });
+
   it("每句 final 后重新开始 partial 会新起一行", () => {
     const acc = new TranscriptAccumulator();
     acc.push(seg("我", "第一句", true));

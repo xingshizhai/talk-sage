@@ -23,7 +23,8 @@ export interface SegmentEvent {
 /** 转写行聚合器：增量处理 segment 事件，输出稳定的行列表。 */
 export class TranscriptAccumulator {
   private lines: TranscriptLine[] = [];
-  private lastPartialKey: number | null = null;
+  /** 每个说话人当前未完成（partial）行的 key——双流时"我"与"客户"的增量互不覆盖。 */
+  private partialKeyBySpeaker = new Map<string, number>();
   private nextKey = 0;
 
   /** 当前行列表（只读视图）。 */
@@ -35,27 +36,28 @@ export class TranscriptAccumulator {
   push(seg: SegmentEvent): void {
     const tsMs = seg.ts_ms ?? Date.now();
     if (seg.is_partial) {
-      if (this.lastPartialKey !== null) {
-        // 更新未完成行
+      const key = this.partialKeyBySpeaker.get(seg.speaker_label);
+      if (key !== undefined) {
+        // 更新该说话人的未完成行
         this.lines = this.lines.map((l) =>
-          l.key === this.lastPartialKey ? { ...l, text: seg.text, isPartial: true, tsMs } : l,
+          l.key === key ? { ...l, text: seg.text, isPartial: true, tsMs } : l,
         );
       } else {
-        // 新起一行
-        const key = this.nextKey++;
-        this.lastPartialKey = key;
-        this.lines = [...this.lines, { key, speakerLabel: seg.speaker_label, text: seg.text, isPartial: true, tsMs }];
+        // 该说话人新起一行（其他说话人的未完成行不受影响）
+        const k = this.nextKey++;
+        this.partialKeyBySpeaker.set(seg.speaker_label, k);
+        this.lines = [...this.lines, { key: k, speakerLabel: seg.speaker_label, text: seg.text, isPartial: true, tsMs }];
       }
     } else {
-      if (this.lastPartialKey !== null) {
-        // 固化未完成行
-        const key = this.lastPartialKey;
-        this.lastPartialKey = null;
+      const key = this.partialKeyBySpeaker.get(seg.speaker_label);
+      if (key !== undefined) {
+        // 固化该说话人的未完成行
+        this.partialKeyBySpeaker.delete(seg.speaker_label);
         this.lines = this.lines.map((l) => (l.key === key ? { ...l, text: seg.text, isPartial: false, tsMs } : l));
       } else {
         // 直接新增一行
-        const key = this.nextKey++;
-        this.lines = [...this.lines, { key, speakerLabel: seg.speaker_label, text: seg.text, isPartial: false, tsMs }];
+        const k = this.nextKey++;
+        this.lines = [...this.lines, { key: k, speakerLabel: seg.speaker_label, text: seg.text, isPartial: false, tsMs }];
       }
     }
   }
