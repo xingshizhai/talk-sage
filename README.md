@@ -178,6 +178,8 @@ Real-model integration tests cover: Chinese/English ASR recognition, dual-stream
 - [RECORDING.md](docs/RECORDING.md) — recording / trim / regression loop
 - [LOGGING.md](docs/LOGGING.md) — structured logging & debugging
 - [testing.md](docs/testing.md) — automated testing strategy
+- [reference-whisperlivekit.md](docs/reference-whisperlivekit.md) — reference project: WhisperLiveKit study (engine pool / benchmark / dual carriers)
+- [reference-callmd.md](docs/reference-callmd.md) — reference project: Call.md study (conversation metrics / live nudges / trio summary / webhooks)
 
 ## Repository layout
 
