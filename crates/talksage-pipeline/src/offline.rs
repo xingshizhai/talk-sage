@@ -71,6 +71,7 @@ pub fn transcribe_file(
         runtime: Arc::new(RuntimeParams::default()),
         speaker: None,
         engine_pool: pool.cloned(),
+        min_commit_ms: 0,
     };
 
     let start = Instant::now();

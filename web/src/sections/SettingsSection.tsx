@@ -39,6 +39,7 @@ export default function SettingsSection({
   const [vadPreset, setVadPreset] = useState<string>(config?.audio?.vad?.preset ?? "standard");
   const [denoiseEnabled, setDenoiseEnabled] = useState(config?.audio?.denoise?.enabled ?? false);
   const [highpass, setHighpass] = useState(config?.audio?.denoise?.highpass ?? true);
+  const [minSegmentMs, setMinSegmentMs] = useState<number>(config?.audio?.min_segment_ms ?? 0);
   const [recEnabled, setRecEnabled] = useState(config?.recording?.enabled ?? true);
   const [recDir, setRecDir] = useState<string>(config?.recording?.dir ?? "");
   const [qAutoDetect, setQAutoDetect] = useState(config?.quality?.auto_detect ?? true);
@@ -143,6 +144,7 @@ export default function SettingsSection({
             enabled: denoiseEnabled,
             highpass,
           },
+          min_segment_ms: minSegmentMs,
         },
         recording: {
           enabled: recEnabled,
@@ -246,6 +248,21 @@ export default function SettingsSection({
             <input type="checkbox" checked={highpass} disabled={!denoiseEnabled} onChange={(e) => setHighpass(e.target.checked)} /> 高通滤波（去低频轰鸣/空调声）
           </label>
           <div style={hint}>降噪对弱语音环境有增益；若环境本就安静可关闭以保留细节。</div>
+
+          <h3 style={{ ...groupTitle, marginTop: 10 }}>最短提交时长（噪音短段抑制）</h3>
+          <label style={labelBlock}>
+            短于该时长的 final 段直接丢弃：
+            <input
+              type="number"
+              min={0}
+              step={100}
+              value={minSegmentMs}
+              onChange={(e) => setMinSegmentMs(Math.max(0, Number(e.target.value) || 0))}
+              style={numStyle}
+            />
+            ms（0 = 不限制）
+          </label>
+          <div style={hint}>噪音会话中偶发的"哒/咔"等短段会污染转写与历史；设为 400~800ms 可在不丢正常语句的前提下滤掉它们（下次监听生效）。</div>
         </div>
       )}
 

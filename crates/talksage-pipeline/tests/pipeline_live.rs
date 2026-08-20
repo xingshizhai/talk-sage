@@ -92,6 +92,7 @@ fn zh_file_pipeline(root: &Path, wav: &Path) -> LivePipelineConfig {
         runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
         speaker: None,
         engine_pool: None,
+        min_commit_ms: 0,
     }
 }
 
@@ -251,6 +252,7 @@ fn plugins_emit_term_and_translation_events() {
         runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
         speaker: None,
         engine_pool: None,
+        min_commit_ms: 0,
     };
 
     let evs = run_and_collect(cfg);
@@ -294,4 +296,37 @@ fn recording_saves_wav_files_for_each_stream() {
         f.display()
     );
     let _ = std::fs::remove_dir_all(&rec_dir);
+}
+
+/// 最短提交时长（min_commit_ms）：final 段时长低于阈值的丢弃（噪音短段抑制）。
+/// 测试音频段约 2~3.5s：阈值 60s → 全部丢弃；阈值 0 → 正常提交。
+#[test]
+fn min_commit_ms_suppresses_short_segments() {
+    let Some(root) = model_root() else {
+        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
+        return;
+    };
+    let wav = zh_model_dir(&root).join("0.wav");
+    if !vad_model(&root).is_file() || !wav.is_file() {
+        eprintln!("跳过：模型/VAD/测试音频不完整");
+        return;
+    }
+
+    // 对照组：min_commit_ms=0 → 有 final 段
+    let evs_off = run_and_collect(zh_file_pipeline(&root, &wav));
+    let finals_off = evs_off
+        .iter()
+        .filter(|e| matches!(e, DomainEvent::Segment { is_partial: false, .. }))
+        .count();
+    assert!(finals_off > 0, "对照组应产生 final 段: {evs_off:?}");
+
+    // 实验组：min_commit_ms=60_000（> 任何段时长）→ 全部丢弃
+    let mut cfg = zh_file_pipeline(&root, &wav);
+    cfg.min_commit_ms = 60_000;
+    let evs_on = run_and_collect(cfg);
+    let finals_on = evs_on
+        .iter()
+        .filter(|e| matches!(e, DomainEvent::Segment { is_partial: false, .. }))
+        .count();
+    assert_eq!(finals_on, 0, "应丢弃全部短段: {evs_on:?}");
 }

@@ -110,6 +110,9 @@ pub struct LivePipelineConfig {
     /// ASR 引擎池（Some = 引擎常驻复用，监听热启动；None = 每次新建）。
     /// 参考 WhisperLiveKit 引擎单例设计。
     pub engine_pool: Option<Arc<EnginePool>>,
+    /// 最短提交时长（ms）：final 段时长低于该值的丢弃（噪音短段抑制；
+    /// 0 = 不限制）。对应配置 `audio.min_segment_ms`。
+    pub min_commit_ms: u64,
 }
 
 /// 实时管道：持有组件并在专用线程中运行事件循环。
@@ -298,6 +301,8 @@ struct StreamWorker {
     engine_pool: Option<Arc<EnginePool>>,
     /// 引擎模型目录（归还引擎池用）。
     engine_dir: Option<PathBuf>,
+    /// 最短提交时长（ms）：低于该值的 final 段丢弃（0 = 不限制）。
+    min_commit_ms: u64,
 }
 
 impl StreamWorker {
@@ -313,6 +318,7 @@ impl StreamWorker {
         speaker: Option<speaker::SharedSpeaker>,
         level: Arc<AtomicU32>,
         engine_pool: Option<Arc<EnginePool>>,
+        min_commit_ms: u64,
     ) -> anyhow::Result<Self> {
         let (threshold, min_speech, min_silence, window, max_speech) = vad_cfg.effective();
         log::info!(
@@ -403,6 +409,7 @@ impl StreamWorker {
             engine_pool,
             engine_dir: Some(cfg.model_dir.clone()),
             engine: Some(engine),
+            min_commit_ms,
         })
     }
 
@@ -574,6 +581,16 @@ impl StreamWorker {
             } else {
                 self.seg_samples * 1000 / talksage_audio::TARGET_SAMPLE_RATE as u64
             };
+            // 最短提交时长：短段丢弃（噪音短段抑制，减少无效短段污染转写/历史）
+            if self.min_commit_ms > 0 && duration_ms < self.min_commit_ms {
+                log::info!(
+                    "流[{}] 短段丢弃: 时长={duration_ms}ms < 最短提交={}ms 文本={}",
+                    self.speaker_label,
+                    self.min_commit_ms,
+                    final_text.chars().take(40).collect::<String>(),
+                );
+                return;
+            }
             let rms = if self.seg_samples > 0 {
                 (self.seg_rms_acc / self.seg_samples as f64) as f32
             } else {
@@ -752,6 +769,7 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             shared_speaker.clone(),
             level,
             cfg.engine_pool.clone(),
+            cfg.min_commit_ms,
         )?;
         w.start_input(cfg.chunk_ms)?;
         log::info!(

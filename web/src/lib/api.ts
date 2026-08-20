@@ -30,6 +30,7 @@ export interface AppConfig {
   audio: {
     vad: { preset: "standard" | "sensitive" | "strict"; threshold: number | null };
     denoise: { enabled: boolean; gate_threshold: number; highpass: boolean };
+    min_segment_ms: number | null;
   };
   /** 会议录音（边用边录，形成测试闭环）。 */
   recording: {

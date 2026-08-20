@@ -420,6 +420,7 @@ token = ""
 
 ### 18.5 后续扩展位
 - ~~固定语料转写评测（WER/RTF/延迟）~~ ✅ 已实现：`talksage bench`（crates/talksage-cli，EnginePool 热启动 + core::cer/wer 指标）
+- ~~最小提交时长 / ASR 合并参数~~ ✅ 已实现：`audio.min_segment_ms`（见 §18.7）
 - headless 多会话：ServerState 从单管道 → 会话表（每会话一个 pipeline，共享 EnginePool/SpeakerIdentifier）
 - 免注册说话人分离（sherpa diarization）：与现声纹方案互补
 
@@ -430,3 +431,11 @@ token = ""
 - 实现：与 `talksage bench` 共用 `talksage_pipeline::offline::transcribe_file`（引擎池热启动，同一套 VAD+ASR 管道），转写在 blocking 线程池执行
 - verbose_json 输出段级时间轴（相对音频起点）、RTF、首词延迟
 - 测试：server_api.rs（真实 wav multipart → 文本；非法音频 400；缺 file 400；无鉴权 401）
+
+### 18.7 最小提交时长（噪音短段抑制）
+- 配置：`[audio] min_segment_ms = 400`（ms；0/缺省 = 不限制），桌面设置页「ASR 转写 → 最短提交时长」可调
+- 管道：`LivePipelineConfig.min_commit_ms` → `StreamWorker`，`finish_speech` 中 final 段时长 < 阈值时**丢弃**（不 emit、不计数、不触发插件），日志打 `短段丢弃`
+- 动机：噪音会话中偶发的"哒/咔"短段会污染转写与历史；400~800ms 阈值可在不丢正常语句的前提下滤掉
+- 覆盖：桌面（Tauri start_listen）、headless 监听（server build_pipeline_config）、CLI listen 均读配置；
+  `talksage bench` / OpenAI 转写 API（offline::transcribe_file）固定 `min_commit_ms=0`（评测/API 保持原始输出）
+- 测试：pipeline_live.rs `min_commit_ms_suppresses_short_segments`（60s 阈值 → 0 final；0 阈值 → 有 final）；config `user_file_overrides_defaults` 校验 toml 读取

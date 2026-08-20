@@ -37,6 +37,7 @@
 - **System tray** — Windows: minimizing hides the window into the tray (click the icon to restore); macOS: follows platform conventions with a menu-bar icon that toggles the window
 - **Fixed-corpus benchmark** — `talksage bench` streams through `*.wav` corpora (engine pool warm start, model reused in-process) and reports **CER/WER accuracy + real-time factor (RTF) + first-token latency** for regression testing (borrows WhisperLiveKit's bench)
 - **OpenAI-compatible transcription API** — the headless server exposes `POST /v1/audio/transcriptions` and `GET /v1/models`; existing OpenAI-ecosystem clients (whisper-style tools, curl, openai SDK) can point at this machine for **fully local transcription** (Bearer auth, json/text/verbose_json, any-sample-rate wav auto-resampled)
+- **Short-segment suppression** — `audio.min_segment_ms` (min commit duration, adjustable in Settings) drops final segments shorter than the threshold, so stray "click/pop" blips in noisy sessions no longer pollute transcripts or history
 
 ## Quick Start
 
@@ -120,6 +121,7 @@ curl http://127.0.0.1:8080/v1/audio/transcriptions \
 | Import audio offline | `talksage import audio.wav` |
 | Doctor / diagnostics | `talksage doctor` |
 | Fixed-corpus benchmark | `talksage bench [--dir corpus] [--engine paraformer-zh\|zipformer-en] [--limit N]` (CER/WER, RTF, first-token latency) |
+| Short-segment suppression | Settings → ASR → 最短提交时长 (ms, 0 = off); or `[audio] min_segment_ms` in config |
 
 ### The recording → trim → replay loop
 

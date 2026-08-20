@@ -401,6 +401,7 @@ fn cmd_listen(
         runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::with_noise_level(noise_level)),
         speaker: build_speaker_config(&mgr),
         engine_pool: None,
+        min_commit_ms: snapshot.audio.min_segment_ms.unwrap_or(0),
     };
 
     let stop_after = seconds;
@@ -633,6 +634,7 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
         runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
         speaker: None,
         engine_pool: None,
+        min_commit_ms: 0,
     };
 
     // 收集 final 段

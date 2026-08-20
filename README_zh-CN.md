@@ -37,6 +37,7 @@
 - **系统托盘**：Windows 最小化即隐藏到右下角托盘（点击图标恢复）；macOS 遵循系统惯例，菜单栏常驻图标可快速显示/隐藏窗口
 - **固定语料评测**：`talksage bench` 对 `*.wav` 语料逐个跑流式转写（引擎池热启动，进程内复用模型），输出 **CER/WER 准确率 + 实时率 RTF + 首词延迟**，供模型/参数回归对比（借鉴 WhisperLiveKit bench）
 - **OpenAI 兼容转写 API**：headless 服务提供 `POST /v1/audio/transcriptions` 与 `GET /v1/models`，既有 OpenAI 生态客户端/脚本（whisper 类工具、curl、openai SDK）可直接指向本机做**本地转写**（Bearer 鉴权，json/text/verbose_json，任意采样率 wav 自动重采样）
+- **噪音短段抑制**：`audio.min_segment_ms` 最短提交时长（设置页可调），final 段时长低于阈值的直接丢弃——噪音会话中偶发的"哒/咔"短段不再污染转写与历史
 
 ## 快速开始
 
@@ -120,6 +121,7 @@ curl http://127.0.0.1:8080/v1/audio/transcriptions \
 | 离线导入 | `talksage import audio.wav` |
 | 环境诊断 | `talksage doctor` |
 | 固定语料评测 | `talksage bench [--dir 语料目录] [--engine paraformer-zh\|zipformer-en] [--limit N]`（输出 CER/WER、RTF、首词延迟） |
+| 噪音短段抑制 | 设置 → ASR 转写 → 最短提交时长（ms，0=不限制）；或配置 `[audio] min_segment_ms` |
 
 ### 录音 → 裁剪 → 回放闭环
 

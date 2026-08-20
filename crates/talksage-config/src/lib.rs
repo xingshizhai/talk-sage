@@ -120,6 +120,9 @@ pub struct AudioConfig {
     pub ducking: DuckingConfig,
     pub vad: VadConfig,
     pub denoise: DenoiseConfig,
+    /// 最短提交时长（ms）：final 段时长低于该值的丢弃（噪音短段抑制，
+    /// 减少"无效短段"污染转写/历史）；None/0 = 不限制。
+    pub min_segment_ms: Option<u64>,
 }
 
 impl Default for AudioConfig {
@@ -130,6 +133,7 @@ impl Default for AudioConfig {
             ducking: DuckingConfig::default(),
             vad: VadConfig::default(),
             denoise: DenoiseConfig::default(),
+            min_segment_ms: None,
         }
     }
 }
@@ -567,6 +571,7 @@ fn merge_config(default: Config, user: Config) -> Config {
                 highpass: user.audio.denoise.highpass,
                 highpass_cutoff_hz: user.audio.denoise.highpass_cutoff_hz,
             },
+            min_segment_ms: user.audio.min_segment_ms.or(default.audio.min_segment_ms),
         },
         llm: LlmConfig {
             default: take_or(user.llm.default, default.llm.default),
@@ -672,6 +677,9 @@ backend = "cuda"
 [server]
 enabled = true
 port = 9090
+
+[audio]
+min_segment_ms = 600
 "#,
         )
         .unwrap();
@@ -680,6 +688,8 @@ port = 9090
         assert_eq!(c.asr.backend, "cuda");
         assert!(c.server.enabled);
         assert_eq!(c.server.port, 9090);
+        // 最短提交时长（噪音短段抑制）
+        assert_eq!(c.audio.min_segment_ms, Some(600));
         // 未覆盖字段保持默认
         assert_eq!(c.asr.user_engine, "paraformer-zh");
         std::fs::remove_dir_all(&dir).ok();

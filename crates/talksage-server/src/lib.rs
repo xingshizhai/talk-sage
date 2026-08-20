@@ -258,6 +258,14 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
                 c.audio.denoise.highpass = h;
             }
         }
+        // 最短提交时长（ms）：0/null = 不限制
+        if let Some(m) = audio.get("min_segment_ms") {
+            if let Some(v) = m.as_u64() {
+                c.audio.min_segment_ms = if v == 0 { None } else { Some(v) };
+            } else if m.is_null() {
+                c.audio.min_segment_ms = None;
+            }
+        }
     }
 }
 
@@ -791,6 +799,8 @@ fn build_pipeline_config(config: &ConfigManager, engine_pool: Option<Arc<EngineP
             }
         },
         engine_pool,
+        // 最短提交时长：短段丢弃（噪音短段抑制）
+        min_commit_ms: snapshot.audio.min_segment_ms.unwrap_or(0),
     })
 }
 
