@@ -34,7 +34,14 @@ fn model_root() -> Option<PathBuf> {
         }
     }
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for cand in [here.join("../../models"), PathBuf::from("models")] {
+    // 候选列表与 pipeline_live.rs 保持一致：否则换个工作目录跑时，
+    // 本测试会静默跳过而其余测试照跑 —— 安全网失效且无人察觉。
+    for cand in [
+        here.join("../../models"),
+        here.join("../../../models"),
+        PathBuf::from("models"),
+        PathBuf::from("../models"),
+    ] {
         if cand.is_dir() {
             return Some(cand);
         }
@@ -105,6 +112,11 @@ fn run_and_collect(cfg: LivePipelineConfig) -> Vec<DomainEvent> {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+    // 超时必须显式报错：否则会拿一份不完整的事件列表去比 golden，
+    // 失败信息变成「事件序列与 golden 不一致」，把「管道卡住」误报成
+    // 「重构改了语义」。
+    let timed_out = Instant::now() > deadline;
+    assert!(!timed_out, "管道在 150s 内未到达 Idle，事件序列不完整，拒绝与 golden 比对");
     assert!(runtime.stop_with_timeout(Duration::from_secs(5)), "管道应在时限内结束");
     let result = events.lock().unwrap().clone();
     result
@@ -140,9 +152,16 @@ fn golden_path(name: &str) -> PathBuf {
 }
 
 /// 与 golden 比对；设 TALKSAGE_UPDATE_GOLDEN=1 时改为写入。
+///
+/// 只认 1/true，与 TALKSAGE_REQUIRE_MODELS 的判定一致。用 `is_ok()` 会让
+/// `TALKSAGE_UPDATE_GOLDEN=0`（本意是关闭）反而改写 golden —— 那正是这个
+/// 测试要防的「回归被静默吞掉」。
 fn assert_golden(name: &str, actual: &str) {
     let path = golden_path(name);
-    if std::env::var("TALKSAGE_UPDATE_GOLDEN").is_ok() {
+    if matches!(
+        std::env::var("TALKSAGE_UPDATE_GOLDEN").ok().as_deref(),
+        Some("1") | Some("true")
+    ) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, actual).unwrap();
         eprintln!("已更新 golden: {}", path.display());
