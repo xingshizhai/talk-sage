@@ -175,6 +175,20 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
                 .collect();
         }
     }
+    // 场景模式
+    if let Some(scene) = updates.get("scene") {
+        if let Some(m) = scene.get("mode").and_then(|v| v.as_str()) {
+            c.scene.mode = match m {
+                "life" => talksage_config::SceneMode::Life,
+                "talk" => talksage_config::SceneMode::Talk,
+                "custom" => talksage_config::SceneMode::Custom,
+                _ => talksage_config::SceneMode::Meeting,
+            };
+        }
+        if let Some(cu) = scene.get("custom") {
+            talksage_config::apply_scene_params(&mut c.scene.custom, cu);
+        }
+    }
     if let Some(rec) = updates.get("recording") {
         if let Some(e) = rec.get("enabled").and_then(|v| v.as_bool()) {
             c.recording.enabled = e;
@@ -237,8 +251,10 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
     }
 
     let model_dir = resolve_models_dir();
-    let user_engine = EngineKind::from_name(&state.config.snapshot().asr.user_engine)
-        .unwrap_or(EngineKind::ParaformerZh);
+    let snapshot = state.config.snapshot();
+    // 场景模式：有效参数（自定义 = custom，其他 = 内置模板）
+    let scene = snapshot.scene.effective();
+    let user_engine = EngineKind::from_name(&scene.user_engine).unwrap_or(EngineKind::ParaformerZh);
     let vad_model = model_dir
         .join("silero-vad")
         .join("silero_vad.onnx");
@@ -253,8 +269,6 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
         return Err(format!("缺少用户 ASR 模型目录: {}", user_model.display()));
     }
 
-    let snapshot = state.config.snapshot();
-    // 录音目录（配置开启时，监听期间保存原始音频）
     let recording_dir = if snapshot.recording.enabled {
         let dir = snapshot.recording.resolve_dir(state.config.data_dir());
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -266,11 +280,17 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
     } else {
         None
     };
+    // 客户流（场景决定是否启用双流）
+    let client_engine = EngineKind::from_name(&scene.client_engine).unwrap_or(EngineKind::ZipformerEn);
+    let client_model = model_dir.join(match client_engine {
+        EngineKind::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
+        EngineKind::ZipformerEn => "sherpa-onnx-streaming-zipformer-en-2023-06-26",
+    });
     let cfg = LivePipelineConfig {
         vad_model,
         chunk_ms: 100,
-        vad: snapshot.audio.vad.clone(),
-        denoise: snapshot.audio.denoise.clone(),
+        vad: scene.to_vad_config(),
+        denoise: scene.to_denoise_config(),
         asr_threads: 4,
         user: StreamConfig {
             engine_kind: user_engine,
@@ -279,35 +299,31 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
             speaker_id: 0,
             speaker_label: "我".into(),
         },
-        // 客户流：系统回环采集（视频会议中客户语音）+ 英文引擎
-        client: {
-            let client_model = model_dir.join("sherpa-onnx-streaming-zipformer-en-2023-06-26");
-            if client_model.is_dir() {
-                #[cfg(windows)]
-                {
-                    Some(StreamConfig {
-                        engine_kind: EngineKind::ZipformerEn,
-                        model_dir: client_model,
-                        input: AudioInput::Loopback,
-                        speaker_id: 1,
-                        speaker_label: "客户".into(),
-                    })
-                }
-                #[cfg(not(windows))]
-                {
-                    None
-                }
-            } else {
+        // 客户流：系统回环采集（视频会议中客户语音）+ 客户引擎；场景关闭双流时为 None
+        client: if scene.client_enabled && client_model.is_dir() {
+            #[cfg(windows)]
+            {
+                Some(StreamConfig {
+                    engine_kind: client_engine,
+                    model_dir: client_model,
+                    input: AudioInput::Loopback,
+                    speaker_id: 1,
+                    speaker_label: "客户".into(),
+                })
+            }
+            #[cfg(not(windows))]
+            {
                 None
             }
+        } else {
+            None
         },
-        plugins: build_plugins(&state.config),
+        plugins: build_plugins(&state.config, scene.term_enabled, scene.translation_enabled, scene.brief_enabled),
         plugin_ctx: build_plugin_ctx(&state.config),
         recording_dir,
         runtime: Arc::new(talksage_pipeline::RuntimeParams::default()),
-        // 说话人识别：wespeaker 模型 + 已注册的主人声纹
-        speaker: {
-            let model_dir = model_dir.clone();
+        // 说话人识别：场景启用 + wespeaker 模型 + 已注册的主人声纹
+        speaker: if scene.speaker_enabled {
             let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
             if spk_model.is_file() {
                 let owner = talksage_pipeline::speaker::load_owner_embedding(state.config.data_dir());
@@ -319,11 +335,13 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
             } else {
                 None
             }
+        } else {
+            None
         },
         // 引擎池：常驻复用（热启动，参考 WhisperLiveKit 引擎单例）
         engine_pool: Some(state.engine_pool.clone()),
-        // 最短提交时长：短段丢弃（噪音短段抑制）
-        min_commit_ms: snapshot.audio.min_segment_ms.unwrap_or(0),
+        // 最短提交时长：场景参数（噪音短段抑制）
+        min_commit_ms: scene.min_segment_ms,
     };
 
     let mut pipeline = LivePipeline::new(cfg);
@@ -430,11 +448,12 @@ fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let _ = state.sessions.end_session(sid, now);
-        // 质量评估落库（stats + 段文本）
+        // 质量评估落库（stats + 段文本；auto_detect 跟随场景参数）
         let stats = state.session_stats.lock().unwrap().clone();
         let texts = state.session_texts.lock().unwrap().clone();
         if !stats.is_empty() {
-            let params = talksage_session::QualityParams::from_config(&state.config.snapshot().quality);
+            let mut params = talksage_session::QualityParams::from_config(&state.config.snapshot().quality);
+            params.auto_detect = state.config.snapshot().scene.effective().noise_auto_detect;
             let meta = talksage_session::SessionMeta::evaluate(stats, &texts, now, &params);
             if let Err(e) = state.sessions.set_session_meta(sid, &meta) {
                 log::warn!("保存会话元数据失败: {e}");
@@ -686,16 +705,16 @@ fn build_llm(config: &ConfigManager) -> Option<Arc<dyn LLMProvider>> {
 }
 
 /// 构建插件列表（按配置开关）。
-fn build_plugins(config: &ConfigManager) -> Vec<Arc<dyn talksage_plugins::AnalyzerPlugin>> {
+fn build_plugins(config: &ConfigManager, term: bool, translation: bool, brief: bool) -> Vec<Arc<dyn talksage_plugins::AnalyzerPlugin>> {
     let mut plugins: Vec<Arc<dyn talksage_plugins::AnalyzerPlugin>> = Vec::new();
     let plugins_cfg = &config.snapshot().plugins;
-    if plugins_cfg.term_explainer.enabled {
+    if term && plugins_cfg.term_explainer.enabled {
         plugins.push(Arc::new(TermExplainerPlugin::new(plugins_cfg.term_explainer.cooldown_seconds as f64)));
     }
-    if plugins_cfg.translator.enabled {
+    if translation && plugins_cfg.translator.enabled {
         plugins.push(Arc::new(TranslatorPlugin::new()));
     }
-    if plugins_cfg.brief_retriever.enabled {
+    if brief && plugins_cfg.brief_retriever.enabled {
         plugins.push(Arc::new(BriefRetrieverPlugin::new(
             plugins_cfg.brief_retriever.cooldown_seconds as f64,
             0.05,

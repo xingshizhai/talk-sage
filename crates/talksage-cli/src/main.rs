@@ -348,15 +348,17 @@ fn cmd_listen(
             })
     };
     let mut plugins: Vec<std::sync::Arc<dyn talksage_plugins::AnalyzerPlugin>> = Vec::new();
-    if snapshot.plugins.term_explainer.enabled {
+    // 场景模式：有效参数（CLI 的 --engine/--client 仍优先，其余跟随场景）
+    let scene = snapshot.scene.effective();
+    if scene.term_enabled && snapshot.plugins.term_explainer.enabled {
         plugins.push(std::sync::Arc::new(talksage_plugins::term_explainer::TermExplainerPlugin::new(
             snapshot.plugins.term_explainer.cooldown_seconds as f64,
         )));
     }
-    if snapshot.plugins.translator.enabled {
+    if scene.translation_enabled && snapshot.plugins.translator.enabled {
         plugins.push(std::sync::Arc::new(talksage_plugins::translator::TranslatorPlugin::new()));
     }
-    if snapshot.plugins.brief_retriever.enabled && kb.is_some() {
+    if scene.brief_enabled && snapshot.plugins.brief_retriever.enabled && kb.is_some() {
         plugins.push(std::sync::Arc::new(talksage_plugins::brief_retriever::BriefRetrieverPlugin::new(
             snapshot.plugins.brief_retriever.cooldown_seconds as f64,
             0.05,
@@ -384,8 +386,8 @@ fn cmd_listen(
     let cfg = LivePipelineConfig {
         vad_model,
         chunk_ms: 100,
-        vad: snapshot.audio.vad.clone(),
-        denoise: snapshot.audio.denoise.clone(),
+        vad: scene.to_vad_config(),
+        denoise: scene.to_denoise_config(),
         asr_threads: 4,
         user: StreamConfig {
             engine_kind: kind,
@@ -399,9 +401,9 @@ fn cmd_listen(
         plugin_ctx,
         recording_dir,
         runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::with_noise_level(noise_level)),
-        speaker: build_speaker_config(&mgr),
+        speaker: if scene.speaker_enabled { build_speaker_config(&mgr) } else { None },
         engine_pool: None,
-        min_commit_ms: snapshot.audio.min_segment_ms.unwrap_or(0),
+        min_commit_ms: scene.min_segment_ms,
     };
 
     let stop_after = seconds;

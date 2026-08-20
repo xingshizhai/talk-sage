@@ -283,6 +283,20 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
                 .collect();
         }
     }
+    // 场景模式
+    if let Some(scene) = updates.get("scene") {
+        if let Some(m) = scene.get("mode").and_then(|v| v.as_str()) {
+            c.scene.mode = match m {
+                "life" => talksage_config::SceneMode::Life,
+                "talk" => talksage_config::SceneMode::Talk,
+                "custom" => talksage_config::SceneMode::Custom,
+                _ => talksage_config::SceneMode::Meeting,
+            };
+        }
+        if let Some(cu) = scene.get("custom") {
+            talksage_config::apply_scene_params(&mut c.scene.custom, cu);
+        }
+    }
 }
 
 async fn list_sessions_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
@@ -818,7 +832,10 @@ fn resolve_models_dir() -> Option<PathBuf> {
 
 fn build_pipeline_config(config: &ConfigManager, engine_pool: Option<Arc<EnginePool>>) -> Result<LivePipelineConfig> {
     let model_dir = resolve_models_dir().ok_or_else(|| anyhow!("未找到 models/ 目录"))?;
-    let user_engine = EngineKind::from_name(&config.snapshot().asr.user_engine).unwrap_or(EngineKind::ParaformerZh);
+    // 场景模式：有效参数（自定义 = custom，其他 = 内置模板）
+    let snapshot = config.snapshot();
+    let scene = snapshot.scene.effective();
+    let user_engine = EngineKind::from_name(&scene.user_engine).unwrap_or(EngineKind::ParaformerZh);
     let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
     let user_model = model_dir.join(match user_engine {
         EngineKind::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
@@ -831,7 +848,6 @@ fn build_pipeline_config(config: &ConfigManager, engine_pool: Option<Arc<EngineP
         return Err(anyhow!("缺少 ASR 模型目录: {}", user_model.display()));
     }
     // 插件装配
-    let snapshot = config.snapshot();
     let llm = build_llm(config);
     let kb = {
         let kb_cfg = &snapshot.knowledge_base;
@@ -848,20 +864,37 @@ fn build_pipeline_config(config: &ConfigManager, engine_pool: Option<Arc<EngineP
         }
     };
     let mut plugins: Vec<Arc<dyn talksage_plugins::AnalyzerPlugin>> = Vec::new();
-    if snapshot.plugins.term_explainer.enabled {
+    if scene.term_enabled && snapshot.plugins.term_explainer.enabled {
         plugins.push(Arc::new(TermExplainerPlugin::new(snapshot.plugins.term_explainer.cooldown_seconds as f64)));
     }
-    if snapshot.plugins.translator.enabled {
+    if scene.translation_enabled && snapshot.plugins.translator.enabled {
         plugins.push(Arc::new(TranslatorPlugin::new()));
     }
-    if snapshot.plugins.brief_retriever.enabled && kb.is_some() {
+    if scene.brief_enabled && snapshot.plugins.brief_retriever.enabled && kb.is_some() {
         plugins.push(Arc::new(BriefRetrieverPlugin::new(snapshot.plugins.brief_retriever.cooldown_seconds as f64, 0.05)));
     }
+    // 客户流（场景决定；headless 音频在服务端本机，回环可后续接入）
+    let client_engine = EngineKind::from_name(&scene.client_engine).unwrap_or(EngineKind::ZipformerEn);
+    let client_model = model_dir.join(match client_engine {
+        EngineKind::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
+        EngineKind::ZipformerEn => "sherpa-onnx-streaming-zipformer-en-2023-06-26",
+    });
+    let client = if scene.client_enabled && client_model.is_dir() {
+        Some(StreamConfig {
+            engine_kind: client_engine,
+            model_dir: client_model,
+            input: AudioInput::Mic(None), // headless：客户流暂与用户流同设备（回环后续接入）
+            speaker_id: 1,
+            speaker_label: "客户".into(),
+        })
+    } else {
+        None
+    };
     Ok(LivePipelineConfig {
         vad_model,
         chunk_ms: 100,
-        vad: snapshot.audio.vad.clone(),
-        denoise: snapshot.audio.denoise.clone(),
+        vad: scene.to_vad_config(),
+        denoise: scene.to_denoise_config(),
         asr_threads: 4,
         user: StreamConfig {
             engine_kind: user_engine,
@@ -870,7 +903,7 @@ fn build_pipeline_config(config: &ConfigManager, engine_pool: Option<Arc<EngineP
             speaker_id: 0,
             speaker_label: "我".into(),
         },
-        client: None, // 回环接入后续（headless 场景音频在服务端本机）
+        client,
         plugins,
         plugin_ctx: PluginContext { kb, llm },
         // headless 服务端也支持录音（默认随配置）
@@ -882,8 +915,8 @@ fn build_pipeline_config(config: &ConfigManager, engine_pool: Option<Arc<EngineP
             None
         },
         runtime: Arc::new(talksage_pipeline::RuntimeParams::default()),
-        // 说话人识别（headless 同启用）
-        speaker: {
+        // 说话人识别（场景启用 + headless 同启用）
+        speaker: if scene.speaker_enabled {
             let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
             if spk_model.is_file() {
                 let owner = talksage_pipeline::speaker::load_owner_embedding(config.data_dir());
@@ -895,10 +928,12 @@ fn build_pipeline_config(config: &ConfigManager, engine_pool: Option<Arc<EngineP
             } else {
                 None
             }
+        } else {
+            None
         },
         engine_pool,
-        // 最短提交时长：短段丢弃（噪音短段抑制）
-        min_commit_ms: snapshot.audio.min_segment_ms.unwrap_or(0),
+        // 最短提交时长：场景参数（噪音短段抑制）
+        min_commit_ms: scene.min_segment_ms,
     })
 }
 

@@ -2,15 +2,16 @@
 // 保存写入 talksage.toml。
 
 import { useEffect, useState } from "react";
-import type { AppConfig } from "../lib/api";
+import type { AppConfig, SceneParams } from "../lib/api";
 import { getApi } from "../lib/transport";
 
 const api = getApi();
 const PROVIDERS = ["deepseek", "kimi", "minimax", "groq", "ollama", "claude"];
 
-type SettingsTab = "asr" | "plugins" | "recording" | "quality" | "voice" | "llm" | "webhooks";
+type SettingsTab = "scene" | "asr" | "plugins" | "recording" | "quality" | "voice" | "llm" | "webhooks";
 
 const TABS: { key: SettingsTab; label: string; desc: string }[] = [
+  { key: "scene", label: "场景模式", desc: "生活 / 会议 / 会谈 / 自定义" },
   { key: "asr", label: "ASR 转写", desc: "引擎 / 灵敏度 / 降噪" },
   { key: "plugins", label: "插件分析", desc: "术语 / 翻译 / 简报 / 知识库" },
   { key: "recording", label: "会议录音", desc: "录音开关与目录" },
@@ -28,6 +29,26 @@ export default function SettingsSection({
   onSave: (updates: Record<string, unknown>) => Promise<void>;
 }) {
   const [tab, setTab] = useState<SettingsTab>("asr");
+  // 场景模式
+  const [sceneMode, setSceneMode] = useState<"life" | "meeting" | "talk" | "custom">(config?.scene?.mode ?? "meeting");
+  const [sceneCustom, setSceneCustom] = useState<SceneParams>(() => ({
+    vad_preset: config?.scene?.custom?.vad_preset ?? "standard",
+    vad_threshold: config?.scene?.custom?.vad_threshold ?? null,
+    vad_min_speech_ms: config?.scene?.custom?.vad_min_speech_ms ?? null,
+    vad_min_silence_ms: config?.scene?.custom?.vad_min_silence_ms ?? null,
+    vad_max_speech_ms: config?.scene?.custom?.vad_max_speech_ms ?? null,
+    denoise_enabled: config?.scene?.custom?.denoise_enabled ?? false,
+    denoise_gate: config?.scene?.custom?.denoise_gate ?? 0.008,
+    min_segment_ms: config?.scene?.custom?.min_segment_ms ?? 0,
+    user_engine: config?.scene?.custom?.user_engine ?? "paraformer-zh",
+    client_enabled: config?.scene?.custom?.client_enabled ?? true,
+    client_engine: config?.scene?.custom?.client_engine ?? "zipformer-en",
+    term_enabled: config?.scene?.custom?.term_enabled ?? true,
+    translation_enabled: config?.scene?.custom?.translation_enabled ?? true,
+    brief_enabled: config?.scene?.custom?.brief_enabled ?? true,
+    speaker_enabled: config?.scene?.custom?.speaker_enabled ?? true,
+    noise_auto_detect: config?.scene?.custom?.noise_auto_detect ?? true,
+  }));
   const [defaultProvider, setDefaultProvider] = useState(config?.llm?.default ?? "deepseek");
   const [apiKey, setApiKey] = useState<string>("");
   const [termEnabled, setTermEnabled] = useState(config?.plugins?.term_explainer?.enabled ?? true);
@@ -165,6 +186,10 @@ export default function SettingsSection({
           enabled: whEnabled,
           urls: whUrls.split("\n").map((s) => s.trim()).filter((s) => s.length > 0),
         },
+        scene: {
+          mode: sceneMode,
+          custom: sceneCustom,
+        },
       };
       await onSave(updates);
       setMessage("已保存（部分设置重启后生效）");
@@ -220,6 +245,142 @@ export default function SettingsSection({
           </button>
         ))}
       </div>
+
+      {/* ── 场景模式 ── */}
+      {tab === "scene" && (
+        <div>
+          <h3 style={groupTitle}>场景模式</h3>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+            {(
+              [
+                { key: "life", label: "生活", desc: "日常对话：灵敏 VAD 抓短句弱语音，单流，关分析插件" },
+                { key: "meeting", label: "会议", desc: "正式会议：双流（我+客户），分析插件全开（默认）" },
+                { key: "talk", label: "会谈", desc: "商务洽谈：双流，术语/翻译/简报全开，300ms 短段提交" },
+                { key: "custom", label: "自定义", desc: "使用下方全部参数" },
+              ] as const
+            ).map((m) => (
+              <button
+                key={m.key}
+                onClick={() => setSceneMode(m.key)}
+                title={m.desc}
+                style={{
+                  padding: "6px 14px",
+                  borderRadius: 8,
+                  border: "1px solid var(--border)",
+                  cursor: "pointer",
+                  font: "inherit",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  background: sceneMode === m.key ? "var(--me)" : "var(--surface-2)",
+                  color: sceneMode === m.key ? "#fff" : "var(--text-2)",
+                }}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+
+          {sceneMode !== "custom" ? (
+            <div style={{ background: "var(--surface-2)", borderRadius: 6, padding: 8, fontSize: 11, color: "var(--text-2)", lineHeight: 1.9 }}>
+              {sceneMode === "life" && (
+                <>
+                  <div>· VAD：灵敏（threshold 0.35 / 最小语音 150ms / 段尾静音 300ms）——抓日常短句与弱语音</div>
+                  <div>· 降噪：关闭（弱信号优先）</div>
+                  <div>· 最短提交：不限制（生活短句不丢）</div>
+                  <div>· 单流（仅中文 paraformer）；说话人识别开启；分析插件关闭（省资源）</div>
+                </>
+              )}
+              {sceneMode === "meeting" && (
+                <>
+                  <div>· VAD：标准（threshold 0.5 / 最小语音 250ms / 段尾静音 500ms）</div>
+                  <div>· 降噪：关闭；最短提交：不限制</div>
+                  <div>· 双流：我（中文 paraformer）+ 客户（英文 zipformer，系统回环）</div>
+                  <div>· 术语解释 / 实时翻译 / 简报检索全开；说话人识别开启</div>
+                </>
+              )}
+              {sceneMode === "talk" && (
+                <>
+                  <div>· VAD：标准（threshold 0.5 / 最小语音 250ms / 段尾静音 500ms）</div>
+                  <div>· 降噪：关闭；最短提交：300ms（滤掉谈判中的无效短音）</div>
+                  <div>· 双流：我 + 客户；术语 / 翻译 / 简报全开；说话人识别开启</div>
+                </>
+              )}
+              <div style={{ marginTop: 6, color: "var(--muted)" }}>
+                内置模板只读；选择「自定义」可修改全部参数。参数在下次开始监听时生效。
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <label style={labelBlock}>
+                VAD 灵敏度：
+                <select
+                  value={sceneCustom.vad_preset}
+                  onChange={(e) => setSceneCustom({ ...sceneCustom, vad_preset: e.target.value as SceneParams["vad_preset"] })}
+                  style={inputStyle}
+                >
+                  <option value="standard">标准（平衡灵敏度与抗噪）</option>
+                  <option value="sensitive">灵敏（弱语音/短句，会议室轻声）</option>
+                  <option value="strict">严格（抗背景噪音，长句稳定）</option>
+                </select>
+              </label>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <label>
+                  最小语音 ms：
+                  <input type="number" min={0} step={50} value={sceneCustom.vad_min_speech_ms ?? 250} onChange={(e) => setSceneCustom({ ...sceneCustom, vad_min_speech_ms: Number(e.target.value) || null })} style={numStyle} />
+                </label>
+                <label>
+                  段尾静音 ms：
+                  <input type="number" min={0} step={50} value={sceneCustom.vad_min_silence_ms ?? 500} onChange={(e) => setSceneCustom({ ...sceneCustom, vad_min_silence_ms: Number(e.target.value) || null })} style={numStyle} />
+                </label>
+                <label>
+                  最长语音 ms：
+                  <input type="number" min={1000} step={1000} value={sceneCustom.vad_max_speech_ms ?? 10000} onChange={(e) => setSceneCustom({ ...sceneCustom, vad_max_speech_ms: Number(e.target.value) || null })} style={numStyle} />
+                </label>
+              </div>
+              <label style={labelBlock}>
+                最短提交时长（噪音短段抑制）：
+                <input type="number" min={0} step={100} value={sceneCustom.min_segment_ms} onChange={(e) => setSceneCustom({ ...sceneCustom, min_segment_ms: Math.max(0, Number(e.target.value) || 0) })} style={numStyle} />
+                ms（0 = 不限制）
+              </label>
+              <label style={labelBlock}>
+                <input type="checkbox" checked={sceneCustom.denoise_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, denoise_enabled: e.target.checked })} /> 开启降噪（噪声门 + 高通；弱信号环境慎开）
+              </label>
+              <label style={labelBlock}>
+                我的引擎：
+                <select value={sceneCustom.user_engine} onChange={(e) => setSceneCustom({ ...sceneCustom, user_engine: e.target.value })} style={inputStyle}>
+                  <option value="paraformer-zh">中文 paraformer-zh</option>
+                  <option value="zipformer-en">英文 zipformer-en</option>
+                </select>
+              </label>
+              <label style={labelBlock}>
+                <input type="checkbox" checked={sceneCustom.client_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, client_enabled: e.target.checked })} /> 启用客户流（双流：系统回环 + 客户引擎）
+              </label>
+              <label style={labelBlock}>
+                客户引擎：
+                <select value={sceneCustom.client_engine} onChange={(e) => setSceneCustom({ ...sceneCustom, client_engine: e.target.value })} style={inputStyle}>
+                  <option value="zipformer-en">英文 zipformer-en</option>
+                  <option value="paraformer-zh">中文 paraformer-zh</option>
+                </select>
+              </label>
+              <label style={labelBlock}>
+                <input type="checkbox" checked={sceneCustom.term_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, term_enabled: e.target.checked })} /> 术语解释
+                <span style={{ marginLeft: 12 }}>
+                  <input type="checkbox" checked={sceneCustom.translation_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, translation_enabled: e.target.checked })} /> 实时翻译
+                </span>
+                <span style={{ marginLeft: 12 }}>
+                  <input type="checkbox" checked={sceneCustom.brief_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, brief_enabled: e.target.checked })} /> 简报检索
+                </span>
+              </label>
+              <label style={labelBlock}>
+                <input type="checkbox" checked={sceneCustom.speaker_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, speaker_enabled: e.target.checked })} /> 说话人识别
+                <span style={{ marginLeft: 12 }}>
+                  <input type="checkbox" checked={sceneCustom.noise_auto_detect} onChange={(e) => setSceneCustom({ ...sceneCustom, noise_auto_detect: e.target.checked })} /> 质量评估自动检测背景噪音
+                </span>
+              </label>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── ASR 转写 ── */}
       {tab === "asr" && (

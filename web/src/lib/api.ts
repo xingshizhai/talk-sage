@@ -52,7 +52,32 @@ export interface AppConfig {
     enabled: boolean;
     urls: string[];
   };
+  /** 场景模式：不同场景使用不同参数组合（生活/会议/会谈/自定义）。 */
+  scene: {
+    mode: "life" | "meeting" | "talk" | "custom";
+    custom: SceneParams;
+  };
   [key: string]: unknown;
+}
+
+/** 场景参数集（自定义模式可全量编辑）。 */
+export interface SceneParams {
+  vad_preset: "standard" | "sensitive" | "strict";
+  vad_threshold: number | null;
+  vad_min_speech_ms: number | null;
+  vad_min_silence_ms: number | null;
+  vad_max_speech_ms: number | null;
+  denoise_enabled: boolean;
+  denoise_gate: number;
+  min_segment_ms: number;
+  user_engine: string;
+  client_enabled: boolean;
+  client_engine: string;
+  term_enabled: boolean;
+  translation_enabled: boolean;
+  brief_enabled: boolean;
+  speaker_enabled: boolean;
+  noise_auto_detect: boolean;
 }
 
 /** 领域事件（与 Rust 侧 DomainEvent 对应，tag = type）。 */

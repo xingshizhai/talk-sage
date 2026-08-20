@@ -452,3 +452,11 @@ token = ""
 - 配置：`[webhooks] enabled + urls`（设置页「Webhook」tab，每行一个 URL）；会话结束时（Tauri `stop_listen` / server `stop_listen_api`，后台线程）构建 payload（会议元数据 + 会话指标 + 质量 + 纪要/智能纪要 + 完整转写）推送
 - **Markdown 导出**：`talksage_session::export_markdown` 单文件（概览/指标 → 会议纪要 → 智能纪要 → 转写）；入口 Tauri `export_session_markdown`（写入 `<data_dir>/exports/session-{id}.md`）+ server `GET /api/session/{id}/export`；历史页「导出 Markdown」按钮（blob 下载 + 桌面端显示落盘路径）
 - 测试：core webhook 4 项（URL 校验含云元数据端点拒绝 + 本地 TcpListener 端到端 POST）；session payload/export 单测；server export API 集成测试
+
+### 18.10 场景模式（生活 / 会议 / 会谈 / 自定义）
+- 配置：`[scene] mode = "life"|"meeting"|"talk"|"custom"` + `[scene.custom]` 全量参数
+- `SceneParams`：VAD 预设与覆盖（threshold/最小语音/段尾静音/最长语音）、降噪开关与门限、最短提交时长、用户/客户引擎与双流开关、术语/翻译/简报开关、说话人识别、噪音自动检测
+- 内置模板：`scene_params(mode)`——生活（Sensitive VAD 0.35/0.15s/0.3s、单流、插件关）、会议（Standard、双流、插件全开；= 历史默认，行为不突变）、会谈（Standard、双流、min_segment 300ms）；`SceneConfig::effective()` 自定义模式用 custom，否则用模板
+- 应用：Tauri / server / CLI 的 pipeline 构建统一取 `snapshot.scene.effective()` → `to_vad_config()`/`to_denoise_config()` + 引擎/客户流/插件/说话人开关 + `min_commit_ms`；质量评估 auto_detect 跟随场景
+- 前端：设置页「场景模式」tab（4 模式按钮 + 非自定义只读摘要 + 自定义全量编辑），保存 `scene.{mode,custom}`
+- 测试：config 4 项（会议模板=历史默认、生活/会谈差异、toml roundtrip、custom 持久化）；端到端：mode=life → VAD 日志 preset=Sensitive 生效
