@@ -10,16 +10,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 跨平台编译 + 单元测试。不下载模型：真实模型集成测试在 models/ 缺失时自动跳过，
+  # 由下面的 integration job 负责真正跑它们。
   test:
     name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
-      # 不下载运行期模型：真实模型集成测试在 models/ 缺失时自动跳过
     steps:
       - uses: actions/checkout@v4
 
@@ -51,8 +52,57 @@ jobs:
       - name: Rust build (workspace)
         run: cargo build --workspace
 
-      - name: Rust tests (unit + real-model, auto-skip without models/)
+      - name: Rust tests (unit; model-backed tests skip without models/)
         run: cargo test --workspace
 
       - name: CLI smoke test
         run: cargo run -p talksage-cli -- version
+
+  # 真实模型集成测试。TALKSAGE_REQUIRE_MODELS=1 让缺资源从「静默跳过」变成「失败」，
+  # 否则集成测试会因为跳过而全绿，等于没有守门。
+  integration:
+    name: integration (real models)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      TALKSAGE_MODELS_DIR: ${{ github.workspace }}/models
+      TALKSAGE_REQUIRE_MODELS: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # 模型约 340MB，按下载脚本内容做 key：清单变了才重新拉。
+      - name: Cache models
+        id: cache-models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: talksage-models-${{ hashFiles('scripts/download_models.py') }}
+
+      - name: Download models + test fixtures
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        run: |
+          for g in paraformer-zh zipformer-en silero-vad wespeaker; do
+            python3 scripts/download_models.py "$g"
+          done
+
+      # 集成测试需要 <model_dir>/0.wav 作为输入音频；缺了会被上面的
+      # TALKSAGE_REQUIRE_MODELS 拦成失败，这里提前给出更清楚的报错。
+      - name: Verify fixtures present
+        run: |
+          set -e
+          for f in \
+            models/sherpa-onnx-streaming-paraformer-zh/0.wav \
+            models/sherpa-onnx-streaming-zipformer-en-2023-06-26/0.wav \
+            models/silero-vad/silero_vad.onnx \
+            models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx; do
+            [ -s "$f" ] || { echo "缺少集成测试资源: $f"; exit 1; }
+          done
+
+      - name: Rust tests (models required — skips are failures)
+        run: cargo test --workspace
