@@ -7,6 +7,7 @@
 pub mod brief_retriever;
 pub mod term_explainer;
 pub mod translator;
+pub mod registry;
 
 use std::sync::Arc;
 
