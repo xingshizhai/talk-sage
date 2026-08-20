@@ -36,6 +36,7 @@
 - **双载体**：Tauri 2 桌面应用（IPC）与 headless HTTP/WS 服务（浏览器访问，Token 鉴权）
 - **系统托盘**：Windows 最小化即隐藏到右下角托盘（点击图标恢复）；macOS 遵循系统惯例，菜单栏常驻图标可快速显示/隐藏窗口
 - **固定语料评测**：`talksage bench` 对 `*.wav` 语料逐个跑流式转写（引擎池热启动，进程内复用模型），输出 **CER/WER 准确率 + 实时率 RTF + 首词延迟**，供模型/参数回归对比（借鉴 WhisperLiveKit bench）
+- **OpenAI 兼容转写 API**：headless 服务提供 `POST /v1/audio/transcriptions` 与 `GET /v1/models`，既有 OpenAI 生态客户端/脚本（whisper 类工具、curl、openai SDK）可直接指向本机做**本地转写**（Bearer 鉴权，json/text/verbose_json，任意采样率 wav 自动重采样）
 
 ## 快速开始
 
@@ -100,6 +101,11 @@ talksage serve --host 127.0.0.1 --port 8080
 
 # 固定语料评测（bench-corpus/ 下放 *.wav + 同名 .txt 参考文本）
 talksage bench --dir bench-corpus --engine paraformer-zh
+
+# OpenAI 兼容转写（curl 直接调，等价 whisper API；token 由 TALKSAGE_SERVER_TOKEN 启用）
+curl http://127.0.0.1:8080/v1/audio/transcriptions \
+  -H "Authorization: Bearer $TALKSAGE_SERVER_TOKEN" \
+  -F file=@meeting.wav -F model=paraformer-zh -F response_format=json
 ```
 
 ## 使用指南

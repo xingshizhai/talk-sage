@@ -422,3 +422,11 @@ token = ""
 - ~~固定语料转写评测（WER/RTF/延迟）~~ ✅ 已实现：`talksage bench`（crates/talksage-cli，EnginePool 热启动 + core::cer/wer 指标）
 - headless 多会话：ServerState 从单管道 → 会话表（每会话一个 pipeline，共享 EnginePool/SpeakerIdentifier）
 - 免注册说话人分离（sherpa diarization）：与现声纹方案互补
+
+### 18.6 OpenAI 兼容转写 API（headless，对接既有生态）
+- 路由：`GET /v1/models`（列出 paraformer-zh / zipformer-en）、`POST /v1/audio/transcriptions`
+- 输入：multipart（`file`=PCM wav 任意采样率自动重采样 16k；`model`；`response_format`=json|text|verbose_json；`language` 暂忽略）
+- 鉴权：`Authorization: Bearer <token>` 或 `X-Talksage-Token`（`TALKSAGE_SERVER_TOKEN` 启用）
+- 实现：与 `talksage bench` 共用 `talksage_pipeline::offline::transcribe_file`（引擎池热启动，同一套 VAD+ASR 管道），转写在 blocking 线程池执行
+- verbose_json 输出段级时间轴（相对音频起点）、RTF、首词延迟
+- 测试：server_api.rs（真实 wav multipart → 文本；非法音频 400；缺 file 400；无鉴权 401）

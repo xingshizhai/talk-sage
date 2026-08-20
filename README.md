@@ -36,6 +36,7 @@
 - **Two carriers** — Tauri 2 desktop app (IPC) and a headless HTTP/WS server (browser access, token-protected)
 - **System tray** — Windows: minimizing hides the window into the tray (click the icon to restore); macOS: follows platform conventions with a menu-bar icon that toggles the window
 - **Fixed-corpus benchmark** — `talksage bench` streams through `*.wav` corpora (engine pool warm start, model reused in-process) and reports **CER/WER accuracy + real-time factor (RTF) + first-token latency** for regression testing (borrows WhisperLiveKit's bench)
+- **OpenAI-compatible transcription API** — the headless server exposes `POST /v1/audio/transcriptions` and `GET /v1/models`; existing OpenAI-ecosystem clients (whisper-style tools, curl, openai SDK) can point at this machine for **fully local transcription** (Bearer auth, json/text/verbose_json, any-sample-rate wav auto-resampled)
 
 ## Quick Start
 
@@ -100,6 +101,11 @@ talksage serve --host 127.0.0.1 --port 8080
 
 # Fixed-corpus benchmark (put *.wav + same-name .txt references in bench-corpus/)
 talksage bench --dir bench-corpus --engine paraformer-zh
+
+# OpenAI-compatible transcription via curl (whisper-API style; token via TALKSAGE_SERVER_TOKEN)
+curl http://127.0.0.1:8080/v1/audio/transcriptions \
+  -H "Authorization: Bearer $TALKSAGE_SERVER_TOKEN" \
+  -F file=@meeting.wav -F model=paraformer-zh -F response_format=json
 ```
 
 ## Usage

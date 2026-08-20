@@ -981,8 +981,9 @@ fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode 
             .map(|(_, s)| s.len() as f64 / 16000.0)
             .unwrap_or(0.0);
 
-        match run_bench_pipeline(&pool, wav, kind, &engine_dir, &vad_model, engine) {
-            Ok((text, elapsed_ms, latency_ms)) => {
+        match run_bench_pipeline(&pool, wav, kind, &engine_dir, &vad_model) {
+            Ok(tr) => {
+                let (elapsed_ms, latency_ms) = (tr.elapsed_ms, tr.first_latency_ms);
                 let rtf = if audio_secs > 0.0 { elapsed_ms / 1000.0 / audio_secs } else { 0.0 };
                 total_audio += audio_secs;
                 total_elapsed += elapsed_ms / 1000.0;
@@ -992,9 +993,9 @@ fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode 
                 }
                 let err = reference.as_deref().map(|r| {
                     if kind == EngineKind::ParaformerZh {
-                        talksage_core::cer(r, &text)
+                        talksage_core::cer(r, &tr.text)
                     } else {
-                        talksage_core::wer(r, &text)
+                        talksage_core::wer(r, &tr.text)
                     }
                 });
                 if let Some(e) = err {
@@ -1035,82 +1036,16 @@ fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode 
     ExitCode::SUCCESS
 }
 
-/// 对单个 wav 跑流式转写，返回 (final 文本, 处理耗时 ms, 首词延迟 ms)。
+/// 对单个 wav 跑流式转写（共享 talksage_pipeline::offline::transcribe_file，
+/// 引擎池热启动；与 headless 转写 API 同一条路径）。
 fn run_bench_pipeline(
     pool: &std::sync::Arc<EnginePool>,
     wav: &std::path::Path,
     kind: EngineKind,
     engine_dir: &std::path::Path,
     vad_model: &std::path::Path,
-    _engine_name: &str,
-) -> anyhow::Result<(String, f64, Option<f64>)> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Instant;
-
-    let cfg = LivePipelineConfig {
-        vad_model: vad_model.to_path_buf(),
-        chunk_ms: 100,
-        vad: talksage_config::VadConfig::default(),
-        denoise: talksage_config::DenoiseConfig::default(),
-        asr_threads: 2,
-        user: StreamConfig {
-            engine_kind: kind,
-            model_dir: engine_dir.to_path_buf(),
-            input: AudioInput::File(wav.to_path_buf()),
-            speaker_id: 0,
-            speaker_label: "我".into(),
-        },
-        client: None,
-        plugins: Vec::new(),
-        plugin_ctx: talksage_plugins::PluginContext::new(),
-        recording_dir: None,
-        runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
-        speaker: None,
-        engine_pool: Some(pool.clone()),
-    };
-
-    let start = Instant::now();
-    let done = std::sync::Arc::new(AtomicBool::new(false));
-    let first_latency = std::sync::Arc::new(std::sync::Mutex::new(None::<f64>));
-    let texts = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    {
-        let done = done.clone();
-        let done_sink = done.clone();
-        let first = first_latency.clone();
-        let texts = texts.clone();
-        let start = start;
-        let sink: std::sync::Arc<dyn Fn(DomainEvent) + Send + Sync> = std::sync::Arc::new(move |ev| {
-            match &ev {
-                DomainEvent::Segment { text, is_partial: false, .. } => {
-                    let mut f = first.lock().unwrap();
-                    if f.is_none() {
-                        *f = Some(start.elapsed().as_millis() as f64);
-                    }
-                    drop(f);
-                    let mut t = texts.lock().unwrap();
-                    if !t.is_empty() {
-                        t.push(' ');
-                    }
-                    t.push_str(text.trim());
-                }
-                DomainEvent::Status { stage: talksage_core::StatusStage::Idle, .. } => {
-                    done_sink.store(true, Ordering::SeqCst);
-                }
-                _ => {}
-            }
-        });
-        let mut pipeline = LivePipeline::new(cfg);
-        pipeline.start(sink)?;
-        let deadline = Instant::now() + std::time::Duration::from_secs(300);
-        while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
-        pipeline.stop();
-    }
-    let elapsed = start.elapsed().as_millis() as f64;
-    let text = texts.lock().unwrap().clone();
-    let latency = first_latency.lock().unwrap().clone();
-    Ok((text, elapsed, latency))
+) -> anyhow::Result<talksage_pipeline::offline::FileTranscription> {
+    talksage_pipeline::offline::transcribe_file(Some(pool), kind, engine_dir, vad_model, wav)
 }
 
 fn cmd_doctor() -> ExitCode {

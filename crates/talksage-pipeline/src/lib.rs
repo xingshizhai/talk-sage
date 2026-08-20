@@ -19,6 +19,7 @@ use talksage_config::{DenoiseConfig, VadConfig};
 use talksage_core::{DomainEvent, StatusStage, TranscriptSegment};
 use talksage_plugins::AnalyzerPlugin;
 
+pub mod offline;
 pub mod speaker;
 
 /// 运行期可调参数（监听中可实时修改，无需重启；跨线程共享）。

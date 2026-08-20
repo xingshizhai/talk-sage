@@ -119,6 +119,28 @@ impl HighPass {
     }
 }
 
+/// 线性插值重采样（f32 mono）。源/目标采样率相等时原样返回。
+/// 公开给外部（headless 转写 API 把非 16k 上传音频归一化）。
+pub fn resample_linear(src: &[f32], src_sr: u32, dst_sr: u32) -> Vec<f32> {
+    if src.is_empty() || src_sr == dst_sr {
+        return src.to_vec();
+    }
+    let ratio = src_sr as f64 / dst_sr as f64;
+    let out_len = (src.len() as f64 / ratio) as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let pos = i as f64 * ratio;
+        let idx = pos as usize;
+        if idx + 1 < src.len() {
+            let frac = (pos - idx as f64) as f32;
+            out.push(src[idx] * (1.0 - frac) + src[idx + 1] * frac);
+        } else {
+            out.push(src[idx]);
+        }
+    }
+    out
+}
+
 /// 线性插值重采样器（f32 mono）。
 pub(crate) struct LinearResampler {
     src_sr: u32,
@@ -132,26 +154,7 @@ impl LinearResampler {
 
     /// 把 src 重采样到目标采样率。
     fn process(&mut self, src: &[f32]) -> Vec<f32> {
-        if src.is_empty() {
-            return Vec::new();
-        }
-        if self.src_sr == self.dst_sr {
-            return src.to_vec();
-        }
-        let ratio = self.src_sr as f64 / self.dst_sr as f64;
-        let out_len = (src.len() as f64 / ratio) as usize;
-        let mut out = Vec::with_capacity(out_len);
-        for i in 0..out_len {
-            let pos = i as f64 * ratio;
-            let idx = pos as usize;
-            if idx + 1 < src.len() {
-                let frac = (pos - idx as f64) as f32;
-                out.push(src[idx] * (1.0 - frac) + src[idx + 1] * frac);
-            } else {
-                out.push(src[idx]);
-            }
-        }
-        out
+        resample_linear(src, self.src_sr, self.dst_sr)
     }
 }
 

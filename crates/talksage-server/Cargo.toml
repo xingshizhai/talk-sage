@@ -21,7 +21,7 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sherpa-onnx = "1.13"
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 futures-util = "0.3"

@@ -98,7 +98,7 @@ FFmpeg Decoding → Silero VAD（speech/silence）
 | 建议 | 优先级 | 说明 |
 |---|---|---|
 | 固定语料转写评测（WER/RTF/延迟基准） | 高 | ✅ 已实现 `talksage bench`（见 §四 4） |
-| OpenAI 兼容转写 API（headless） | 中 | 提升服务可用性，对接现有生态 |
+| OpenAI 兼容转写 API（headless） | 中 | ✅ 已实现 `POST /v1/audio/transcriptions` + `GET /v1/models`（见 architecture-v2 §18.6） |
 | 最小提交时长 / ASR 合并参数 | 中 | 减少无效短段（噪音会话场景） |
 | 免注册说话人分离（sherpa diarization） | 低（大项） | 与现声纹方案互补，评估后决定 |
 | RTF/延迟指标入 meta | 低 | 小改动，丰富历史回溯 |

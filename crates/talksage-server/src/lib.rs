@@ -20,7 +20,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
-use talksage_asr::EngineKind;
+use talksage_asr::{EngineKind, EnginePool};
 use talksage_config::ConfigManager;
 use talksage_core::DomainEvent;
 use talksage_llm::{LLMProvider, OpenAICompatProvider};
@@ -42,6 +42,8 @@ pub struct ServerState {
     pub current_session: Arc<Mutex<Option<i64>>>,
     /// 可选鉴权 token（空 = 不鉴权）。
     pub token: String,
+    /// ASR 引擎池（监听 + OpenAI 兼容转写 API 共用，热启动复用）。
+    pub engine_pool: Arc<EnginePool>,
 }
 
 /// 启动 headless 服务（阻塞运行）。
@@ -60,6 +62,7 @@ pub async fn run(host: &str, port: u16, token: &str, web_dist: &PathBuf) -> Resu
         pipeline: Arc::new(Mutex::new(None)),
         current_session: Arc::new(Mutex::new(None)),
         token: token.to_string(),
+        engine_pool: EnginePool::new(),
     };
 
     let app = build_router(state, web_dist);
@@ -93,10 +96,17 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/voiceprint/remove", axum::routing::post(voiceprint_remove_api))
         .route("/recordings/{filename}", axum::routing::get(get_recording_api))
         .route("/ws", get(ws_handler))
-        .with_state(state);
+        .with_state(state.clone());
+
+    // OpenAI 兼容 API（/v1/*）：本地转写对接既有生态（whisper 客户端/脚本）。
+    let v1 = Router::new()
+        .route("/models", get(models_api))
+        .route("/audio/transcriptions", axum::routing::post(transcribe_api))
+        .with_state(state.clone());
 
     Router::new()
         .nest("/api", api)
+        .nest("/v1", v1)
         .fallback_service(tower_http::services::ServeDir::new(web_dist).append_index_html_on_directories(true))
 }
 
@@ -109,6 +119,24 @@ fn token_ok(state: &ServerState, headers: &axum::http::HeaderMap) -> bool {
     headers
         .get("x-talksage-token")
         .and_then(|v| v.to_str().ok())
+        .map(|t| t == state.token)
+        .unwrap_or(false)
+}
+
+/// OpenAI 兼容端点鉴权：接受 `X-Talksage-Token` 或标准 `Authorization: Bearer <token>`。
+fn token_ok_v1(state: &ServerState, headers: &axum::http::HeaderMap) -> bool {
+    if state.token.is_empty() {
+        return true;
+    }
+    headers
+        .get("x-talksage-token")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+        })
         .map(|t| t == state.token)
         .unwrap_or(false)
 }
@@ -373,7 +401,7 @@ async fn start_listen_api(State(state): State<ServerState>, headers: axum::http:
     if guard.is_some() {
         return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "已在监听中" }))).into_response();
     }
-    let cfg = match build_pipeline_config(&state.config) {
+    let cfg = match build_pipeline_config(&state.config, Some(state.engine_pool.clone())) {
         Ok(c) => c,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     };
@@ -682,7 +710,7 @@ fn resolve_models_dir() -> Option<PathBuf> {
     None
 }
 
-fn build_pipeline_config(config: &ConfigManager) -> Result<LivePipelineConfig> {
+fn build_pipeline_config(config: &ConfigManager, engine_pool: Option<Arc<EnginePool>>) -> Result<LivePipelineConfig> {
     let model_dir = resolve_models_dir().ok_or_else(|| anyhow!("未找到 models/ 目录"))?;
     let user_engine = EngineKind::from_name(&config.snapshot().asr.user_engine).unwrap_or(EngineKind::ParaformerZh);
     let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
@@ -762,6 +790,206 @@ fn build_pipeline_config(config: &ConfigManager) -> Result<LivePipelineConfig> {
                 None
             }
         },
-        engine_pool: None,
+        engine_pool,
     })
+}
+
+// ── OpenAI 兼容 API（/v1/*）──────────────────────────────
+// 目标：既有 OpenAI 生态客户端/脚本（whisper 类工具、curl）可直接指向本服务
+// 做本地转写，鉴权用标准 `Authorization: Bearer <token>`。
+
+/// `GET /v1/models`：列出可用转写引擎。
+async fn models_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
+    if !token_ok_v1(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let data: Vec<serde_json::Value> = [EngineKind::ParaformerZh, EngineKind::ZipformerEn]
+        .iter()
+        .map(|k| serde_json::json!({ "id": k.display_name(), "object": "model", "owned_by": "talksage" }))
+        .collect();
+    Json(serde_json::json!({ "object": "list", "data": data })).into_response()
+}
+
+/// 解析引擎路径（VAD + ASR 模型目录）。
+fn engine_paths(kind: EngineKind) -> Result<(PathBuf, PathBuf)> {
+    let model_dir = resolve_models_dir().ok_or_else(|| anyhow!("未找到 models/ 目录"))?;
+    let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
+    let engine_dir = model_dir.join(match kind {
+        EngineKind::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
+        EngineKind::ZipformerEn => "sherpa-onnx-streaming-zipformer-en-2023-06-26",
+    });
+    if !vad_model.is_file() {
+        return Err(anyhow!("缺少 VAD 模型: {}", vad_model.display()));
+    }
+    if !engine_dir.is_dir() {
+        return Err(anyhow!("缺少 ASR 模型目录: {}", engine_dir.display()));
+    }
+    Ok((vad_model, engine_dir))
+}
+
+/// 读取任意采样率 PCM wav → 重采样到 16k → 写 16k mono PCM16 文件（管道要求 16k）。
+fn normalize_wav(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    let (sr, samples) = talksage_audio::wav::read_wav(src)?;
+    let samples = if sr != talksage_audio::TARGET_SAMPLE_RATE {
+        talksage_audio::resample_linear(&samples, sr, talksage_audio::TARGET_SAMPLE_RATE)
+    } else {
+        samples
+    };
+    let mut rec = talksage_audio::wav::WavRecorder::create(dst, talksage_audio::TARGET_SAMPLE_RATE)?;
+    rec.write(&samples)?;
+    rec.finish()?;
+    Ok(())
+}
+
+/// `POST /v1/audio/transcriptions`：multipart（file + model + response_format + language）。
+/// 复用实时监听同一条 VAD+ASR 管道（引擎池热启动），返回 OpenAI 兼容 JSON。
+async fn transcribe_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    mut multipart: axum::extract::Multipart,
+) -> impl IntoResponse {
+    if !token_ok_v1(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+
+    // 解析 multipart 字段（OpenAI 兼容：file / model / response_format / language）
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut model = String::new();
+    let mut response_format = String::from("json");
+    while let Some(field) = match multipart.next_field().await {
+        Ok(f) => f,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("multipart 解析失败: {e}") }))).into_response();
+        }
+    } {
+        match field.name().unwrap_or("") {
+            "file" => {
+                file_bytes = match field.bytes().await {
+                    Ok(b) => Some(b.to_vec()),
+                    Err(e) => {
+                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("读取 file 失败: {e}") }))).into_response();
+                    }
+                };
+            }
+            "model" => {
+                model = field.text().await.unwrap_or_default();
+            }
+            "response_format" => {
+                response_format = field.text().await.unwrap_or_default();
+            }
+            _ => {
+                let _ = field.bytes().await; // language 等字段暂忽略（自动按模型语言）
+            }
+        }
+    }
+    let file_bytes = match file_bytes {
+        Some(b) if !b.is_empty() => b,
+        _ => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "缺少 file 字段（PCM wav 音频）" }))).into_response();
+        }
+    };
+    if !["json", "text", "verbose_json"].contains(&response_format.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("不支持的 response_format: {response_format}（json|text|verbose_json）") })),
+        )
+            .into_response();
+    }
+
+    // 引擎：model 字段 → EngineKind；缺省用配置的 user_engine
+    let kind = EngineKind::from_name(model.trim())
+        .unwrap_or_else(|| EngineKind::from_name(&state.config.snapshot().asr.user_engine).unwrap_or(EngineKind::ParaformerZh));
+    let (vad_model, engine_dir) = match engine_paths(kind) {
+        Ok(p) => p,
+        Err(e) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
+        }
+    };
+
+    // 落盘 → 归一化 16k mono PCM16
+    let tmp_dir = state.config.data_dir().join("tmp");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let tmp_wav = tmp_dir.join(format!("transcribe-{now}.wav"));
+    let norm_wav = tmp_dir.join(format!("transcribe-{now}-16k.wav"));
+    let normalized = std::fs::write(&tmp_wav, &file_bytes)
+        .map_err(|e| anyhow!("写入上传音频失败: {e}"))
+        .and_then(|_| normalize_wav(&tmp_wav, &norm_wav));
+    if normalized.is_err() {
+        let _ = std::fs::remove_file(&tmp_wav);
+        let _ = std::fs::remove_file(&norm_wav);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "音频解析失败（仅支持 PCM wav，任意采样率，自动重采样到 16k）" })),
+        )
+            .into_response();
+    }
+    let audio_secs = talksage_audio::wav::read_wav(&norm_wav)
+        .map(|(sr, s)| s.len() as f64 / sr as f64)
+        .unwrap_or(0.0);
+
+    // 阻塞转写（模型加载/推理）放到 blocking 线程池
+    let pool = state.engine_pool.clone();
+    let norm_wav_in = norm_wav.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        talksage_pipeline::offline::transcribe_file(Some(&pool), kind, &engine_dir, &vad_model, &norm_wav_in)
+    })
+    .await;
+    let _ = std::fs::remove_file(&tmp_wav);
+    let _ = std::fs::remove_file(&norm_wav);
+    let tr = match result {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("转写失败: {e}") }))).into_response();
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("转写线程异常: {e}") }))).into_response();
+        }
+    };
+
+    match response_format.as_str() {
+        "text" => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/plain; charset=utf-8"))],
+            tr.text,
+        )
+            .into_response(),
+        "verbose_json" => {
+            // 管道 final 段的 ts_ms 是段结束时刻（epoch）；换算成相对音频起点的时间轴
+            let base = tr
+                .segments
+                .first()
+                .map(|s| s.ts_ms.saturating_sub(s.duration_ms))
+                .unwrap_or(0);
+            let segments: Vec<serde_json::Value> = tr
+                .segments
+                .iter()
+                .map(|s| {
+                    let start_ms = s.ts_ms.saturating_sub(s.duration_ms).saturating_sub(base);
+                    let end_ms = s.ts_ms.saturating_sub(base);
+                    serde_json::json!({
+                        "text": s.text,
+                        "start": start_ms as f64 / 1000.0,
+                        "end": end_ms as f64 / 1000.0,
+                        "start_ms": start_ms,
+                        "duration_ms": s.duration_ms,
+                    })
+                })
+                .collect();
+            let rtf = if audio_secs > 0.0 { tr.elapsed_ms / 1000.0 / audio_secs } else { 0.0 };
+            Json(serde_json::json!({
+                "text": tr.text,
+                "duration": audio_secs,
+                "elapsed_ms": tr.elapsed_ms,
+                "rtf": rtf,
+                "first_latency_ms": tr.first_latency_ms,
+                "segments": segments,
+            }))
+            .into_response()
+        }
+        _ => Json(serde_json::json!({ "text": tr.text })).into_response(),
+    }
 }
