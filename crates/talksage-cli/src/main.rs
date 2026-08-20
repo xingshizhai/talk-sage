@@ -245,10 +245,7 @@ fn cmd_listen(
             return ExitCode::FAILURE;
         }
     };
-    let engine_dir = match kind {
-        EngineKind::ParaformerZh => model_dir.join("sherpa-onnx-streaming-paraformer-zh"),
-        EngineKind::ZipformerEn => model_dir.join("sherpa-onnx-streaming-zipformer-en-2023-06-26"),
-    };
+    let engine_dir = model_dir.join(kind.model_dir_name());
     let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
     if !vad_model.is_file() {
         eprintln!("缺少 VAD 模型: {}", vad_model.display());
@@ -614,10 +611,7 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let engine_dir = match kind {
-        EngineKind::ParaformerZh => model_dir.join("sherpa-onnx-streaming-paraformer-zh"),
-        EngineKind::ZipformerEn => model_dir.join("sherpa-onnx-streaming-zipformer-en-2023-06-26"),
-    };
+    let engine_dir = model_dir.join(kind.model_dir_name());
     let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
     if !vad_model.is_file() || !engine_dir.is_dir() {
         eprintln!("模型不完整（VAD 或 ASR 模型缺失），请先运行 scripts/download_models.py");
@@ -1001,10 +995,7 @@ fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode 
             return ExitCode::FAILURE;
         }
     };
-    let engine_dir = match kind {
-        EngineKind::ParaformerZh => model_dir.join("sherpa-onnx-streaming-paraformer-zh"),
-        EngineKind::ZipformerEn => model_dir.join("sherpa-onnx-streaming-zipformer-en-2023-06-26"),
-    };
+    let engine_dir = model_dir.join(kind.model_dir_name());
     let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
     if !vad_model.is_file() || !engine_dir.is_dir() {
         eprintln!("模型不完整（VAD 或 ASR 模型缺失）");

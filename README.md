@@ -54,7 +54,7 @@
 - **Python 3** (model download script, stdlib only)
 - Windows: **VS 2022 Build Tools** (C++ workload) for Tauri & sherpa-onnx linking
 
-### 1. Get the models (~340 MB)
+### 1. Get the models (~1.2 GB)
 
 ```bash
 # via an HTTP/HTTPS proxy if your network requires one:

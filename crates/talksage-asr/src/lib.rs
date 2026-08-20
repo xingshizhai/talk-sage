@@ -32,7 +32,7 @@ pub trait StreamingASREngine {
 pub enum EngineKind {
     /// 英文 streaming zipformer（transducer）。
     ZipformerEn,
-    /// 中文 streaming paraformer。
+    /// 中文 streaming paraformer（int8；模型目录含 fp32 时自动用 fp32 更准）。
     ParaformerZh,
 }
 
@@ -53,6 +53,14 @@ impl EngineKind {
             Self::ParaformerZh => "paraformer-zh",
         }
     }
+
+    /// 模型目录名（下载脚本约定，与 `scripts/download_models.py` 输出一致）。
+    pub fn model_dir_name(self) -> &'static str {
+        match self {
+            Self::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
+            Self::ZipformerEn => "sherpa-onnx-streaming-zipformer-en-2023-06-26",
+        }
+    }
 }
 
 /// sherpa-onnx 流式识别器封装。
@@ -67,16 +75,24 @@ impl SherpaStreamingEngine {
     /// 构建指定引擎（模型文件在 model_dir 下，文件名与下载脚本约定一致）。
     pub fn new(kind: EngineKind, model_dir: &Path, num_threads: i32) -> anyhow::Result<Self> {
         let model_config = match kind {
-            EngineKind::ParaformerZh => OnlineModelConfig {
-                model_type: Some("paraformer".into()),
-                paraformer: OnlineParaformerModelConfig {
-                    encoder: Some(model_dir.join("encoder.int8.onnx").to_string_lossy().into()),
-                    decoder: Some(model_dir.join("decoder.int8.onnx").to_string_lossy().into()),
-                },
-                tokens: Some(model_dir.join("tokens.txt").to_string_lossy().into()),
-                num_threads,
-                ..Default::default()
-            },
+            EngineKind::ParaformerZh => {
+                // fp32 更准（存在时优先）；int8 作为后备（小/快）
+                let (enc, dec) = if model_dir.join("encoder.onnx").is_file() && model_dir.join("decoder.onnx").is_file() {
+                    ("encoder.onnx", "decoder.onnx")
+                } else {
+                    ("encoder.int8.onnx", "decoder.int8.onnx")
+                };
+                OnlineModelConfig {
+                    model_type: Some("paraformer".into()),
+                    paraformer: OnlineParaformerModelConfig {
+                        encoder: Some(model_dir.join(enc).to_string_lossy().into()),
+                        decoder: Some(model_dir.join(dec).to_string_lossy().into()),
+                    },
+                    tokens: Some(model_dir.join("tokens.txt").to_string_lossy().into()),
+                    num_threads,
+                    ..Default::default()
+                }
+            }
             EngineKind::ZipformerEn => {
                 let enc = "encoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx";
                 let dec = "decoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx";
@@ -222,10 +238,7 @@ mod pool_tests {
     fn model_dir(kind: EngineKind) -> Option<std::path::PathBuf> {
         if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
             let dir = std::path::PathBuf::from(d);
-            let sub = match kind {
-                EngineKind::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
-                EngineKind::ZipformerEn => "sherpa-onnx-streaming-zipformer-en-2023-06-26",
-            };
+            let sub = kind.model_dir_name();
             let p = dir.join(sub);
             if p.is_dir() {
                 return Some(p);

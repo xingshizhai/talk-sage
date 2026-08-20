@@ -351,7 +351,7 @@ export default function SettingsSection({
               <label style={labelBlock}>
                 我的引擎：
                 <select value={sceneCustom.user_engine} onChange={(e) => setSceneCustom({ ...sceneCustom, user_engine: e.target.value })} style={inputStyle}>
-                  <option value="paraformer-zh">中文 paraformer-zh</option>
+                  <option value="paraformer-zh">中文 paraformer-zh（推荐；含 fp32 时自动用更准版本）</option>
                   <option value="zipformer-en">英文 zipformer-en</option>
                 </select>
               </label>

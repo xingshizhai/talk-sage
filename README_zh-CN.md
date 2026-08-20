@@ -54,13 +54,15 @@
 - **Python 3**（模型下载脚本，仅用标准库）
 - Windows：**VS 2022 Build Tools**（含 C++ 工作负载，用于 Tauri 与 sherpa-onnx 静态链接）
 
-### 1. 下载模型（约 340MB）
+### 1. 下载模型（约 1.2GB）
 
 ```bash
 # 需要代理时：
 # export https_proxy=http://127.0.0.1:10808 http_proxy=http://127.0.0.1:10808
 python scripts/download_models.py all
 ```
+
+模型：中文 paraformer（**含 fp32 版本，引擎自动优先使用更准的 fp32**；int8 后备）、英文 zipformer（int8）、silero VAD、wespeaker 声纹。
 
 下载到 `models/`：
 

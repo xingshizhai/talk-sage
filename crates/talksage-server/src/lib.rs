@@ -837,10 +837,7 @@ fn build_pipeline_config(config: &ConfigManager, engine_pool: Option<Arc<EngineP
     let scene = snapshot.scene.effective();
     let user_engine = EngineKind::from_name(&scene.user_engine).unwrap_or(EngineKind::ParaformerZh);
     let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
-    let user_model = model_dir.join(match user_engine {
-        EngineKind::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
-        EngineKind::ZipformerEn => "sherpa-onnx-streaming-zipformer-en-2023-06-26",
-    });
+    let user_model = model_dir.join(user_engine.model_dir_name());
     if !vad_model.is_file() {
         return Err(anyhow!("缺少 VAD 模型: {}", vad_model.display()));
     }
@@ -875,10 +872,7 @@ fn build_pipeline_config(config: &ConfigManager, engine_pool: Option<Arc<EngineP
     }
     // 客户流（场景决定；headless 音频在服务端本机，回环可后续接入）
     let client_engine = EngineKind::from_name(&scene.client_engine).unwrap_or(EngineKind::ZipformerEn);
-    let client_model = model_dir.join(match client_engine {
-        EngineKind::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
-        EngineKind::ZipformerEn => "sherpa-onnx-streaming-zipformer-en-2023-06-26",
-    });
+    let client_model = model_dir.join(client_engine.model_dir_name());
     let client = if scene.client_enabled && client_model.is_dir() {
         Some(StreamConfig {
             engine_kind: client_engine,
@@ -957,10 +951,7 @@ async fn models_api(State(state): State<ServerState>, headers: axum::http::Heade
 fn engine_paths(kind: EngineKind) -> Result<(PathBuf, PathBuf)> {
     let model_dir = resolve_models_dir().ok_or_else(|| anyhow!("未找到 models/ 目录"))?;
     let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
-    let engine_dir = model_dir.join(match kind {
-        EngineKind::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
-        EngineKind::ZipformerEn => "sherpa-onnx-streaming-zipformer-en-2023-06-26",
-    });
+    let engine_dir = model_dir.join(kind.model_dir_name());
     if !vad_model.is_file() {
         return Err(anyhow!("缺少 VAD 模型: {}", vad_model.display()));
     }

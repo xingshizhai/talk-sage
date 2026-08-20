@@ -258,10 +258,7 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
     let vad_model = model_dir
         .join("silero-vad")
         .join("silero_vad.onnx");
-    let user_model = model_dir.join(match user_engine {
-        EngineKind::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
-        EngineKind::ZipformerEn => "sherpa-onnx-streaming-zipformer-en-2023-06-26",
-    });
+    let user_model = model_dir.join(user_engine.model_dir_name());
     if !vad_model.is_file() {
         return Err(format!("缺少 VAD 模型: {}", vad_model.display()));
     }
@@ -282,10 +279,7 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
     };
     // 客户流（场景决定是否启用双流）
     let client_engine = EngineKind::from_name(&scene.client_engine).unwrap_or(EngineKind::ZipformerEn);
-    let client_model = model_dir.join(match client_engine {
-        EngineKind::ParaformerZh => "sherpa-onnx-streaming-paraformer-zh",
-        EngineKind::ZipformerEn => "sherpa-onnx-streaming-zipformer-en-2023-06-26",
-    });
+    let client_model = model_dir.join(client_engine.model_dir_name());
     let cfg = LivePipelineConfig {
         vad_model,
         chunk_ms: 100,

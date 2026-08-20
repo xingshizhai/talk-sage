@@ -18,6 +18,10 @@ opener = urllib.request.build_opener(
 
 TARGETS: dict[str, list[tuple[str | None, str, str]]] = {
     "paraformer-zh": [
+        # fp32（更准，约 300MB；引擎存在时优先使用）
+        ("csukuangfj/sherpa-onnx-streaming-paraformer-zh", "encoder.onnx", ""),
+        ("csukuangfj/sherpa-onnx-streaming-paraformer-zh", "decoder.onnx", ""),
+        # int8（更小更快，作为后备）
         ("csukuangfj/sherpa-onnx-streaming-paraformer-zh", "encoder.int8.onnx", ""),
         ("csukuangfj/sherpa-onnx-streaming-paraformer-zh", "decoder.int8.onnx", ""),
         ("csukuangfj/sherpa-onnx-streaming-paraformer-zh", "tokens.txt", ""),
