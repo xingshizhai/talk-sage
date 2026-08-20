@@ -126,6 +126,7 @@ curl http://127.0.0.1:8080/v1/audio/transcriptions \
 | 纯录音 | `talksage record --seconds 60 [--input loopback]` |
 | 离线导入 | `talksage import audio.wav` |
 | 环境诊断 | `talksage doctor` |
+| 会话分析 | `talksage session <id>`（转储原始段：时间戳/时长/文本 + 疑似重复段检测，排查"识别重复"问题）；`--dup-only` 只看重复 |
 | 固定语料评测 | `talksage bench [--dir 语料目录] [--engine paraformer-zh\|zipformer-en] [--limit N]`（输出 CER/WER、RTF、首词延迟） |
 | 噪音短段抑制 | 设置 → ASR 转写 → 最短提交时长（ms，0=不限制）；或配置 `[audio] min_segment_ms` |
 

@@ -4216,6 +4216,7 @@ dependencies = [
  "talksage-core",
  "talksage-llm",
  "talksage-plugins",
+ "talksage-session",
 ]
 
 [[package]]

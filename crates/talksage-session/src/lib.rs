@@ -80,6 +80,51 @@ pub fn trigger_meeting_webhooks(
     talksage_core::trigger_webhooks(&cfg.urls, &payload)
 }
 
+/// 疑似重复段：同一说话人相邻 final 段文本高度相似（≥0.9）且时间间隔 ≤5s——
+/// 通常是 VAD 把同一句话切成两段重复识别（或回环双录同源）。
+#[derive(Debug, Clone)]
+pub struct DuplicatePair {
+    pub idx_a: usize,
+    pub idx_b: usize,
+    pub speaker: String,
+    pub similarity: f32,
+    pub gap_ms: u64,
+}
+
+/// 在 final 段中检测疑似重复（供会话转储/自动测试/前端标注）。
+/// `segments` 的 ts_ms 为段结束时刻（epoch ms）。
+pub fn find_duplicate_segments(segments: &[TranscriptSegment]) -> Vec<DuplicatePair> {
+    let finals: Vec<&TranscriptSegment> = segments
+        .iter()
+        .filter(|s| !s.is_partial && !s.text.trim().is_empty())
+        .collect();
+    let mut out = Vec::new();
+    for i in 0..finals.len() {
+        for j in (i + 1)..finals.len() {
+            let a = finals[i];
+            let b = finals[j];
+            if a.speaker_id != b.speaker_id {
+                continue; // 只查同一说话人（跨流回显由 pipeline 去重处理）
+            }
+            let gap = b.ts_ms.saturating_sub(a.ts_ms);
+            if gap > 5_000 {
+                break; // 已超出时间窗（finals 按时间有序），后续更大
+            }
+            let sim = talksage_core::text_similarity(&a.text, &b.text);
+            if sim >= 0.9 {
+                out.push(DuplicatePair {
+                    idx_a: i,
+                    idx_b: j,
+                    speaker: a.speaker_label.clone(),
+                    similarity: sim,
+                    gap_ms: gap,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// 会话详情导出为 Markdown 单文件（转写 + 纪要 + 指标 + 质量；借鉴 Call.md markdown-export）。
 pub fn export_markdown(detail: &SessionDetail) -> String {
     let mut md = String::new();
@@ -727,6 +772,19 @@ mod tests {
         }
     }
 
+    /// 带时间戳/时长的段（重复检测测试用）。
+    fn seg_at(speaker: u32, label: &str, text: &str, ts_ms: u64, duration_ms: u64) -> TranscriptSegment {
+        TranscriptSegment {
+            speaker_id: speaker,
+            speaker_label: label.into(),
+            text: text.into(),
+            is_partial: false,
+            ts_ms,
+            duration_ms,
+            rms: 0.2,
+        }
+    }
+
     #[test]
     fn crud_roundtrip() {
         let s = store();
@@ -837,6 +895,33 @@ mod tests {
         assert_eq!(payload["meeting"]["duration_seconds"].as_i64(), Some(200));
         assert!(payload["metrics"]["questions_me"].as_u64().unwrap_or(0) >= 1, "问句应入 payload: {payload}");
         assert_eq!(payload["transcript"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn find_duplicate_segments_detects_same_speaker_repeats() {
+        // 同说话人相邻段完全相同 → 检出；不同说话人/时间超窗/内容不同 → 不检出
+        let segs = vec![
+            seg_at(0, "我", "我们确认下周一交付", 2000, 2000),
+            seg_at(0, "我", "我们确认下周一交付", 4500, 2000), // 相同 + 间隔 0.5s → 重复
+            seg_at(1, "客户", "可以可以", 6000, 1500),          // 不同说话人 → 不参与
+            seg_at(0, "我", "我们确认下周一交付", 14500, 2000), // 间隔 10s > 5s → 不检出
+            seg_at(0, "我", "客户要求周五前报价", 15500, 2000), // 内容不同 → 不检出
+        ];
+        let dups = find_duplicate_segments(&segs);
+        assert_eq!(dups.len(), 1, "应只检出第 0/1 对: {dups:?}");
+        assert_eq!(dups[0].idx_a, 0);
+        assert_eq!(dups[0].idx_b, 1);
+        assert!(dups[0].similarity >= 0.99);
+    }
+
+    #[test]
+    fn find_duplicate_segments_empty_for_clean_conversation() {
+        let segs = vec![
+            seg_at(0, "我", "这个方案我们确认没问题", 2000, 2000),
+            seg_at(1, "客户", "好的我们下周一签合同", 5000, 2000),
+            seg_at(0, "我", "那就按这个推进", 8000, 1500),
+        ];
+        assert!(find_duplicate_segments(&segs).is_empty());
     }
 
     #[test]

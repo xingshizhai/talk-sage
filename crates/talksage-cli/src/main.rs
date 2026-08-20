@@ -80,6 +80,15 @@ enum Command {
         #[arg(long, default_value = "导入")]
         speaker: String,
     },
+    /// 会话分析：转储某会话的原始段信息（时间戳/时长/文本），并检测疑似重复段。
+    /// 用于排查"识别内容重复"等转写质量问题。
+    Session {
+        /// 会话 id
+        id: i64,
+        /// 只检测重复段（不打印全部转写）
+        #[arg(long)]
+        dup_only: bool,
+    },
     /// 静音裁剪：用 silero VAD 去掉无声音的部分，输出紧凑音频（测试素材）。
     Trim {
         /// 输入 wav（任意采样率，自动重采样到 16k）
@@ -153,6 +162,7 @@ fn main() -> ExitCode {
             noise_level,
         } => cmd_listen(&input, seconds, &engine, client.as_deref(), kb.as_deref(), save, no_record, noise_level),
         Command::Import { path, engine, speaker } => cmd_import(&path, &engine, &speaker),
+        Command::Session { id, dup_only } => cmd_session(id, dup_only),
         Command::Trim {
             path,
             output,
@@ -717,6 +727,65 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
     println!("转写结果（{} 段）:", segs.len());
     for s in segs.iter() {
         println!("  [{}] {}", s.speaker_label, s.text);
+    }
+    ExitCode::SUCCESS
+}
+
+/// 会话分析：转储原始段信息（时间戳/时长/文本）+ 疑似重复段检测。
+/// 用于排查"识别内容重复"等转写质量问题。
+fn cmd_session(id: i64, dup_only: bool) -> ExitCode {
+    let data_dir = talksage_config::default_data_dir();
+    let store = match talksage_session::SessionStore::open(&data_dir.join("sessions.db").to_string_lossy()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("打开会话库失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let detail = match store.get_session(id) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("读取会话 #{id} 失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("== 会话 #{id} 原始转写段 ==");
+    println!(
+        "{} 段 · 开始 {} · 结束 {:?} · 质量 {:?}",
+        detail.segments.len(),
+        detail.started_at,
+        detail.ended_at,
+        detail.meta.as_ref().map(|m| m.quality_label()),
+    );
+    for (i, s) in detail.segments.iter().enumerate() {
+        let start_ms = s.ts_ms.saturating_sub(s.duration_ms);
+        println!(
+            "  #{:<3} [{}] start={:>8}ms end={:>8}ms dur={:>5}ms | {}",
+            i,
+            s.speaker_label,
+            start_ms,
+            s.ts_ms,
+            s.duration_ms,
+            s.text,
+        );
+    }
+    // 疑似重复段检测
+    let dups = talksage_session::find_duplicate_segments(&detail.segments);
+    if dups.is_empty() {
+        println!("\n疑似重复段: 无（同说话人相邻段相似度均 < 0.9）");
+    } else {
+        println!("\n疑似重复段（同说话人、时间窗 5s 内、相似度 ≥ 0.9）:");
+        for d in &dups {
+            println!(
+                "  #{:<3} 与 #{:<3} [{}] 相似度={:.2} 间隔={}ms",
+                d.idx_a, d.idx_b, d.speaker, d.similarity, d.gap_ms
+            );
+            println!("    A: {}", detail.segments[d.idx_a].text);
+            println!("    B: {}", detail.segments[d.idx_b].text);
+        }
+    }
+    if !dup_only {
+        println!("\n提示: 时间戳为 epoch ms；同说话人相邻段间隔小且文本相似 = VAD 把一句话切成两段重复识别。");
     }
     ExitCode::SUCCESS
 }

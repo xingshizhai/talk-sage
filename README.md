@@ -126,6 +126,7 @@ curl http://127.0.0.1:8080/v1/audio/transcriptions \
 | Record raw audio only | `talksage record --seconds 60 [--input loopback]` |
 | Import audio offline | `talksage import audio.wav` |
 | Doctor / diagnostics | `talksage doctor` |
+| Session analysis | `talksage session <id>` (dump raw segments: timestamps/duration/text + duplicate-segment detection to debug repeated recognition); `--dup-only` for duplicates only |
 | Fixed-corpus benchmark | `talksage bench [--dir corpus] [--engine paraformer-zh\|zipformer-en] [--limit N]` (CER/WER, RTF, first-token latency) |
 | Short-segment suppression | Settings → ASR → 最短提交时长 (ms, 0 = off); or `[audio] min_segment_ms` in config |
 

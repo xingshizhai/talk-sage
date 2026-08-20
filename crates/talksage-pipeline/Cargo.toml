@@ -20,3 +20,4 @@ log = "0.4"
 [dev-dependencies]
 talksage-plugins = { path = "../talksage-plugins" }
 talksage-llm = { path = "../talksage-llm" }
+talksage-session = { path = "../talksage-session" }

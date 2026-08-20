@@ -143,6 +143,25 @@ fn file_input_produces_status_and_segments() {
     assert!(last.segment_count_me + last.segment_count_them >= 1);
     assert!((last.talk_ratio_me + last.talk_ratio_them - 1.0).abs() < 0.05, "发言占比应合计≈1: {last:?}");
     eprintln!("pipeline 集成测试指标: 占比 我={:.2} 语速={:.0}WPM 提问={} 健康分={}", last.talk_ratio_me, last.pace_wpm, last.questions_me, last.health_score);
+
+    // 4. 单流不应出现重复段（自动测试：同说话人相似段 = VAD 重复识别 → 检测报错）
+    let final_segs: Vec<talksage_core::TranscriptSegment> = evs
+        .iter()
+        .filter_map(|e| match e {
+            DomainEvent::Segment { speaker_id, speaker_label, text, is_partial: false, ts_ms, duration_ms, .. } => Some(talksage_core::TranscriptSegment {
+                speaker_id: *speaker_id,
+                speaker_label: speaker_label.clone(),
+                text: text.clone(),
+                is_partial: false,
+                ts_ms: *ts_ms,
+                duration_ms: *duration_ms,
+                rms: 0.0,
+            }),
+            _ => None,
+        })
+        .collect();
+    let dups = talksage_session::find_duplicate_segments(&final_segs);
+    assert!(dups.is_empty(), "单流出现疑似重复段（VAD 重复识别）: {dups:?}");
 }
 
 #[test]
