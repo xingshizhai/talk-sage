@@ -349,8 +349,8 @@ impl talksage_plugins::AnalyzerPlugin for CountingObserver {
         false
     }
 
-    fn skeleton(&self, _seg: &talksage_core::TranscriptSegment) -> Option<DomainEvent> {
-        None
+    fn skeleton(&self, _seg: &talksage_core::TranscriptSegment) -> Vec<DomainEvent> {
+        Vec::new()
     }
 
     fn run(
@@ -483,8 +483,8 @@ impl talksage_plugins::AnalyzerPlugin for RecordingObserver {
         false
     }
 
-    fn skeleton(&self, _seg: &talksage_core::TranscriptSegment) -> Option<DomainEvent> {
-        None
+    fn skeleton(&self, _seg: &talksage_core::TranscriptSegment) -> Vec<DomainEvent> {
+        Vec::new()
     }
 
     fn run(

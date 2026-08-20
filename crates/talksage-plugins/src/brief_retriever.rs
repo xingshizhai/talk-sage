@@ -42,8 +42,8 @@ impl SegmentObserver for BriefRetrieverPlugin {
         !(self.cooldown_seconds > 0.0 && last > 0.0 && now() - last < self.cooldown_seconds)
     }
 
-    fn skeleton(&self, _seg: &TranscriptSegment) -> Option<DomainEvent> {
-        None
+    fn skeleton(&self, _seg: &TranscriptSegment) -> Vec<DomainEvent> {
+        Vec::new()
     }
 
     fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> Option<DomainEvent> {

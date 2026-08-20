@@ -39,8 +39,8 @@ impl SegmentObserver for TranslatorPlugin {
         !seg.text.trim().is_empty()
     }
 
-    fn skeleton(&self, _seg: &TranscriptSegment) -> Option<DomainEvent> {
-        None
+    fn skeleton(&self, _seg: &TranscriptSegment) -> Vec<DomainEvent> {
+        Vec::new()
     }
 
     fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> Option<DomainEvent> {

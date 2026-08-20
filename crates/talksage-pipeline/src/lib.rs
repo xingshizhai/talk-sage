@@ -1118,7 +1118,7 @@ fn make_on_final(
             }
             log::debug!("插件[{}] 触发: 段=[{}] {}", plugin.name(), seg.speaker_label, seg.text.chars().take(60).collect::<String>());
             // 骨架（本地即时，无 HTTP）
-            if let Some(skel) = plugin.skeleton(seg) {
+            for skel in plugin.skeleton(seg) {
                 emit(skel);
             }
             // 最终（可能 LLM）：独立线程，不阻塞管道 / 音频回调
