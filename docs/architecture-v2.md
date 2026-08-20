@@ -439,3 +439,10 @@ token = ""
 - 覆盖：桌面（Tauri start_listen）、headless 监听（server build_pipeline_config）、CLI listen 均读配置；
   `talksage bench` / OpenAI 转写 API（offline::transcribe_file）固定 `min_commit_ms=0`（评测/API 保持原始输出）
 - 测试：pipeline_live.rs `min_commit_ms_suppresses_short_segments`（60s 阈值 → 0 final；0 阈值 → 有 final）；config `user_file_overrides_defaults` 校验 toml 读取
+
+### 18.8 会中会话指标 + 实时提示 + 三段式纪要（借鉴 Call.md）
+- **会话指标（纯统计无 LLM）**：`talksage-core::metrics`（`compute_conversation_metrics`）——我/客户发言占比、语速 WPM（clamp 50–250）、提问数（中英文问句启发式）、独白检测（连续 >45s）、打断计数（异说话人段重叠）、平均段长、健康分 0–100
+- **会中推送**：pipeline `run_loop` 包装事件流——final 段聚合进共享 seg_log，随之推送 `DomainEvent::Metrics`；`SessionStats` 增加 words/questions（入历史 meta 的 `StreamMeta`）
+- **实时提示**：`core::NudgeEngine`（规则 + 2min 冷却 + 优先级 talk_ratio→questions→pace→next_steps + 中文模板），触发推送 `DomainEvent::Nudge`，前端浮动 toast 可关闭
+- **三段式纪要**：`notes::TrioGenerator` 三个专精 prompt **并行**（叙事概述 / 归属发言人的主题要点 JSON / 行动项清单 JSON，容错提取 JSON），入口：Tauri `generate_trio_notes` + server `POST /api/session/{id}/trio-notes`，存 `sessions.trio` 列，历史页"智能纪要"展示
+- 测试：core metrics 5 项单测（占比/独白/打断/健康分/问句启发式/冷却限流）；pipeline_live 集成断言 Metrics 事件；notes trio mock 测试；session trio 存取测试

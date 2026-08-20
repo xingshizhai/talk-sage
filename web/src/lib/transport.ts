@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AppApi, AppConfig, DomainEvent, NotesTemplate, SegmentHit, SessionDetail, SessionRecord } from "./api";
+import type { AppApi, AppConfig, DomainEvent, NotesTemplate, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./api";
 
 /** 统一 fetch 辅助（同源 /api）。 */
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -100,6 +100,10 @@ export const ipcApi: AppApi = {
 
   async generateNotes(sessionId: number, templateId: string): Promise<string> {
     return invoke("generate_notes", { sessionId, templateId });
+  },
+
+  async generateTrioNotes(sessionId: number, meetingName?: string, meetingDescription?: string): Promise<TrioSummary> {
+    return invoke("generate_trio_notes", { sessionId, meetingName: meetingName ?? null, meetingDescription: meetingDescription ?? null });
   },
 
   async readLogs(lines?: number): Promise<string> {
@@ -206,6 +210,14 @@ export const httpApi: AppApi = {
       body: JSON.stringify({ template_id: templateId }),
     });
     return r.notes;
+  },
+
+  async generateTrioNotes(sessionId: number, meetingName?: string, meetingDescription?: string): Promise<TrioSummary> {
+    return req<TrioSummary>(`/session/${sessionId}/trio-notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ meeting_name: meetingName ?? null, meeting_description: meetingDescription ?? null }),
+    });
   },
 
   async readLogs(_lines?: number): Promise<string> {

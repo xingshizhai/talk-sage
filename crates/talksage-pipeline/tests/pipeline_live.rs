@@ -128,6 +128,21 @@ fn file_input_produces_status_and_segments() {
     let joined = finals.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" | ");
     assert!(!joined.trim().is_empty(), "final 转写文本为空");
     eprintln!("pipeline 集成测试识别结果: {joined}");
+
+    // 3. 会话指标事件（借鉴 Call.md conversation-metrics）随 final 段推送
+    let metrics_events: Vec<&talksage_core::ConversationMetrics> = evs
+        .iter()
+        .filter_map(|e| match e {
+            DomainEvent::Metrics { metrics } => Some(metrics),
+            _ => None,
+        })
+        .collect();
+    assert!(!metrics_events.is_empty(), "未产生 Metrics 事件: {evs:?}");
+    let last = metrics_events.last().unwrap();
+    assert!(last.has_data(), "Metrics 应有段数据: {last:?}");
+    assert!(last.segment_count_me + last.segment_count_them >= 1);
+    assert!((last.talk_ratio_me + last.talk_ratio_them - 1.0).abs() < 0.05, "发言占比应合计≈1: {last:?}");
+    eprintln!("pipeline 集成测试指标: 占比 我={:.2} 语速={:.0}WPM 提问={} 健康分={}", last.talk_ratio_me, last.pace_wpm, last.questions_me, last.health_score);
 }
 
 #[test]

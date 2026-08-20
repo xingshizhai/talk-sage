@@ -1,7 +1,7 @@
 // 历史面板：会话列表 + 全文搜索 + 详情查看（含质量/统计/录音回放）+ 纪要生成 + 删除。
 
 import { useState } from "react";
-import type { NotesTemplate, SegmentHit, SessionDetail, SessionRecord } from "../lib/api";
+import type { NotesTemplate, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "../lib/api";
 import { recordingUrl } from "../lib/transport";
 
 function formatTime(sec: number): string {
@@ -46,9 +46,11 @@ export default function HistorySection({
   onSelect,
   onRefresh,
   onGenerateNotes,
+  onGenerateTrio,
   onDeleteSession,
   onDeleteSessions,
   notesBusy,
+  trioBusy,
 }: {
   sessions: SessionRecord[];
   searchResults: SegmentHit[] | null;
@@ -58,9 +60,11 @@ export default function HistorySection({
   onSelect: (id: number) => void;
   onRefresh: () => void;
   onGenerateNotes: (templateId: string) => void;
+  onGenerateTrio: (meetingName: string, meetingDescription: string) => void;
   onDeleteSession: (id: number) => void;
   onDeleteSessions: (ids: number[]) => void;
   notesBusy: boolean;
+  trioBusy: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [templateId, setTemplateId] = useState(templates[0]?.id ?? "standard_meeting");
@@ -70,6 +74,9 @@ export default function HistorySection({
   const [confirmBatch, setConfirmBatch] = useState(false);
   // 回放光标：{说话人, 音频秒}，用于同步高亮该说话人的当前段
   const [playCursor, setPlayCursor] = useState<{ speaker: string; time: number } | null>(null);
+  // 三段式智能纪要：会议名称/说明（可选）
+  const [meetingName, setMeetingName] = useState("");
+  const [meetingDescription, setMeetingDescription] = useState("");
 
   /** 切换单条选择。 */
   function toggleSelect(id: number) {
@@ -287,6 +294,68 @@ export default function HistorySection({
               {detail.notes}
             </pre>
           )}
+
+          {/* 三段式智能纪要（借鉴 Call.md summary-generator）：概述 / 归属要点 / 行动项 */}
+          <div style={{ margin: "8px 0 4px", borderTop: "1px dashed var(--border)", paddingTop: 8 }}>
+            <b style={{ fontSize: 12 }}>智能纪要</b>
+            <span style={{ fontSize: 10, color: "var(--muted)", marginLeft: 6 }}>叙事概述 + 归属要点 + 行动项（并行生成）</span>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
+            <input
+              value={meetingName}
+              onChange={(e) => setMeetingName(e.target.value)}
+              placeholder="会议名称（可选）"
+              style={{ fontSize: 11, padding: "3px 6px", borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)", width: 150 }}
+            />
+            <input
+              value={meetingDescription}
+              onChange={(e) => setMeetingDescription(e.target.value)}
+              placeholder="会议说明（可选，如：确认 NPI 交付时间）"
+              style={{ fontSize: 11, padding: "3px 6px", borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)", flex: 1, minWidth: 180 }}
+            />
+            <button onClick={() => onGenerateTrio(meetingName, meetingDescription)} disabled={trioBusy} style={{ fontSize: 12 }}>
+              {trioBusy ? "生成中…" : "生成智能纪要"}
+            </button>
+          </div>
+          {detail.trio && (() => {
+            let trio: TrioSummary | null = null;
+            try {
+              trio = JSON.parse(detail.trio) as TrioSummary;
+            } catch {
+              trio = null;
+            }
+            if (!trio) return null;
+            return (
+              <div style={{ background: "var(--surface-2)", borderRadius: 6, padding: 8, fontSize: 11, margin: "4px 0", color: "var(--text)" }}>
+                {trio.short_overview && <p style={{ margin: "0 0 6px", lineHeight: 1.6 }}>{trio.short_overview}</p>}
+                {trio.key_points.length > 0 && (
+                  <div style={{ marginBottom: 6 }}>
+                    <b>关键要点</b>
+                    {trio.key_points.map((kp, i) => (
+                      <div key={i} style={{ margin: "4px 0 0 8px" }}>
+                        <b style={{ color: "var(--term)" }}>▸ {kp.topic}</b>
+                        <ul style={{ margin: "2px 0 0 16px", paddingLeft: 4 }}>
+                          {kp.points.map((p, j) => (
+                            <li key={j}>{p}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {trio.action_items.length > 0 && (
+                  <div>
+                    <b>行动项</b>
+                    <ul style={{ margin: "2px 0 0 16px", paddingLeft: 4 }}>
+                      {trio.action_items.map((a, i) => (
+                        <li key={i}>{a}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           <div style={{ marginTop: 6 }}>
             {detail.segments.map((s, i) => (

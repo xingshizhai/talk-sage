@@ -5,6 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod metrics;
+pub use metrics::{
+    compute_conversation_metrics, ConversationMetrics, Nudge, NudgeAction, NudgeEngine, NudgeKind, NudgeSeverity,
+};
+
 /// 应用版本（与 workspace 版本保持一致）。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -84,7 +89,22 @@ pub enum DomainEvent {
         recording: Option<String>,
         /// VAD 参数快照（回溯灵敏度配置）。
         vad_preset: String,
+        /// VAD 阈值。
         vad_threshold: f32,
+        /// 该流 final 段词数（借鉴 Call.md 会话指标）。旧客户端缺省 0。
+        #[serde(default)]
+        words: usize,
+        /// 该流 final 段问句数。旧客户端缺省 0。
+        #[serde(default)]
+        questions: usize,
+    },
+    /// 会话指标（会中实时：每次 final 段后聚合推送；借鉴 Call.md conversation-metrics）。
+    Metrics {
+        metrics: ConversationMetrics,
+    },
+    /// 会中提示（规则 + 冷却限流；借鉴 Call.md nudge-engine）。
+    Nudge {
+        nudge: Nudge,
     },
 }
 

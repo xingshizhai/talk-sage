@@ -104,13 +104,13 @@
 
 | 建议 | 优先级 | 说明 |
 |---|---|---|
-| 会话指标增量（我/客户发言占比、WPM、提问数、独白、打断） | 高 | 纯统计无 LLM，直接进 SessionStats，会中可显示、会后可入 meta |
-| 实时提示引擎（规则 + 2min 限流 + 模板） | 高 | 基于指标增量，纯规则，性价比最高 |
-| 三段式纪要生成（overview + 归属发言人的要点 + 行动项） | 高 | 并行 3 prompt，直接升级 notes 质量 |
-| Workflow Webhook（会议结束推送 + url-guard SSRF 防护） | 中 | 与 headless server 天然契合 |
-| Markdown 结构化导出（转写+纪要+指标单文件） | 中 | 历史页一键下载 |
-| 会议准备向导（探测问题 + 会中清单） | 中 | 与知识库简报结合更佳 |
-| 录音时长上限（2h + 5min 预警 + 暂停记账） | 低-中 | 小而精，暂停记账可做 |
+| 会话指标增量（我/客户发言占比、WPM、提问数、独白、打断） | 高 | ✅ 已实现（core::metrics + 会中 Metrics 事件 + SessionStats words/questions，见 architecture-v2 §18.8） |
+| 实时提示引擎（规则 + 2min 限流 + 模板） | 高 | ✅ 已实现（core::NudgeEngine + 会中 Nudge 事件 + 前端 toast，见 §18.8） |
+| 三段式纪要生成（overview + 归属发言人的要点 + 行动项） | 高 | ✅ 已实现（notes::TrioGenerator 并行 3 prompt + 历史页"智能纪要"，见 §18.8） |
+| Workflow Webhook（会议结束推送 + url-guard SSRF 防护） | 中 | 待办 |
+| Markdown 结构化导出（转写+纪要+指标单文件） | 中 | 待办 |
+| 会议准备向导（探测问题 + 会中清单） | 中 | 待办 |
+| 录音时长上限（2h + 5min 预警 + 暂停记账） | 低-中 | 待办 |
 | MCP 自动触发 / 意图检测 | 低（远期） | 先做好本地插件，生态对接后置 |
 | 书签 / 会话恢复 / API key 加密 / 小组件窗 | 低 | 锦上添花 |
 

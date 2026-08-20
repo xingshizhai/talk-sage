@@ -82,3 +82,26 @@ impl LLMProvider for MockProvider {
         Ok(self.response.clone())
     }
 }
+
+/// 顺序应答的 mock Provider（多轮/并行场景按调用次序返回不同响应）。
+pub struct MockSeqProvider {
+    responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+}
+
+impl MockSeqProvider {
+    pub fn new(responses: Vec<String>) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(responses.into()),
+        }
+    }
+}
+
+impl LLMProvider for MockSeqProvider {
+    fn complete(&self, _prompt: &str, _system: &str) -> Result<String> {
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("MockSeqProvider 应答耗尽"))
+    }
+}

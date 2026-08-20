@@ -4194,6 +4194,8 @@ name = "talksage-notes"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde",
+ "serde_json",
  "talksage-core",
  "talksage-llm",
 ]

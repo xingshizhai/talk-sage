@@ -366,6 +366,8 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
             recording,
             vad_preset,
             vad_threshold,
+            words,
+            questions,
         } = &ev
         {
             if let Ok(mut sm) = session_stats.lock() {
@@ -380,6 +382,8 @@ fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
                     recording: recording.clone(),
                     vad_preset: vad_preset.clone(),
                     vad_threshold: *vad_threshold,
+                    words: *words,
+                    questions: *questions,
                 });
             }
         }
@@ -595,6 +599,25 @@ fn generate_notes(session_id: i64, template_id: String, state: tauri::State<'_, 
     Ok(notes)
 }
 
+/// 三段式智能纪要（概述 / 归属要点 / 行动项；借鉴 Call.md summary-generator），保存到会话。
+#[tauri::command]
+fn generate_trio_notes(session_id: i64, meeting_name: Option<String>, meeting_description: Option<String>, state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let Some(llm) = build_llm(&state.config) else {
+        return Err("未配置 LLM（请设置 llm.providers.<provider>.api_key）".into());
+    };
+    let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
+    let gen = talksage_notes::TrioGenerator::new(llm);
+    let trio = gen
+        .generate(&detail.segments, meeting_name.as_deref(), meeting_description.as_deref())
+        .map_err(|e| format!("智能纪要生成失败: {e}"))?;
+    let json = serde_json::to_value(&trio).map_err(|e| e.to_string())?;
+    state
+        .sessions
+        .set_trio(session_id, &json.to_string())
+        .map_err(|e| format!("保存智能纪要失败: {e}"))?;
+    Ok(json)
+}
+
 /// 根据配置构建 LLM Provider（OpenAI 兼容）。
 fn build_llm(config: &ConfigManager) -> Option<Arc<dyn LLMProvider>> {
     let snapshot = config.snapshot();
@@ -713,6 +736,7 @@ pub fn run() {
             delete_session,
             list_notes_templates,
             generate_notes,
+            generate_trio_notes,
             read_logs
         ])
         .setup(move |app| {

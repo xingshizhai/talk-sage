@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{mpsc, Arc};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
@@ -303,6 +303,10 @@ struct StreamWorker {
     engine_dir: Option<PathBuf>,
     /// 最短提交时长（ms）：低于该值的 final 段丢弃（0 = 不限制）。
     min_commit_ms: u64,
+    /// final 段累计词数（会话指标用；借鉴 Call.md）。
+    words: usize,
+    /// final 段累计问句数（会话指标用）。
+    questions: usize,
 }
 
 impl StreamWorker {
@@ -410,6 +414,8 @@ impl StreamWorker {
             engine_dir: Some(cfg.model_dir.clone()),
             engine: Some(engine),
             min_commit_ms,
+            words: 0,
+            questions: 0,
         })
     }
 
@@ -632,6 +638,10 @@ impl StreamWorker {
                 rms,
             };
             self.final_segments += 1;
+            self.words += talksage_core::metrics::count_words(&final_text);
+            if talksage_core::metrics::is_question_text(&final_text) {
+                self.questions += 1;
+            }
             emit(DomainEvent::Segment {
                 speaker_id: seg.speaker_id,
                 speaker_label: seg.speaker_label.clone(),
@@ -653,8 +663,8 @@ impl StreamWorker {
     }
 
     /// 流级统计（会话结束回溯用）。
-    /// 返回 (total_ms, speech_ms, final_segments, samples, avg_rms, max_rms, non_speech_avg_rms)
-    fn session_stats(&self) -> (u64, u64, usize, u64, f32, f32, f32) {
+    /// 返回 (total_ms, speech_ms, final_segments, samples, avg_rms, max_rms, non_speech_avg_rms, words, questions)
+    fn session_stats(&self) -> (u64, u64, usize, u64, f32, f32, f32, usize, usize) {
         let total_ms = self.total_samples * 1000 / talksage_audio::TARGET_SAMPLE_RATE as u64;
         let speech_ms = self.speech_samples * 1000 / talksage_audio::TARGET_SAMPLE_RATE as u64;
         let avg_rms = if self.total_samples > 0 {
@@ -667,7 +677,7 @@ impl StreamWorker {
         } else {
             avg_rms
         };
-        (total_ms, speech_ms, self.final_segments, self.total_samples, avg_rms, self.max_rms, non_speech_avg_rms)
+        (total_ms, speech_ms, self.final_segments, self.total_samples, avg_rms, self.max_rms, non_speech_avg_rms, self.words, self.questions)
     }
 
     fn stop(&mut self) {
@@ -711,6 +721,52 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
     fn fire(emit: &EventSink, ev: DomainEvent) {
         emit(ev);
     }
+
+    // 会话指标 + 实时提示（借鉴 Call.md conversation-metrics / nudge-engine）：
+    // 包装事件流——final 段事件聚合进 seg_log，随之推送 Metrics 事件；
+    // NudgeEngine 按规则（2min 冷却）评估并推送 Nudge 事件。
+    let seg_log: Arc<Mutex<Vec<TranscriptSegment>>> = Arc::new(Mutex::new(Vec::new()));
+    let nudge_engine: Arc<Mutex<talksage_core::NudgeEngine>> = Arc::new(Mutex::new(talksage_core::NudgeEngine::default()));
+    let session_start = Instant::now();
+    let (seg_log_sink, nudge_sink) = (seg_log.clone(), nudge_engine.clone());
+    let emit_raw = emit.clone();
+    let emit: EventSink = Arc::new(move |ev: DomainEvent| {
+        if let DomainEvent::Segment {
+            text,
+            is_partial: false,
+            speaker_id,
+            speaker_label,
+            ts_ms,
+            duration_ms,
+            ..
+        } = &ev
+        {
+            seg_log_sink.lock().unwrap().push(TranscriptSegment {
+                speaker_id: *speaker_id,
+                speaker_label: speaker_label.clone(),
+                text: text.clone(),
+                is_partial: false,
+                ts_ms: *ts_ms,
+                duration_ms: *duration_ms,
+                rms: 0.0,
+            });
+            let metrics = {
+                let segs = seg_log_sink.lock().unwrap();
+                talksage_core::compute_conversation_metrics(&segs)
+            };
+            emit_raw(DomainEvent::Metrics { metrics: metrics.clone() });
+            let call_ms = session_start.elapsed().as_millis() as u64;
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            if let Some(nudge) = nudge_sink.lock().unwrap().evaluate(&metrics, call_ms, now_ms) {
+                log::info!("会中提示[{:?}] {}", nudge.kind, nudge.message);
+                emit_raw(DomainEvent::Nudge { nudge });
+            }
+        }
+        emit_raw(ev);
+    });
 
     fire(&emit, DomainEvent::Status {
         stage: StatusStage::AsrLoading,
@@ -856,7 +912,7 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
     }
     // 会话统计事件（每条流一条）：质量评估 / 历史回溯的基础数据
     for w in &workers {
-        let (total_ms, speech_ms, final_segments, samples, avg_rms, max_rms, non_speech_avg_rms) = w.session_stats();
+        let (total_ms, speech_ms, final_segments, samples, avg_rms, max_rms, non_speech_avg_rms, words, questions) = w.session_stats();
         let (vad_threshold, ..) = cfg.vad.effective();
         fire(&emit, DomainEvent::SessionStats {
             speaker_label: w.speaker_label.clone(),
@@ -870,9 +926,11 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             recording: w.recording_path.as_ref().map(|p| p.display().to_string()),
             vad_preset: format!("{:?}", cfg.vad.preset).to_lowercase(),
             vad_threshold,
+            words,
+            questions,
         });
         log::info!(
-            "会话统计[{}] total={}ms speech={}ms({:.0}%) segs={} avg_rms={:.4} max_rms={:.4} 背景噪音={:.4} recording={:?}",
+            "会话统计[{}] total={}ms speech={}ms({:.0}%) segs={} avg_rms={:.4} max_rms={:.4} 背景噪音={:.4} words={} questions={} recording={:?}",
             w.speaker_label,
             total_ms,
             speech_ms,
@@ -881,6 +939,8 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             avg_rms,
             max_rms,
             non_speech_avg_rms,
+            words,
+            questions,
             w.recording_path,
         );
     }

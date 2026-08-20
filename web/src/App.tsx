@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getApi } from "./lib/transport";
-import type { AppConfig, DomainEvent, NotesTemplate, SegmentHit, SessionDetail, SessionRecord } from "./lib/api";
+import type { AppConfig, ConversationMetrics, DomainEvent, NotesTemplate, NudgeEvent, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./lib/api";
 import { TranscriptAccumulator } from "./lib/transcript";
 import { KeyPointAggregator, type KeyPoint } from "./lib/highlights";
 import { cssVars, type Theme } from "./lib/theme";
@@ -65,6 +65,11 @@ export default function App() {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [templates, setTemplates] = useState<NotesTemplate[]>([]);
   const [notesBusy, setNotesBusy] = useState(false);
+  const [trioBusy, setTrioBusy] = useState(false);
+  // 会话指标（会中实时；借鉴 Call.md）
+  const [metrics, setMetrics] = useState<ConversationMetrics | null>(null);
+  // 会中提示（规则 + 冷却；借鉴 Call.md nudge-engine）
+  const [nudges, setNudges] = useState<NudgeEvent[]>([]);
   const [showDebug, setShowDebug] = useState(false);
   const [noiseLevel, setNoiseLevel] = useState(0); // 0..100（UI 百分比）
   const prevNoiseRef = useRef(-1);
@@ -142,6 +147,12 @@ export default function App() {
       }
       if (ev.type === "brief") {
         setBriefs((prev) => [...prev.slice(-19), { source: ev.source, text: ev.text }]);
+      }
+      if (ev.type === "metrics") {
+        setMetrics(ev.metrics);
+      }
+      if (ev.type === "nudge") {
+        setNudges((prev) => [...prev.slice(-3), ev.nudge]);
       }
       setRawEvents((prev) => [...prev.slice(-199), ev]);
     });
@@ -272,6 +283,24 @@ export default function App() {
     [detail],
   );
 
+  /** 三段式智能纪要（概述 / 归属要点 / 行动项；借鉴 Call.md）。 */
+  const handleGenerateTrio = useCallback(
+    async (meetingName: string, meetingDescription: string) => {
+      if (!detail) return;
+      setTrioBusy(true);
+      try {
+        const trio: TrioSummary = await api.generateTrioNotes(detail.id, meetingName || undefined, meetingDescription || undefined);
+        setDetail({ ...detail, trio: JSON.stringify(trio) });
+      } catch (e) {
+        console.error("智能纪要生成失败:", e);
+        alert(`智能纪要生成失败: ${e}`);
+      } finally {
+        setTrioBusy(false);
+      }
+    },
+    [detail],
+  );
+
   const handleListen = useCallback(async () => {
     try {
       if (listening) {
@@ -330,7 +359,7 @@ export default function App() {
       />
 
       {/* 主区：不滚动，滚动交给内部子区域（转写/要点/历史/设置各自 flex+overflow） */}
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", padding: 14, gap: 12, overflow: "hidden" }}>
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", padding: 14, gap: 12, overflow: "hidden", position: "relative" }}>
         {/* 页头 */}
         <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
           <h1 style={{ fontSize: 18, margin: 0 }}>会议辅助</h1>
@@ -353,6 +382,82 @@ export default function App() {
 
         {navPage === "transcript" && (
           <>
+            {/* 会中提示（借鉴 Call.md nudge-engine）：浮动 toast，可手动关闭 */}
+            {nudges.length > 0 && (
+              <div style={{ position: "absolute", top: 8, right: 8, zIndex: 60, display: "flex", flexDirection: "column", gap: 6, maxWidth: 340 }}>
+                {nudges.map((n) => (
+                  <div
+                    key={n.id}
+                    style={{
+                      background: "var(--card-bg)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      padding: "8px 10px",
+                      fontSize: 12,
+                      boxShadow: "0 2px 10px rgba(0,0,0,.18)",
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "flex-start",
+                    }}
+                  >
+                    <span style={{ color: n.severity === "high" ? "var(--danger)" : n.severity === "medium" ? "var(--term)" : "var(--brief)", fontSize: 14 }}>💡</span>
+                    <div>
+                      <div style={{ lineHeight: 1.5 }}>{n.message}</div>
+                      <button
+                        onClick={() => setNudges((prev) => prev.filter((x) => x.id !== n.id))}
+                        style={{ fontSize: 10, marginTop: 4, padding: "1px 8px", cursor: "pointer" }}
+                      >
+                        知道了
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* 会话指标条（借鉴 Call.md conversation-metrics）：发言占比 / 语速 / 提问 / 独白 / 打断 / 健康分 */}
+            {metrics && metrics.segment_count_me + metrics.segment_count_them > 0 && (
+              <div
+                style={{
+                  display: "flex",
+                  gap: 14,
+                  flexWrap: "wrap",
+                  fontSize: 11,
+                  background: "var(--card-bg)",
+                  border: "var(--card-border)",
+                  borderRadius: 8,
+                  padding: "6px 12px",
+                  alignItems: "center",
+                }}
+              >
+                <b style={{ fontSize: 11 }}>会话指标</b>
+                <span>
+                  发言 <b style={{ color: "var(--me)" }}>{Math.round(metrics.talk_ratio_me * 100)}%</b> /{" "}
+                  <b style={{ color: "var(--client)" }}>{Math.round(metrics.talk_ratio_them * 100)}%</b>
+                </span>
+                <span>
+                  语速 <b>{Math.round(metrics.pace_wpm)}</b> WPM
+                </span>
+                <span>
+                  提问 <b>{metrics.questions_me}</b>
+                </span>
+                <span>
+                  独白 {metrics.monologue_detected ? "⚠ 是" : "否"}
+                </span>
+                <span>
+                  打断 <b>{metrics.interruption_count}</b>
+                </span>
+                <span
+                  style={{
+                    color: metrics.health_score >= 70 ? "var(--live)" : metrics.health_score >= 50 ? "var(--term)" : "var(--brief)",
+                    fontWeight: 700,
+                  }}
+                >
+                  健康分 {metrics.health_score}
+                </span>
+              </div>
+            )}
+
             <TranscriptCard
               mode={mode}
               setMode={(m) => {
@@ -381,9 +486,11 @@ export default function App() {
                 onSelect={handleHistorySelect}
                 onRefresh={refreshHistory}
                 onGenerateNotes={handleGenerateNotes}
+                onGenerateTrio={handleGenerateTrio}
                 onDeleteSession={handleDeleteSession}
                 onDeleteSessions={handleDeleteSessions}
                 notesBusy={notesBusy}
+                trioBusy={trioBusy}
               />
             </div>
           </section>

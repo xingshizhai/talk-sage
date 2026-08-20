@@ -81,7 +81,47 @@ export type DomainEvent =
       recording: string | null;
       vad_preset: string;
       vad_threshold: number;
-    };
+      words?: number;
+      questions?: number;
+    }
+  | { type: "metrics"; metrics: ConversationMetrics }
+  | { type: "nudge"; nudge: NudgeEvent };
+
+/** 会话指标（会中实时；借鉴 Call.md conversation-metrics）。 */
+export interface ConversationMetrics {
+  talk_ratio_me: number;
+  talk_ratio_them: number;
+  pace_wpm: number;
+  questions_me: number;
+  monologue_detected: boolean;
+  longest_monologue_ms: number;
+  interruption_count: number;
+  words_me: number;
+  words_them: number;
+  segment_count_me: number;
+  segment_count_them: number;
+  avg_segment_ms_me: number;
+  avg_segment_ms_them: number;
+  health_score: number;
+  call_duration_ms: number;
+}
+
+/** 会中提示（借鉴 Call.md nudge-engine）。 */
+export interface NudgeEvent {
+  id: string;
+  kind: "talk_ratio" | "questions" | "pace" | "next_steps";
+  severity: "low" | "medium" | "high";
+  message: string;
+  action: "ask_question" | "confirm" | "pause" | "clarify" | null;
+  timestamp_ms: number;
+}
+
+/** 三段式智能纪要（借鉴 Call.md summary-generator）。 */
+export interface TrioSummary {
+  short_overview: string;
+  key_points: { topic: string; points: string[] }[];
+  action_items: string[];
+};
 
 /** 会话概要（历史列表）。 */
 export interface SessionRecord {
@@ -141,6 +181,8 @@ export interface SessionDetail {
   terms: string[];
   translations: string[];
   notes: string | null;
+  /** 三段式智能纪要（JSON 字符串；借鉴 Call.md）。 */
+  trio: string | null;
   meta?: SessionMeta | null;
 }
 
@@ -184,6 +226,8 @@ export interface AppApi {
   listNotesTemplates(): Promise<NotesTemplate[]>;
   /** 纪要：按模板生成并保存。 */
   generateNotes(sessionId: number, templateId: string): Promise<string>;
+  /** 纪要：三段式智能纪要（概述 / 归属要点 / 行动项）生成并保存。 */
+  generateTrioNotes(sessionId: number, meetingName?: string, meetingDescription?: string): Promise<TrioSummary>;
   /** 调试：读取最近日志（尾部 N 行）。 */
   readLogs(lines?: number): Promise<string>;
   /** 订阅领域事件流，返回取消函数。 */

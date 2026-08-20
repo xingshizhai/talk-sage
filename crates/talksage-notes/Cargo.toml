@@ -9,3 +9,5 @@ license.workspace = true
 talksage-core = { path = "../talksage-core" }
 talksage-llm = { path = "../talksage-llm" }
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

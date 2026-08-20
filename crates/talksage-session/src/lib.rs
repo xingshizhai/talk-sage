@@ -49,12 +49,14 @@ pub struct SessionDetail {
     pub terms: Vec<String>,
     pub translations: Vec<String>,
     pub notes: Option<String>,
+    /// 三段式智能纪要（JSON 字符串；借鉴 Call.md summary-generator）。
+    pub trio: Option<String>,
     /// 会话元数据（统计/质量），老数据为 None。
     pub meta: Option<SessionMeta>,
 }
 
 /// 单条流的统计（写入 meta 用）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StreamMeta {
     pub speaker_label: String,
     pub total_ms: u64,
@@ -68,6 +70,12 @@ pub struct StreamMeta {
     pub recording: Option<String>,
     pub vad_preset: String,
     pub vad_threshold: f32,
+    /// final 段词数（会话指标）。旧数据缺省 0。
+    #[serde(default)]
+    pub words: usize,
+    /// final 段问句数。旧数据缺省 0。
+    #[serde(default)]
+    pub questions: usize,
 }
 
 /// 质量评估参数（阈值可配置；auto_detect 时能量阈值自动计算）。
@@ -181,6 +189,7 @@ impl SessionMeta {
                 recording: None,
                 vad_preset: String::new(),
                 vad_threshold: 0.0,
+                ..Default::default()
             });
         let ratio = if main.total_ms > 0 {
             main.speech_ms as f32 / main.total_ms as f32
@@ -267,7 +276,8 @@ impl SessionStore {
                 started_at INTEGER NOT NULL,
                 ended_at INTEGER,
                 notes TEXT,
-                meta TEXT
+                meta TEXT,
+                trio TEXT
             );
             CREATE TABLE IF NOT EXISTS segments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -299,8 +309,9 @@ impl SessionStore {
             CREATE INDEX IF NOT EXISTS idx_translations_session ON translations(session_id);
             ",
         )?;
-        // 迁移（旧库）：sessions.meta / segments.duration_ms / segments.rms
+        // 迁移（旧库）：sessions.meta / sessions.trio / segments.duration_ms / segments.rms
         let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN meta TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN trio TEXT;");
         let _ = conn.execute_batch("ALTER TABLE segments ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0;");
         let _ = conn.execute_batch("ALTER TABLE segments ADD COLUMN rms REAL NOT NULL DEFAULT 0;");
         Ok(Self {
@@ -385,6 +396,16 @@ impl SessionStore {
         Ok(())
     }
 
+    /// 保存三段式智能纪要（JSON 字符串）。
+    pub fn set_trio(&self, session_id: i64, trio: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET trio = ?2 WHERE id = ?1",
+            rusqlite::params![session_id, trio],
+        )?;
+        Ok(())
+    }
+
     /// 删除会话及其全部关联数据（段/术语/翻译）。
     pub fn delete_session(&self, session_id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -450,7 +471,7 @@ impl SessionStore {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT id, started_at, ended_at, notes, meta FROM sessions WHERE id = ?1",
+                "SELECT id, started_at, ended_at, notes, meta, trio FROM sessions WHERE id = ?1",
                 [session_id],
                 |r| {
                     Ok((
@@ -459,12 +480,13 @@ impl SessionStore {
                         r.get::<_, Option<i64>>(2)?,
                         r.get::<_, Option<String>>(3)?,
                         r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| anyhow!("会话不存在: {session_id}"))?;
-        let (id, started_at, ended_at, notes, meta_raw) = row;
+        let (id, started_at, ended_at, notes, meta_raw, trio) = row;
 
         let segments = {
             let mut stmt = conn.prepare(
@@ -507,6 +529,7 @@ impl SessionStore {
             terms,
             translations,
             notes,
+            trio,
             meta: meta_raw.as_deref().and_then(SessionMeta::from_json),
         })
     }
@@ -595,6 +618,17 @@ mod tests {
     }
 
     #[test]
+    fn trio_save_and_retrieve() {
+        let s = store();
+        let id = s.start_session(1).unwrap();
+        s.add_segment(id, &seg(0, "我", "我们需要确认方案")).unwrap();
+        let trio = r#"{"short_overview":"概述","key_points":[{"topic":"方案","points":["我确认了方案"]}],"action_items":["客户发邮件确认"]}"#;
+        s.set_trio(id, trio).unwrap();
+        let detail = s.get_session(id).unwrap();
+        assert_eq!(detail.trio.as_deref(), Some(trio));
+    }
+
+    #[test]
     fn delete_session_removes_all_related_rows() {
         let s = store();
         let id = s.start_session(1).unwrap();
@@ -632,6 +666,7 @@ mod tests {
                 recording: Some("2026-08-19_05-57-20_我.wav".into()),
                 vad_preset: "standard".into(),
                 vad_threshold: 0.5,
+                ..Default::default()
             }],
             &["我们需要在周五之前拿到 NPI 样品".into(), "另外请确认交期".into()],
             12345,
@@ -668,6 +703,7 @@ mod tests {
                 recording: None,
                 vad_preset: "standard".into(),
                 vad_threshold: 0.5,
+                ..Default::default()
             }],
             &[
                 "我说看嗯行嗯嗯哦不要行嗯".into(),
@@ -694,6 +730,7 @@ mod tests {
                 recording: None,
                 vad_preset: "standard".into(),
                 vad_threshold: 0.5,
+                ..Default::default()
             }],
             &["嗯嗯嗯嗯嗯嗯嗯嗯嗯嗯".into(), "嗯嗯嗯对技术嗯嗯".into()],
             12345,
@@ -715,6 +752,7 @@ mod tests {
                 recording: None,
                 vad_preset: "standard".into(),
                 vad_threshold: 0.5,
+                ..Default::default()
             }],
             &[],
             12345,
@@ -738,6 +776,7 @@ mod tests {
             recording: None,
             vad_preset: "standard".into(),
             vad_threshold: 0.5,
+            ..Default::default()
         }];
         let texts = &["嗯嗯嗯嗯嗯嗯嗯嗯嗯嗯".into(), "我们确认交期价格".into()];
 
@@ -761,6 +800,7 @@ mod tests {
             recording: None,
             vad_preset: "standard".into(),
             vad_threshold: 0.5,
+            ..Default::default()
         }];
         let meta2 = SessionMeta::evaluate(stats_low, texts, 1, &relaxed);
         assert_eq!(meta2.quality, "low", "放宽阈值后不应再判噪音: {:?}", meta2.quality);
@@ -782,6 +822,7 @@ mod tests {
                 recording: None,
                 vad_preset: "standard".into(),
                 vad_threshold: 0.5,
+                ..Default::default()
             }],
             &["正常说话内容需要确认".into(), "我们再讨论一下方案".into()],
             1,
@@ -804,6 +845,7 @@ mod tests {
             recording: None,
             vad_preset: "standard".into(),
             vad_threshold: 0.5,
+            ..Default::default()
         }];
 
         // auto_detect=true：silence_rms = 0.02*1.5 = 0.03 > avg_rms 0.02 → 静音

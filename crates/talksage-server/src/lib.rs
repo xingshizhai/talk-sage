@@ -87,6 +87,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/session/{id}", get(get_session_api).delete(delete_session_api))
         .route("/templates", get(list_templates_api))
         .route("/session/{id}/notes", axum::routing::post(generate_notes_api))
+        .route("/session/{id}/trio-notes", axum::routing::post(generate_trio_notes_api))
         .route("/logs", get(read_logs_api))
         .route("/listen/start", axum::routing::post(start_listen_api))
         .route("/listen/stop", axum::routing::post(stop_listen_api))
@@ -343,6 +344,14 @@ struct NotesBody {
     template_id: String,
 }
 
+#[derive(Deserialize)]
+struct TrioBody {
+    #[serde(default)]
+    meeting_name: Option<String>,
+    #[serde(default)]
+    meeting_description: Option<String>,
+}
+
 /// 读取最近日志（调试窗口用）。
 async fn read_logs_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
     if !token_ok(&state, &headers) {
@@ -396,6 +405,33 @@ async fn generate_notes_api(
         Ok(notes) => {
             let _ = state.sessions.set_notes(id, &notes);
             (StatusCode::OK, Json(serde_json::json!({ "notes": notes }))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// 三段式智能纪要（概述 / 归属要点 / 行动项；借鉴 Call.md summary-generator）。
+async fn generate_trio_notes_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(body): Json<TrioBody>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let Some(llm) = build_llm(&state.config) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "未配置 LLM" }))).into_response();
+    };
+    let Ok(detail) = state.sessions.get_session(id) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "会话不存在" }))).into_response();
+    };
+    let gen = talksage_notes::TrioGenerator::new(llm);
+    match gen.generate(&detail.segments, body.meeting_name.as_deref(), body.meeting_description.as_deref()) {
+        Ok(trio) => {
+            let json = serde_json::to_value(&trio).unwrap_or_default();
+            let _ = state.sessions.set_trio(id, &json.to_string());
+            (StatusCode::OK, Json(json)).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
@@ -916,15 +952,17 @@ async fn transcribe_api(
         }
     };
 
-    // 落盘 → 归一化 16k mono PCM16
+    // 落盘 → 归一化 16k mono PCM16（文件名带自增序号，避免并发请求时间戳碰撞）
     let tmp_dir = state.config.data_dir().join("tmp");
     let _ = std::fs::create_dir_all(&tmp_dir);
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let tmp_wav = tmp_dir.join(format!("transcribe-{now}.wav"));
-    let norm_wav = tmp_dir.join(format!("transcribe-{now}-16k.wav"));
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_wav = tmp_dir.join(format!("transcribe-{now}-{seq}.wav"));
+    let norm_wav = tmp_dir.join(format!("transcribe-{now}-{seq}-16k.wav"));
     let normalized = std::fs::write(&tmp_wav, &file_bytes)
         .map_err(|e| anyhow!("写入上传音频失败: {e}"))
         .and_then(|_| normalize_wav(&tmp_wav, &norm_wav));

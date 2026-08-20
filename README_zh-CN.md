@@ -38,6 +38,9 @@
 - **固定语料评测**：`talksage bench` 对 `*.wav` 语料逐个跑流式转写（引擎池热启动，进程内复用模型），输出 **CER/WER 准确率 + 实时率 RTF + 首词延迟**，供模型/参数回归对比（借鉴 WhisperLiveKit bench）
 - **OpenAI 兼容转写 API**：headless 服务提供 `POST /v1/audio/transcriptions` 与 `GET /v1/models`，既有 OpenAI 生态客户端/脚本（whisper 类工具、curl、openai SDK）可直接指向本机做**本地转写**（Bearer 鉴权，json/text/verbose_json，任意采样率 wav 自动重采样）
 - **噪音短段抑制**：`audio.min_segment_ms` 最短提交时长（设置页可调），final 段时长低于阈值的直接丢弃——噪音会话中偶发的"哒/咔"短段不再污染转写与历史
+- **会中会话指标**：实时显示 我/客户发言占比、语速（WPM）、提问数、独白检测、打断计数与**会话健康分**（纯统计无 LLM，借鉴 Call.md conversation-metrics）
+- **会中实时提示**：规则驱动 + 2 分钟限流的"coaching"提示（发言失衡/提问偏少/语速过快/临结束提醒下一步），浮动卡片可关闭（借鉴 Call.md nudge-engine）
+- **三段式智能纪要**：并行生成 叙事概述 + **归属发言人的主题要点** + **行动项清单**（历史页"智能纪要"，借鉴 Call.md summary-generator）
 
 ## 快速开始
 

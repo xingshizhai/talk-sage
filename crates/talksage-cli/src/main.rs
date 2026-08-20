@@ -484,6 +484,8 @@ fn cmd_listen(
             recording,
             vad_preset,
             vad_threshold,
+            words,
+            questions,
             ..
         } = &ev
         {
@@ -499,6 +501,8 @@ fn cmd_listen(
                     recording: recording.clone(),
                     vad_preset: vad_preset.clone(),
                     vad_threshold: *vad_threshold,
+                    words: *words,
+                    questions: *questions,
                 });
             }
         }

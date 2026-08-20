@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use talksage_core::TranscriptSegment;
 use talksage_llm::LLMProvider;
 
@@ -266,6 +267,116 @@ impl NotesGenerator {
     }
 }
 
+// ── 三段式智能纪要（借鉴 Call.md summary-generator）──────────────────
+// 三个专精 prompt 并行生成：叙事概述 / 归属发言人的主题要点 / 行动项清单。
+
+/// 主题要点（每条归属说话人）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyPoint {
+    pub topic: String,
+    pub points: Vec<String>,
+}
+
+/// 三段式智能纪要。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrioSummary {
+    /// 一段话叙事概述（3–5 句）。
+    pub short_overview: String,
+    /// 按主题分组的要点（归属说话人）。
+    pub key_points: Vec<KeyPoint>,
+    /// 行动项清单（负责人/期限）。
+    pub action_items: Vec<String>,
+}
+
+/// 三段式纪要生成器。
+pub struct TrioGenerator {
+    llm: Arc<dyn LLMProvider>,
+}
+
+const OVERVIEW_SYSTEM: &str = "你是一名资深会议纪要秘书。根据转写与会议信息，写一段话的叙事概述。\
+规则：单段流畅叙述，不用列表/标题/编号；3–5 句、不超过 120 字；第三人称过去时；\
+提到参会者与其贡献但保持概括，不逐字引用、不添加评价；只输出概述段落本身。";
+
+const KEY_POINTS_SYSTEM: &str = "你是一名资深会议纪要秘书。根据转写提取关键讨论要点，按主题分组。\
+规则：识别 2–5 个主要主题；每条要点归属提出人（格式：「[我]/[客户] 说了/确认了/提出了…」）；\
+每条一句话、具体不空泛；只陈述事实，不加解读；按实际内容定数量，不强行填充。\
+只输出如下 JSON，不要任何其他内容：\
+{\"key_points\":[{\"topic\":\"主题\",\"points\":[\"说话人说了什么具体内容。\"]}]}";
+
+const ACTION_ITEMS_SYSTEM: &str = "你是一名资深会议分析师。从转写中提取所有会议后需要处理的事项。\
+规则：包括分配给某人的任务、待跟进决定、未解答问题、承诺、提到的期限、下一步；\
+每条要具体可执行，含负责人（若提到）；如「客户发邮件确认方案」「周五前发 proposal」；\
+3–10 条，只收录真实行动项，不编造；无行动项则返回空数组。\
+只输出如下 JSON，不要任何其他内容：{\"checklist\":[\"行动项1\",\"行动项2\"]}";
+
+impl TrioGenerator {
+    pub fn new(llm: Arc<dyn LLMProvider>) -> Self {
+        Self { llm }
+    }
+
+    /// 并行生成三段式纪要。
+    pub fn generate(
+        &self,
+        transcript: &[TranscriptSegment],
+        meeting_name: Option<&str>,
+        meeting_description: Option<&str>,
+    ) -> Result<TrioSummary> {
+        if transcript.is_empty() {
+            return Err(anyhow!("会话无转写内容，无法生成纪要"));
+        }
+        let transcript_block = transcript
+            .iter()
+            .map(|s| format!("[{}] {}", s.speaker_label, s.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut context = String::new();
+        if let Some(n) = meeting_name.filter(|n| !n.trim().is_empty()) {
+            context.push_str(&format!("会议名称：{n}\n"));
+        }
+        if let Some(d) = meeting_description.filter(|d| !d.trim().is_empty()) {
+            context.push_str(&format!("会议说明：{d}\n"));
+        }
+        let user_prompt = format!("{context}\n## 转写\n{transcript_block}\n\n请生成。");
+
+        // 三个专精任务并行（LLM 调用相互独立）
+        let (llm_a, llm_b, llm_c) = (self.llm.clone(), self.llm.clone(), self.llm.clone());
+        let (pa, pb, pc) = (user_prompt.clone(), user_prompt.clone(), user_prompt);
+        let h1 = std::thread::spawn(move || llm_a.complete(&pa, OVERVIEW_SYSTEM));
+        let h2 = std::thread::spawn(move || llm_b.complete(&pb, KEY_POINTS_SYSTEM));
+        let h3 = std::thread::spawn(move || llm_c.complete(&pc, ACTION_ITEMS_SYSTEM));
+
+        let overview_raw = h1.join().map_err(|_| anyhow!("概述线程异常"))??;
+        let key_points_raw = h2.join().map_err(|_| anyhow!("要点线程异常"))??;
+        let action_raw = h3.join().map_err(|_| anyhow!("行动项线程异常"))??;
+
+        let key_points = extract_json(&key_points_raw)
+            .and_then(|v| v.get("key_points").cloned())
+            .and_then(|v| serde_json::from_value::<Vec<KeyPoint>>(v).ok())
+            .ok_or_else(|| anyhow!("要点结果不是合法 JSON: {key_points_raw}"))?;
+        let action_items = extract_json(&action_raw)
+            .and_then(|v| v.get("checklist").cloned())
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+            .ok_or_else(|| anyhow!("行动项结果不是合法 JSON: {action_raw}"))?;
+
+        Ok(TrioSummary {
+            short_overview: overview_raw.trim().to_string(),
+            key_points,
+            action_items,
+        })
+    }
+}
+
+/// 从 LLM 输出中提取 JSON（容忍 ```json 围栏与前后说明文字）。
+fn extract_json(text: &str) -> Option<serde_json::Value> {
+    let t = text.trim();
+    let start = t.find('{')?;
+    let end = t.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    serde_json::from_str(&t[start..=end]).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +438,38 @@ mod tests {
         let gen = NotesGenerator::new(Arc::new(mock));
         let t = get_template("standard_meeting").unwrap();
         assert!(gen.generate(&[], &[], &[], &t).is_err());
+    }
+
+    #[test]
+    fn trio_generates_three_sections_with_mock_llm() {
+        // mock 对三次调用返回同一 JSON（含 key_points 与 checklist）
+        let mock = MockProvider {
+            response: r#"{"key_points":[{"topic":"交付方案","points":["客户确认了周五交付"]}],"checklist":["客户发邮件确认方案","我方周五前发 proposal"]}"#.into(),
+        };
+        let gen = TrioGenerator::new(Arc::new(mock));
+        let segs = vec![
+            TranscriptSegment { speaker_id: 1, speaker_label: "客户".into(), text: "We need NPI samples by Friday.".into(), is_partial: false, ts_ms: 0, duration_ms: 500, rms: 0.2 },
+            TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), text: "我们确认可以安排。".into(), is_partial: false, ts_ms: 1, duration_ms: 400, rms: 0.15 },
+        ];
+        let trio = gen.generate(&segs, Some("NPI 评审"), Some("确认交付时间")).unwrap();
+        assert!(!trio.short_overview.trim().is_empty(), "概述为空");
+        assert_eq!(trio.key_points.len(), 1);
+        assert_eq!(trio.key_points[0].topic, "交付方案");
+        assert_eq!(trio.action_items.len(), 2);
+    }
+
+    #[test]
+    fn trio_rejects_invalid_json() {
+        let mock = MockProvider { response: "抱歉，我无法生成".into() };
+        let gen = TrioGenerator::new(Arc::new(mock));
+        let segs = vec![TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), text: "hi".into(), is_partial: false, ts_ms: 0, duration_ms: 100, rms: 0.1 }];
+        assert!(gen.generate(&segs, None, None).is_err());
+    }
+
+    #[test]
+    fn extract_json_tolerates_fences() {
+        let s = "```json\n{\"checklist\":[\"a\"]}\n```";
+        let v = super::extract_json(s).unwrap();
+        assert_eq!(v["checklist"][0], "a");
     }
 }
