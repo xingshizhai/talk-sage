@@ -8,6 +8,7 @@ pub mod brief_retriever;
 pub mod term_explainer;
 pub mod translator;
 pub mod registry;
+pub mod short_segment;
 
 pub use registry::{EventFilter, HookRegistry, Plugin, PluginConfig, SegmentObserver};
 
