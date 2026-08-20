@@ -29,6 +29,28 @@ struct Inner {
     next_client_id: u32,
 }
 
+/// 一次说话人查询的结果。持有标签；若是新说话人，还持有待注册的声纹。
+///
+/// 只有把它交给 [`SpeakerIdentifier::commit`] 才会真正注册；丢弃它 = 这次判定
+/// 不留痕迹（被 filter 吞掉的段走的就是这条路）。
+pub struct SpeakerQuery {
+    label: String,
+    /// 新说话人：(预分配编号, 待注册 embedding)。已知说话人/降级标签为 None。
+    pending: Option<(u32, Vec<f32>)>,
+}
+
+impl SpeakerQuery {
+    /// 判定出的标签（"我" / "客户N" / 流默认标签）。
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// 是否是尚未注册的新说话人。
+    pub fn is_new(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
 impl SpeakerIdentifier {
     /// 创建识别器。模型缺失/加载失败 → None（调用方降级）。
     pub fn new(model: &Path, owner_embedding: Option<Vec<f32>>, threshold: f32) -> Option<Self> {
@@ -84,24 +106,49 @@ impl SpeakerIdentifier {
         self.extractor.compute(&stream)
     }
 
-    /// 判定说话人标签：
+    /// 判定说话人标签（**纯查询**，不改变识别器状态）：
     /// 1) 匹配主人 → "我"
     /// 2) 匹配已见说话人 → 复用其标签
-    /// 3) 都不匹配 → 新建 "客户N" 并记住
+    /// 3) 都不匹配 → 预分配 "客户N"，并把 embedding 一起带回，等调用方 `commit`
     /// 音频不足或模型失败 → 返回 `fallback`（流默认标签）。
-    pub fn identify(&self, audio: &[f32], fallback: &str) -> String {
+    ///
+    /// 拆成「查询 + commit」是因为产生点的 filter 链可能把这一段吞掉：
+    /// 若查询自带注册副作用，被丢弃的段会留下一个永久的幻影说话人，
+    /// 之后真实的段可能匹配上它。所以只有 filter 放行的段才 `commit`。
+    pub fn query(&self, audio: &[f32], fallback: &str) -> SpeakerQuery {
         let Some(emb) = self.compute_embedding(audio) else {
-            return fallback.to_string();
+            return SpeakerQuery { label: fallback.to_string(), pending: None };
         };
-        let mut inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap();
         if let Some(name) = inner.manager.search(&emb, self.threshold) {
-            return name;
+            return SpeakerQuery { label: name, pending: None };
         }
         let id = inner.next_client_id;
-        inner.next_client_id += 1;
-        let name = format!("客户{id}");
-        inner.manager.add(&name, &emb);
-        name
+        SpeakerQuery { label: format!("客户{id}"), pending: Some((id, emb)) }
+    }
+
+    /// 落库查询结果：仅「新说话人」才真正注册（分配编号 + 写入声纹库）。
+    /// 返回 true 表示本次确实注册了新说话人。
+    pub fn commit(&self, q: &SpeakerQuery) -> bool {
+        let Some((id, emb)) = &q.pending else {
+            return false; // 已知说话人或降级标签：无副作用
+        };
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.manager.add(&q.label, emb) {
+            return false; // 同名已存在（查询与 commit 之间被别的段抢先）
+        }
+        inner.next_client_id = inner.next_client_id.max(id + 1);
+        true
+    }
+
+    /// 查询 + 立即注册。给「拿到标签就一定要用」的调用方（测试、离线工具）用。
+    ///
+    /// **产生点不要用它**：那里必须先 `query` 拿标签，等 filter 链放行后再
+    /// `commit`，否则被吞掉的段会注册幻影说话人。
+    pub fn identify(&self, audio: &[f32], fallback: &str) -> String {
+        let q = self.query(audio, fallback);
+        self.commit(&q);
+        q.label
     }
 
     /// 已知说话人数量（含主人）。

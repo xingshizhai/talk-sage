@@ -652,11 +652,19 @@ impl StreamWorker {
             } else {
                 0.0
             };
-            // 说话人判定（声纹）：先识别主人，再区分其他说话人
+            // 说话人判定（声纹）：先识别主人，再区分其他说话人。
+            //
+            // 这里只**查询**：标签既要进事件，也要参与跨流去重的 speaker_id 比较，
+            // 所以必须在建事件之前拿到。但注册（分配"客户N"、写入声纹库）推迟到
+            // filter 链放行之后 —— 否则被吞掉的段会留下一个幻影说话人，之后真实
+            // 的段可能匹配上它。
             let mut label = self.speaker_label.clone();
             let mut sid = self.speaker_id;
+            let mut pending_speaker: Option<speaker::SpeakerQuery> = None;
             if let Some(sp) = &self.speaker {
-                let identified = sp.identify(&self.seg_audio, &self.speaker_label);
+                let query = sp.query(&self.seg_audio, &self.speaker_label);
+                let identified = query.label().to_string();
+                pending_speaker = Some(query);
                 if identified == "我" {
                     label = "我".into();
                     sid = 0;
@@ -714,6 +722,10 @@ impl StreamWorker {
                 self.seg_audio.clear();
                 return;
             };
+            // filter 放行 → 这一段真的存在，此刻才注册说话人。
+            if let (Some(sp), Some(query)) = (&self.speaker, &pending_speaker) {
+                sp.commit(query);
+            }
             self.final_segments += 1;
             self.words += talksage_core::metrics::count_words(&final_text);
             if talksage_core::metrics::is_question_text(&final_text) {
