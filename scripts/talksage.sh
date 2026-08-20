@@ -2,6 +2,7 @@
 # TalkSage v2 构建/运行工具（macOS / Linux）
 #
 # 用法:
+#   ./scripts/talksage.sh bootstrap # 一键：环境检查 + 下载依赖 + 编译（首次装机用这个）
 #   ./scripts/talksage.sh env       # 环境检查
 #   ./scripts/talksage.sh deps      # 下载依赖（模型 + sherpa 静态库 + 前端）
 #   ./scripts/talksage.sh build     # 全量编译（debug）
@@ -43,7 +44,8 @@ env_check() {
     for m in \
         "models/sherpa-onnx-streaming-paraformer-zh" \
         "models/sherpa-onnx-streaming-zipformer-en-2023-06-26" \
-        "models/silero-vad/silero_vad.onnx"; do
+        "models/silero-vad/silero_vad.onnx" \
+        "models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx"; do
         [ -e "$ROOT/$m" ] && echo "  [OK]   $m" || echo "  [MISS] ${m}（运行 deps）"
     done
     ls "$SHERPA_ONNX_ARCHIVE_DIR"/sherpa-onnx-*.tar.bz2 >/dev/null 2>&1 \
@@ -54,12 +56,18 @@ env_check() {
 
 deps() {
     echo "=== 下载依赖 ==="
+    local proxy="${https_proxy:-${HTTPS_PROXY:-}}"
+    [ -n "$proxy" ] && echo "  使用代理: $proxy" || echo "  直连（如需代理: export https_proxy=http://127.0.0.1:10808）"
     if ! ls "$SHERPA_ONNX_ARCHIVE_DIR"/sherpa-onnx-*.tar.bz2 >/dev/null 2>&1; then
-        python3 scripts/download_sherpa.py --proxy "${https_proxy:-${HTTPS_PROXY:-}}"
+        python3 scripts/download_sherpa.py --proxy "$proxy"
     else
         echo "  sherpa 静态库已存在"
     fi
-    python3 scripts/download_models.py all
+    # 只下运行必需的四组（约 340MB）。whisper-base/small、qwen3-asr 是可选引擎，
+    # 体积大得多，需要时单独执行 download_models.py <group>。
+    for group in paraformer-zh zipformer-en silero-vad wespeaker; do
+        python3 scripts/download_models.py "$group" --proxy "$proxy"
+    done
     (cd web && npm install --ignore-scripts)
 }
 
@@ -82,6 +90,24 @@ require_file() {
 }
 
 case "$CMD" in
+    bootstrap)
+        env_check
+        deps
+        build
+        echo
+        echo "=== bootstrap 完成 ==="
+        env_check
+        echo
+        echo "下一步："
+        echo "  ./scripts/talksage.sh doctor   # 运行期自检（模型/配置/平台）"
+        echo "  ./scripts/talksage.sh run      # 桌面应用（Vite + Tauri 开发模式）"
+        echo "  ./scripts/talksage.sh serve    # 浏览器访问 http://127.0.0.1:8080"
+        if [ "$(uname -s)" = "Darwin" ]; then
+            echo
+            echo "macOS 提示：麦克风是 TCC 保护资源，只有带 Info.plist 的 .app 包才会弹授权框。"
+            echo "            要真正采集麦克风，请先 ./scripts/talksage.sh package 再运行产出的 .app。"
+        fi
+        ;;
     env)     env_check ;;
     deps)    deps ;;
     build)   build ;;
@@ -98,7 +124,12 @@ case "$CMD" in
         RUST_LOG=debug TALKSAGE_LOG=debug cargo test --workspace
         (cd web && npm test)
         ;;
-    package) (cd web && npm run tauri -- build) ;;
+    package)
+        (cd web && npm run tauri -- build)
+        # macOS 产物名取自 tauri.conf.json 的 productName
+        bundle="$CARGO_TARGET_DIR/release/bundle/macos/拓思者.app"
+        [ -d "$bundle" ] && echo "产物: $bundle（麦克风授权在此包内才生效）"
+        ;;
     logs)    ls -t "$TALKSAGE_DATA_DIR/logs"/talksage.log.* 2>/dev/null | head -1 | xargs -I{} sh -c 'echo "=== {} ==="; tail -50 "{}"' ;;
     *)       sed -n 's/^# //p' "$0" | head -20 ;;
 esac
