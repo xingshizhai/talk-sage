@@ -216,15 +216,31 @@ finalizer 全部在 `stop → flush → 写入 barrier` 之后执行。这是 ar
 
 每阶段独立可提交、测试全绿。
 
-| 阶段 | 内容 | 风险 |
-|---|---|---|
-| 1 | 特征化测试 + `registry.rs` 骨架 + `AnalyzerPlugin` → `SegmentObserver` 接入 | 低，纯搭台 |
-| 2 | filter 链：`short_segment` / `cross_stream_dedup` 搬出 `StreamWorker` | 中，动热路径 |
-| 3 | observer：`conversation_metrics` / `coaching_nudge` 搬出 | 中，跨段状态 |
-| 4 | finalizer：`session_quality` / `webhook` / `markdown_export` / `trio_notes`；server 与 tauri 导出合一 | 中，涉及两个适配器 |
-| 5 | 配置换通用表 + `/plugins` 元数据端点 + 设置 UI 自动生成 | 低，但面广 |
+| 阶段 | 内容 | 风险 | 状态 |
+|---|---|---|---|
+| 1 | 特征化测试 + `registry.rs` 骨架 + `AnalyzerPlugin` → `SegmentObserver` 接入 | 低，纯搭台 | ✅ 完成 |
+| 2 | filter 链：`short_segment` / `cross_stream_dedup` 搬出 `StreamWorker` | 中，动热路径 | ✅ 完成 |
+| 3 | observer：`conversation_metrics` / `coaching_nudge` 搬出 | 中，跨段状态 | 待办 |
+| 4 | finalizer：`session_quality` / `webhook` / `markdown_export` / `trio_notes`；server 与 tauri 导出合一 | 中，涉及两个适配器 | 待办 |
+| 5 | 配置换通用表 + `/plugins` 元数据端点 + 设置 UI 自动生成 | 低，但面广 | 待办 |
 
 **预期产出：** `pipeline/src/lib.rs` 由 1130 行降至约 800 行；server 与 tauri 各去掉一份导出实现；`plugins/` 下新增 6 个小文件。
+
+### 阶段 1–2 实施记录（2026-08-20，分支 `refactor/plugin-registry`）
+
+| 指标 | 预期 | 实际 |
+|---|---|---|
+| `pipeline/src/lib.rs` 行数 | 阶段 1–2 后约 1070 | **1119**（1130 → 1119，仅减 11 行） |
+| 加 filter 插件的成本 | 加 1 文件 + 表里 1 行 | ✅ 达成（pipeline 内无任何具体插件类型引用，仅一处解释性注释） |
+| 特征化 golden | 保持不变 | ✅ 字节一致，全程未重新生成 |
+
+**行数减得远少于预期。** filter 链的接线代码与「被吞掉」分支的清理逻辑把删掉的行加了回来（diff −55/+40）。真正的瘦身要等阶段 3 搬走 metrics/nudge 调度。**不要拿行数当阶段 3–5 的验收指标** —— 结构解耦（加插件不碰核心）已达成，那才是目标。
+
+**过程中发现并修复的两个既存缺陷**（不在本设计范围内，但影响结论可信度）：
+
+1. **测试目录名碰撞导致偶发失败。** `TempDir` 仅用 `SystemTime::now().as_nanos()` 命名，而 macOS 该时钟实际只有微秒分辨率（实测连续 1000 次取值有 956 次相同）。并行测试拿到同一路径，先结束者 `Drop` 删除目录，另一个随即报 `unable to open database file`。已改为 pid + 进程内原子计数器。**此前所有「测试全绿」的结论都含运气成分。**
+
+2. **跨流回声重复段仍触发插件**（§3.3 已记录的既存缺陷）。修复随阶段 2 落地，并新增回归测试 `filtered_segments_never_reach_observers` 守住「被 filter 吞掉的段一次都不许派发到 observer」。该测试经破坏性验证：把 `apply_filters` 挪回 emit 包装后它变红（派发 6 次 vs 存活 3 段），而原有的 `cross_stream_echo_dedup_keeps_single_copy` **在同样破坏下仍为绿** —— 说明它守住的确实是此前无人看守的不变量。
 
 ## 8. 架构约束（评审用）
 
