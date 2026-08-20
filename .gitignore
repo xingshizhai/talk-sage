@@ -29,3 +29,6 @@ dist/
 .env
 
 tmp/
+
+# Claude Code 工作区（隔离 worktree，不入库）
+.claude/worktrees/
