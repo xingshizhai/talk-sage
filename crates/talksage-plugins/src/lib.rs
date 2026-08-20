@@ -1,16 +1,27 @@
 //! TalkSage v2 会议辅助插件。
 //!
-//! `AnalyzerPlugin` 抽象：对一条最终转写段做触发判断 + 生成领域事件。
+//! `SegmentObserver` 抽象：对一条最终转写段做触发判断 + 生成领域事件。
 //! - `skeleton`：本地即时（骨架，同步发）；`run`：可含 LLM 调用（pipeline 在独立线程执行）。
 //! - 依赖（知识库/LLM）经 `PluginContext` 注入（Arc 共享），插件不自行持有。
 
 pub mod brief_retriever;
 pub mod term_explainer;
 pub mod translator;
+pub mod registry;
+pub mod short_segment;
+pub mod cross_stream_dedup;
+pub mod builtin;
+
+pub use builtin::{build_registry, builtin_plugins};
+
+pub use registry::{EventFilter, HookRegistry, Plugin, PluginConfig, SegmentObserver};
+
+/// 过渡别名：老代码仍可用 AnalyzerPlugin 这个名字。
+/// 阶段 3 迁移完 observer 后删除。
+pub use registry::SegmentObserver as AnalyzerPlugin;
 
 use std::sync::Arc;
 
-use talksage_core::{DomainEvent, TranscriptSegment};
 use talksage_knowledge::KnowledgeBase;
 use talksage_llm::LLMProvider;
 
@@ -31,18 +42,4 @@ impl Default for PluginContext {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// 插件抽象。
-pub trait AnalyzerPlugin: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn should_trigger(&self, seg: &TranscriptSegment) -> bool;
-    /// 是否消费 hypothesis（partial）。默认 false：只处理 committed。
-    fn accepts_speculative(&self) -> bool {
-        false
-    }
-    /// 本地即时骨架（无 LLM），同步发出。
-    fn skeleton(&self, seg: &TranscriptSegment) -> Option<DomainEvent>;
-    /// 完整执行（可含 LLM），pipeline 在独立线程调用。
-    fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> Option<DomainEvent>;
 }

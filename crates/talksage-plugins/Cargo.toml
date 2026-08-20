@@ -10,3 +10,5 @@ talksage-core = { path = "../talksage-core" }
 talksage-knowledge = { path = "../talksage-knowledge" }
 talksage-llm = { path = "../talksage-llm" }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
+log = "0.4"

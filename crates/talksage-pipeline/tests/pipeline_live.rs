@@ -11,6 +11,18 @@ use talksage_asr::EngineKind;
 use talksage_core::DomainEvent;
 use talksage_pipeline::{AudioInput, LivePipelineConfig, SessionRuntime, StreamConfig};
 
+/// 内置插件钩子（短段阈值可调）。整份注册表只建一次，两条流共享同一批
+/// filter 实例 —— 跨流去重靠的就是这份共享历史。
+fn hooks_with_min_commit_ms(min_ms: u64) -> talksage_plugins::HookRegistry {
+    talksage_plugins::build_registry(
+        &talksage_plugins::builtin_plugins(),
+        &std::collections::HashMap::from([(
+            "short_segment".to_string(),
+            serde_json::json!({ "min_ms": min_ms }),
+        )]),
+    )
+}
+
 /// 缺资源时是否必须失败（而不是跳过）。`env` 为 `TALKSAGE_REQUIRE_MODELS` 的值。
 fn must_fail_on_missing(env: Option<&str>) -> bool {
     matches!(env, Some("1") | Some("true"))
@@ -119,7 +131,7 @@ fn zh_file_pipeline(root: &Path, wav: &Path) -> LivePipelineConfig {
         runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
         speaker: None,
         engine_pool: None,
-        min_commit_ms: 0,
+        hooks: hooks_with_min_commit_ms(0),
     }
 }
 
@@ -320,6 +332,230 @@ fn cross_stream_echo_dedup_keeps_single_copy() {
     eprintln!("跨流去重：单流 {} 段，双流去重后 {} 段", single_finals.len(), finals.len());
 }
 
+/// 只数派发次数的 observer：在 should_trigger 里计数后返回 false，
+/// 因此不产生骨架事件、不起线程、不碰 LLM —— 计数完全确定。
+/// should_trigger 被调用，就等于这一段确实派发到了 observer。
+struct CountingObserver {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl talksage_plugins::AnalyzerPlugin for CountingObserver {
+    fn name(&self) -> &'static str {
+        "counting_observer"
+    }
+
+    fn should_trigger(&self, _seg: &talksage_core::TranscriptSegment) -> bool {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        false
+    }
+
+    fn skeleton(&self, _seg: &talksage_core::TranscriptSegment) -> Option<DomainEvent> {
+        None
+    }
+
+    fn run(
+        &self,
+        _seg: &talksage_core::TranscriptSegment,
+        _ctx: &talksage_plugins::PluginContext,
+    ) -> Option<DomainEvent> {
+        None
+    }
+}
+
+fn count_finals(evs: &[DomainEvent]) -> usize {
+    evs.iter()
+        .filter(|e| matches!(e, DomainEvent::Segment { is_partial: false, .. }))
+        .count()
+}
+
+/// 跑一遍管道，返回 (事件流, observer 派发次数)。
+fn run_with_counting_observer(mut cfg: LivePipelineConfig) -> (Vec<DomainEvent>, usize) {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    cfg.plugins = vec![Arc::new(CountingObserver { calls: calls.clone() })];
+    let evs = run_and_collect(cfg);
+    let n = calls.load(std::sync::atomic::Ordering::SeqCst);
+    (evs, n)
+}
+
+/// 回归网：被 filter 吞掉的段绝不能派发到 observer。
+///
+/// 这是「filter 链放在产生点而不是 sink」的核心不变量。若有人把
+/// `apply_filters` 挪回 emit 包装里，事件流看上去仍然是去重过的
+/// （`cross_stream_echo_dedup_keeps_single_copy` 照样绿），但 `on_final`
+/// 会对回声重复段照常派发 —— 术语/翻译/简报插件白跑一遍，可能带重复的
+/// LLM 调用。那正是这次重构要修掉的缺陷，也只有这个测试能抓到它。
+///
+/// 判据是「派发次数 == 存活的 final 段数」，不依赖 ASR 具体识别出什么，
+/// 因此与语料无关、可确定复现。
+#[test]
+fn filtered_segments_never_reach_observers() {
+    let Some(root) = model_root() else {
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
+    };
+    let wav = zh_model_dir(&root).join("0.wav");
+    if !vad_model(&root).is_file() || !wav.is_file() {
+        return skip("模型/VAD/测试音频不完整");
+    }
+
+    // 基线：单流没有回声可去重，派发次数应恰等于 final 段数。
+    // 这一条同时保证测试非空转 —— 计数器确实在动。
+    let (single, single_calls) = run_with_counting_observer(zh_file_pipeline(&root, &wav));
+    let single_finals = count_finals(&single);
+    assert!(single_finals > 0, "单流应产生 final 段: {single:?}");
+    assert_eq!(
+        single_calls, single_finals,
+        "单流：每个 final 段应恰好派发一次 observer"
+    );
+
+    // 双流回声：同一 wav 同时喂两条流，一半的段会被 cross_stream_dedup 吞掉。
+    let mut cfg = zh_file_pipeline(&root, &wav);
+    cfg.client = Some(StreamConfig {
+        engine_kind: EngineKind::ParaformerZh,
+        model_dir: zh_model_dir(&root),
+        input: AudioInput::File(wav),
+        speaker_id: 1,
+        speaker_label: "客户".into(),
+    });
+    let (dual, dual_calls) = run_with_counting_observer(cfg);
+    let dual_finals = count_finals(&dual);
+    assert!(dual_finals > 0, "双流去重后仍应有 final 段");
+
+    // 核心断言：派发次数不多于存活段数。被吞掉的段一次都不许派发。
+    assert_eq!(
+        dual_calls, dual_finals,
+        "被 filter 吞掉的段派发到了 observer：派发 {dual_calls} 次，但只有 {dual_finals} 个 final 段存活。\
+         filter 链必须施加在产生点（emit 与 on_final 之前），不能只挡 emit"
+    );
+    // 附带：去重后不该退化成双份
+    assert!(
+        dual_calls <= single_finals,
+        "双流派发 {dual_calls} 次 > 单流 {single_finals} 段，回声段仍在触发插件"
+    );
+    eprintln!(
+        "observer 派发：单流 {single_calls} 次 / {single_finals} 段，双流 {dual_calls} 次 / {dual_finals} 段"
+    );
+}
+
+/// 改写型 filter 的后缀。带一个空格 → 每段词数 +1，统计计数器是否用了
+/// filter 之后的文本因此可判定。
+const REWRITE_SUFFIX: &str = " [已改写]";
+
+/// 测试替身：改写（而非丢弃）final 段文本的 filter。
+/// 内置的两个 filter 只会 drop，第一个真正做变换的 filter（脱敏/标点/规范化）
+/// 会暴露「sink 拿到改写后的，observer 与统计拿到原文」的错位。
+struct RewriteFilter;
+
+impl talksage_plugins::EventFilter for RewriteFilter {
+    fn filter(&self, ev: DomainEvent) -> Option<DomainEvent> {
+        match ev {
+            DomainEvent::Segment {
+                speaker_id, speaker_label, text, is_partial: false, ts_ms,
+                duration_ms, rms, revision, start_sample, end_sample,
+            } => Some(DomainEvent::Segment {
+                speaker_id,
+                speaker_label,
+                text: format!("{text}{REWRITE_SUFFIX}"),
+                is_partial: false,
+                ts_ms,
+                duration_ms,
+                rms,
+                revision,
+                start_sample,
+                end_sample,
+            }),
+            other => Some(other),
+        }
+    }
+}
+
+/// 记录每次派发看到的段文本。
+struct RecordingObserver {
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl talksage_plugins::AnalyzerPlugin for RecordingObserver {
+    fn name(&self) -> &'static str {
+        "recording_observer"
+    }
+
+    fn should_trigger(&self, seg: &talksage_core::TranscriptSegment) -> bool {
+        self.seen.lock().unwrap().push(seg.text.clone());
+        false
+    }
+
+    fn skeleton(&self, _seg: &talksage_core::TranscriptSegment) -> Option<DomainEvent> {
+        None
+    }
+
+    fn run(
+        &self,
+        _seg: &talksage_core::TranscriptSegment,
+        _ctx: &talksage_plugins::PluginContext,
+    ) -> Option<DomainEvent> {
+        None
+    }
+}
+
+/// 回归网：filter 链是「变换」，不只是「丢弃」——observer 与统计计数器
+/// 必须看 filter 之后的数据，否则落库/sink 的文本与观察者、words/questions
+/// 会静默错位。
+#[test]
+fn observers_and_counters_see_the_filtered_text() {
+    let Some(root) = model_root() else {
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
+    };
+    let wav = zh_model_dir(&root).join("0.wav");
+    if !vad_model(&root).is_file() || !wav.is_file() {
+        return skip("模型/VAD/测试音频不完整");
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut cfg = zh_file_pipeline(&root, &wav);
+    cfg.plugins = vec![Arc::new(RecordingObserver { seen: seen.clone() })];
+    let mut hooks = hooks_with_min_commit_ms(0);
+    hooks.add_filter(Arc::new(RewriteFilter));
+    cfg.hooks = hooks;
+
+    let evs = run_and_collect(cfg);
+
+    // sink 侧：filter 确实改写了 final 文本
+    let emitted: Vec<String> = evs
+        .iter()
+        .filter_map(|e| match e {
+            DomainEvent::Segment { text, is_partial: false, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!emitted.is_empty(), "应产生 final 段: {evs:?}");
+    assert!(
+        emitted.iter().all(|t| t.ends_with(REWRITE_SUFFIX)),
+        "filter 未生效，事件流里的文本没有改写: {emitted:?}"
+    );
+
+    // observer 侧：必须与 sink 侧逐条一致
+    let observed = seen.lock().unwrap().clone();
+    assert_eq!(
+        observed, emitted,
+        "observer 看到的是 filter 之前的文本 —— on_final 必须用 filter 之后的段，\
+         否则落库/sink 的内容与插件看到的内容会静默错位"
+    );
+
+    // 统计计数器侧：words 必须按改写后的文本计
+    let words: Vec<usize> = evs
+        .iter()
+        .filter_map(|e| match e {
+            DomainEvent::SessionStats { words, .. } => Some(*words),
+            _ => None,
+        })
+        .collect();
+    let expected: usize = emitted.iter().map(|t| talksage_core::metrics::count_words(t)).sum();
+    assert_eq!(
+        words,
+        vec![expected],
+        "SessionStats.words 应按 filter 之后的文本统计（改写后每段多一个词）"
+    );
+}
+
 /// 插件集成：英文客户文件 + term_explainer（mock LLM）+ translator → Term/Translation 事件。
 #[test]
 fn plugins_emit_term_and_translation_events() {
@@ -365,7 +601,7 @@ fn plugins_emit_term_and_translation_events() {
         runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
         speaker: None,
         engine_pool: None,
-        min_commit_ms: 0,
+        hooks: hooks_with_min_commit_ms(0),
     };
 
     let evs = run_and_collect(cfg);
@@ -431,7 +667,7 @@ fn min_commit_ms_suppresses_short_segments() {
 
     // 实验组：min_commit_ms=60_000（> 任何段时长）→ 全部丢弃
     let mut cfg = zh_file_pipeline(&root, &wav);
-    cfg.min_commit_ms = 60_000;
+    cfg.hooks = hooks_with_min_commit_ms(60_000);
     let evs_on = run_and_collect(cfg);
     let finals_on = evs_on
         .iter()

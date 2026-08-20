@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use talksage_core::{DomainEvent, ResultStatus, TranscriptSegment};
 
-use super::{AnalyzerPlugin, PluginContext};
+use super::{SegmentObserver, PluginContext};
 
 const SYSTEM_PROMPT: &str = "你是硬件制造业与商务谈判领域的专家助手。用户在与英文客户洽谈。\
     请解释对话中出现的专业术语/缩写。简洁，中文，每行格式：缩写 = 中文全称（英文全称），一句话说明含义。";
@@ -88,7 +88,7 @@ impl TermExplainerPlugin {
     }
 }
 
-impl AnalyzerPlugin for TermExplainerPlugin {
+impl SegmentObserver for TermExplainerPlugin {
     fn name(&self) -> &'static str {
         "term_explainer"
     }

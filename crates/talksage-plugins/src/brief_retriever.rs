@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use talksage_core::{DomainEvent, TranscriptSegment};
 
-use super::{AnalyzerPlugin, PluginContext};
+use super::{SegmentObserver, PluginContext};
 
 fn now() -> f64 {
     SystemTime::now()
@@ -29,7 +29,7 @@ impl BriefRetrieverPlugin {
     }
 }
 
-impl AnalyzerPlugin for BriefRetrieverPlugin {
+impl SegmentObserver for BriefRetrieverPlugin {
     fn name(&self) -> &'static str {
         "brief_retriever"
     }
