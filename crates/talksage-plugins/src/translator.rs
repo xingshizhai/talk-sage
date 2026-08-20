@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use talksage_core::{DomainEvent, ResultStatus, TranscriptSegment, TranslationDirection};
 
-use super::{AnalyzerPlugin, PluginContext};
+use super::{SegmentObserver, PluginContext};
 
 const SYSTEM_PROMPT: &str = "你是商务会议同声翻译。把用户输入翻译成目标语言，只输出译文，不要解释。";
 
@@ -30,7 +30,7 @@ impl Default for TranslatorPlugin {
     }
 }
 
-impl AnalyzerPlugin for TranslatorPlugin {
+impl SegmentObserver for TranslatorPlugin {
     fn name(&self) -> &'static str {
         "translator"
     }
