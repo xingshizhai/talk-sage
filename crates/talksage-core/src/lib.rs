@@ -5,6 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod clock;
+pub use clock::AudioClock;
+
+pub mod transcript;
+pub use transcript::{HypothesisSpan, SessionSnapshot, TranscriptState};
+
 pub mod metrics;
 pub use metrics::{
     compute_conversation_metrics, ConversationMetrics, Nudge, NudgeAction, NudgeEngine, NudgeKind, NudgeSeverity,
@@ -33,6 +39,26 @@ pub enum DomainEvent {
         /// 最终段平均能量 RMS（0..1；partial 事件为 0）。
         #[serde(default)]
         rms: f32,
+        /// TranscriptState 修订号（订阅快照对齐用；旧客户端缺省 0）。
+        #[serde(default)]
+        revision: u64,
+        /// 本段在该流 AudioClock 上的起始采样。
+        #[serde(default)]
+        start_sample: u64,
+        /// 本段（或当前 hypothesis）在该流上的结束采样。
+        #[serde(default)]
+        end_sample: u64,
+    },
+    /// 订阅时的当前转写快照（committed + 每说话人 hypothesis）。旧客户端可忽略。
+    Snapshot {
+        revision: u64,
+        committed: Vec<TranscriptSegment>,
+        hypothesis: Vec<HypothesisSpan>,
+        #[serde(default)]
+        processed_until_sample: u64,
+        #[serde(default)]
+        committed_until_sample: u64,
+        stage: StatusStage,
     },
     /// 术语解释结果（骨架 → 最终，按 result_id 原地更新）。
     Term {
@@ -109,6 +135,41 @@ pub enum DomainEvent {
     Nudge {
         nudge: Nudge,
     },
+}
+
+/// 事件投递等级（文档化语义；独立 SessionWriter 可后置）。
+///
+/// - `Ephemeral`：电平、hypothesis，可覆盖、可丢
+/// - `Replayable`：指标、插件增量、状态，可从快照重建
+/// - `Durable`：committed 转写、会话结束，必须持久化
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryClass {
+    Ephemeral,
+    Replayable,
+    Durable,
+}
+
+impl DomainEvent {
+    pub fn delivery_class(&self) -> DeliveryClass {
+        match self {
+            DomainEvent::Level { .. } => DeliveryClass::Ephemeral,
+            DomainEvent::Segment { is_partial: true, .. } => DeliveryClass::Ephemeral,
+            DomainEvent::Segment { is_partial: false, .. } => DeliveryClass::Durable,
+            DomainEvent::SessionStats { .. } => DeliveryClass::Durable,
+            DomainEvent::Term { status: ResultStatus::Final, .. }
+            | DomainEvent::Translation { status: ResultStatus::Final, .. }
+            | DomainEvent::KeyPoint { status: ResultStatus::Final, .. } => DeliveryClass::Durable,
+            DomainEvent::Term { .. }
+            | DomainEvent::Translation { .. }
+            | DomainEvent::KeyPoint { .. }
+            | DomainEvent::Snapshot { .. }
+            | DomainEvent::Status { .. }
+            | DomainEvent::Brief { .. }
+            | DomainEvent::State { .. }
+            | DomainEvent::Metrics { .. }
+            | DomainEvent::Nudge { .. } => DeliveryClass::Replayable,
+        }
+    }
 }
 
 /// 渐进结果状态（骨架先显示，最终填充）。
@@ -329,6 +390,9 @@ mod tests {
             ts_ms: 1234,
             duration_ms: 1500,
             rms: 0.3,
+            revision: 1,
+            start_sample: 0,
+            end_sample: 24_000,
         };
         let json = serde_json::to_string(&ev).unwrap();
         let back: DomainEvent = serde_json::from_str(&json).unwrap();
@@ -346,6 +410,52 @@ mod tests {
     #[test]
     fn skeleton_and_final_are_distinct() {
         assert_ne!(ResultStatus::Skeleton, ResultStatus::Final);
+    }
+
+    #[test]
+    fn delivery_class_splits_ephemeral_durable() {
+        let partial = DomainEvent::Segment {
+            speaker_id: 0,
+            speaker_label: "我".into(),
+            text: "hi".into(),
+            is_partial: true,
+            ts_ms: 0,
+            duration_ms: 0,
+            rms: 0.0,
+            revision: 0,
+            start_sample: 0,
+            end_sample: 0,
+        };
+        let committed = DomainEvent::Segment {
+            speaker_id: 0,
+            speaker_label: "我".into(),
+            text: "hi".into(),
+            is_partial: false,
+            ts_ms: 0,
+            duration_ms: 400,
+            rms: 0.1,
+            revision: 1,
+            start_sample: 0,
+            end_sample: 6400,
+        };
+        assert_eq!(partial.delivery_class(), DeliveryClass::Ephemeral);
+        assert_eq!(committed.delivery_class(), DeliveryClass::Durable);
+        assert_eq!(
+            DomainEvent::Level {
+                mic_rms: 0.1,
+                loopback_rms: 0.0
+            }
+            .delivery_class(),
+            DeliveryClass::Ephemeral
+        );
+        assert_eq!(
+            DomainEvent::Status {
+                stage: StatusStage::Idle,
+                message: "已停止".into()
+            }
+            .delivery_class(),
+            DeliveryClass::Replayable
+        );
     }
 
     #[test]

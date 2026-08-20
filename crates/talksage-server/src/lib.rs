@@ -23,10 +23,8 @@ use tokio::sync::broadcast;
 use talksage_asr::{EngineKind, EnginePool};
 use talksage_config::ConfigManager;
 use talksage_core::DomainEvent;
-use talksage_llm::{LLMProvider, OpenAICompatProvider};
 use talksage_notes::NotesGenerator;
-use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConfig};
-use talksage_plugins::{brief_retriever::BriefRetrieverPlugin, term_explainer::TermExplainerPlugin, translator::TranslatorPlugin, PluginContext};
+use talksage_pipeline::{RunningListen, StartListen, TalkSageService};
 use talksage_session::SessionStore;
 
 /// 共享服务状态。
@@ -36,33 +34,31 @@ pub struct ServerState {
     pub sessions: Arc<SessionStore>,
     /// 领域事件广播（前端 /ws 订阅）。
     pub events: broadcast::Sender<DomainEvent>,
-    /// 当前监听管道。
-    pub pipeline: Arc<Mutex<Option<LivePipeline>>>,
-    /// 当前会话 id（监听期间）。
-    pub current_session: Arc<Mutex<Option<i64>>>,
+    /// 当前监听。
+    pub running: Arc<Mutex<Option<RunningListen>>>,
     /// 可选鉴权 token（空 = 不鉴权）。
     pub token: String,
-    /// ASR 引擎池（监听 + OpenAI 兼容转写 API 共用，热启动复用）。
-    pub engine_pool: Arc<EnginePool>,
+    /// 共享用例入口（装配 / 落库 / 引擎池）。
+    pub service: TalkSageService,
 }
 
 /// 启动 headless 服务（阻塞运行）。
 pub async fn run(host: &str, port: u16, token: &str, web_dist: &PathBuf) -> Result<()> {
     let _log_guard = talksage_logging::init(None);
     log::info!("headless 服务启动，host={host} port={port} token={}", if token.is_empty() { "none" } else { "set" });
-    let config = ConfigManager::load(None, None).map_err(|e| anyhow!("配置加载失败: {e}"))?;
+    let config = Arc::new(ConfigManager::load(None, None).map_err(|e| anyhow!("配置加载失败: {e}"))?);
     let sessions = Arc::new(
         SessionStore::open(&config.data_dir().join("sessions.db").to_string_lossy()).map_err(|e| anyhow!("会话库: {e}"))?,
     );
     let (tx, _rx) = broadcast::channel::<DomainEvent>(256);
+    let service = TalkSageService::new(config.clone(), Some(sessions.clone()), EnginePool::new());
     let state = ServerState {
-        config: Arc::new(config),
+        config,
         sessions,
         events: tx,
-        pipeline: Arc::new(Mutex::new(None)),
-        current_session: Arc::new(Mutex::new(None)),
+        running: Arc::new(Mutex::new(None)),
         token: token.to_string(),
-        engine_pool: EnginePool::new(),
+        service,
     };
 
     let app = build_router(state, web_dist);
@@ -420,7 +416,7 @@ async fn generate_notes_api(
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
-    let Some(llm) = build_llm(&state.config) else {
+    let Some(llm) = TalkSageService::build_llm(&state.config) else {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "未配置 LLM" }))).into_response();
     };
     let Some(template) = talksage_notes::get_template(&body.template_id) else {
@@ -449,7 +445,7 @@ async fn generate_trio_notes_api(
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
-    let Some(llm) = build_llm(&state.config) else {
+    let Some(llm) = TalkSageService::build_llm(&state.config) else {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "未配置 LLM" }))).into_response();
     };
     let Ok(detail) = state.sessions.get_session(id) else {
@@ -488,7 +484,7 @@ async fn generate_highlights_api(State(state): State<ServerState>, headers: axum
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
-    let Some(llm) = build_llm(&state.config) else {
+    let Some(llm) = TalkSageService::build_llm(&state.config) else {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "未配置 LLM" }))).into_response();
     };
     let Ok(detail) = state.sessions.get_session(id) else {
@@ -504,88 +500,33 @@ async fn start_listen_api(State(state): State<ServerState>, headers: axum::http:
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
-    let mut guard = state.pipeline.lock().unwrap();
+    let mut guard = state.running.lock().unwrap();
     if guard.is_some() {
         return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "已在监听中" }))).into_response();
     }
-    let cfg = match build_pipeline_config(&state.config, Some(state.engine_pool.clone())) {
-        Ok(c) => c,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
-    };
     let events = state.events.clone();
-    let current_session = state.current_session.clone();
-    let sessions = state.sessions.clone();
-    let sink: Arc<dyn Fn(DomainEvent) + Send + Sync> = Arc::new(move |ev| {
-        // 落库
-        if let Ok(guard) = current_session.lock() {
-            if let Some(sid) = *guard {
-                match &ev {
-                    DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, duration_ms, rms, .. } => {
-                        let _ = sessions.add_segment(
-                            sid,
-                            &talksage_core::TranscriptSegment {
-                                speaker_id: *speaker_id,
-                                speaker_label: speaker_label.clone(),
-                                text: text.clone(),
-                                is_partial: false,
-                                ts_ms: *ts_ms,
-                                duration_ms: *duration_ms,
-                                rms: *rms,
-                            },
-                        );
-                    }
-                    DomainEvent::Term { status: talksage_core::ResultStatus::Final, content, .. } => {
-                        let _ = sessions.add_term(sid, content);
-                    }
-                    DomainEvent::Translation { content, .. } => {
-                        let _ = sessions.add_translation(sid, "translate", content);
-                    }
-                    _ => {}
-                }
-            }
+    match state.service.start(
+        StartListen::desktop(),
+        Arc::new(move |ev| {
+            let _ = events.send(ev);
+        }),
+    ) {
+        Ok(running) => {
+            *guard = Some(running);
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
         }
-        let _ = events.send(ev);
-    });
-    let mut pipeline = LivePipeline::new(cfg);
-    if let Err(e) = pipeline.start(sink) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    if let Ok(sid) = state.sessions.start_session(now) {
-        *state.current_session.lock().unwrap() = Some(sid);
-    }
-    *guard = Some(pipeline);
-    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
 async fn stop_listen_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
-    if let Some(mut p) = state.pipeline.lock().unwrap().take() {
-        p.stop();
-    }
-    if let Some(sid) = state.current_session.lock().unwrap().take() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let _ = state.sessions.end_session(sid, now);
-        // 会议结束 Webhook（借鉴 Call.md workflow-webhook；配置启用 + SSRF 防护）
-        let wh_cfg = state.config.snapshot().webhooks;
-        if wh_cfg.enabled && !wh_cfg.urls.is_empty() {
-            let sessions = state.sessions.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Ok(detail) = sessions.get_session(sid) {
-                    let results = talksage_session::trigger_meeting_webhooks(&detail, &wh_cfg);
-                    for r in &results {
-                        log::info!("webhook {}: {}（{}）", if r.ok { "成功" } else { "失败" }, r.url, r.message);
-                    }
-                }
-            });
+    let running = state.running.lock().unwrap().take();
+    if let Some(running) = running {
+        if let Err(e) = state.service.finish(running) {
+            log::warn!("停止监听收尾失败: {e}");
         }
     }
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
@@ -604,7 +545,7 @@ async fn set_noise_level_api(
         .ok()
         .and_then(|v| v.get("level").and_then(|l| l.as_f64()).map(|l| l as f32))
         .unwrap_or(0.0);
-    match state.pipeline.lock().unwrap().as_ref() {
+    match state.running.lock().unwrap().as_ref() {
         Some(p) => {
             p.set_noise_level(level);
             (StatusCode::OK, Json(serde_json::json!({ "ok": true, "level": p.noise_level() }))).into_response()
@@ -767,6 +708,22 @@ async fn get_recording_api(
 }
 
 async fn handle_ws(mut socket: WebSocket, state: ServerState) {
+    let snap = state.running.lock().ok().and_then(|g| g.as_ref().map(|r| r.snapshot()));
+    if let Some(s) = snap {
+        let ev = talksage_core::DomainEvent::Snapshot {
+            revision: s.revision,
+            committed: s.committed,
+            hypothesis: s.hypothesis,
+            processed_until_sample: s.processed_until_sample,
+            committed_until_sample: s.committed_until_sample,
+            stage: s.stage,
+        };
+        if let Ok(text) = serde_json::to_string(&ev) {
+            if socket.send(Message::Text(text.into())).await.is_err() {
+                return;
+            }
+        }
+    }
     let mut rx = state.events.subscribe();
     loop {
         tokio::select! {
@@ -793,142 +750,8 @@ async fn handle_ws(mut socket: WebSocket, state: ServerState) {
     }
 }
 
-// ── 装配辅助（与 Tauri 侧等价） ────────────────────────────
-
-fn build_llm(config: &ConfigManager) -> Option<Arc<dyn LLMProvider>> {
-    let snapshot = config.snapshot();
-    let name = snapshot.llm.default.clone();
-    let provider = snapshot.llm.providers.get(&name)?;
-    if provider.api_key.is_empty() && name != "ollama" {
-        return None;
-    }
-    Some(Arc::new(OpenAICompatProvider::new(
-        provider.api_key.clone(),
-        provider.model.clone(),
-        provider.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com/v1".to_string()),
-    )))
-}
-
 fn resolve_models_dir() -> Option<PathBuf> {
-    if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
-        let p = PathBuf::from(d);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for cand in [
-        here.join("../../models"),
-        here.join("../../../models"),
-        PathBuf::from("models"),
-        PathBuf::from("../models"),
-    ] {
-        if cand.is_dir() {
-            return Some(cand);
-        }
-    }
-    None
-}
-
-fn build_pipeline_config(config: &ConfigManager, engine_pool: Option<Arc<EnginePool>>) -> Result<LivePipelineConfig> {
-    let model_dir = resolve_models_dir().ok_or_else(|| anyhow!("未找到 models/ 目录"))?;
-    // 场景模式：有效参数（自定义 = custom，其他 = 内置模板）
-    let snapshot = config.snapshot();
-    let scene = snapshot.scene.effective();
-    let user_engine = EngineKind::from_name(&scene.user_engine).unwrap_or(EngineKind::ParaformerZh);
-    let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
-    let user_model = model_dir.join(user_engine.model_dir_name());
-    if !vad_model.is_file() {
-        return Err(anyhow!("缺少 VAD 模型: {}", vad_model.display()));
-    }
-    if !user_model.is_dir() {
-        return Err(anyhow!("缺少 ASR 模型目录: {}", user_model.display()));
-    }
-    // 插件装配
-    let llm = build_llm(config);
-    let kb = {
-        let kb_cfg = &snapshot.knowledge_base;
-        if kb_cfg.enabled && !kb_cfg.folder.is_empty() {
-            let mut kb = talksage_knowledge::KnowledgeBase::new();
-            kb.index_folder(std::path::Path::new(&kb_cfg.folder));
-            if kb.chunk_count() > 0 {
-                Some(Arc::new(kb))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    };
-    let mut plugins: Vec<Arc<dyn talksage_plugins::AnalyzerPlugin>> = Vec::new();
-    if scene.term_enabled && snapshot.plugins.term_explainer.enabled {
-        plugins.push(Arc::new(TermExplainerPlugin::new(snapshot.plugins.term_explainer.cooldown_seconds as f64)));
-    }
-    if scene.translation_enabled && snapshot.plugins.translator.enabled {
-        plugins.push(Arc::new(TranslatorPlugin::new()));
-    }
-    if scene.brief_enabled && snapshot.plugins.brief_retriever.enabled && kb.is_some() {
-        plugins.push(Arc::new(BriefRetrieverPlugin::new(snapshot.plugins.brief_retriever.cooldown_seconds as f64, 0.05)));
-    }
-    // 客户流（场景决定；headless 音频在服务端本机，回环可后续接入）
-    let client_engine = EngineKind::from_name(&scene.client_engine).unwrap_or(EngineKind::ZipformerEn);
-    let client_model = model_dir.join(client_engine.model_dir_name());
-    let client = if scene.client_enabled && client_model.is_dir() {
-        Some(StreamConfig {
-            engine_kind: client_engine,
-            model_dir: client_model,
-            input: AudioInput::Mic(None), // headless：客户流暂与用户流同设备（回环后续接入）
-            speaker_id: 1,
-            speaker_label: "客户".into(),
-        })
-    } else {
-        None
-    };
-    Ok(LivePipelineConfig {
-        vad_model,
-        chunk_ms: 100,
-        vad: scene.to_vad_config(),
-        denoise: scene.to_denoise_config(),
-        asr_threads: 4,
-        user: StreamConfig {
-            engine_kind: user_engine,
-            model_dir: user_model,
-            input: AudioInput::Mic(None),
-            speaker_id: 0,
-            speaker_label: "我".into(),
-        },
-        client,
-        plugins,
-        plugin_ctx: PluginContext { kb, llm },
-        // headless 服务端也支持录音（默认随配置）
-        recording_dir: if snapshot.recording.enabled {
-            let dir = snapshot.recording.resolve_dir(config.data_dir());
-            let _ = std::fs::create_dir_all(&dir);
-            Some(dir)
-        } else {
-            None
-        },
-        runtime: Arc::new(talksage_pipeline::RuntimeParams::default()),
-        // 说话人识别（场景启用 + headless 同启用）
-        speaker: if scene.speaker_enabled {
-            let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
-            if spk_model.is_file() {
-                let owner = talksage_pipeline::speaker::load_owner_embedding(config.data_dir());
-                Some(talksage_pipeline::SpeakerConfig {
-                    model: spk_model,
-                    owner_embedding: owner,
-                    threshold: talksage_pipeline::speaker::DEFAULT_THRESHOLD,
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        },
-        engine_pool,
-        // 最短提交时长：场景参数（噪音短段抑制）
-        min_commit_ms: scene.min_segment_ms,
-    })
+    TalkSageService::resolve_models_dir()
 }
 
 // ── OpenAI 兼容 API（/v1/*）──────────────────────────────
@@ -1068,7 +891,7 @@ async fn transcribe_api(
         .unwrap_or(0.0);
 
     // 阻塞转写（模型加载/推理）放到 blocking 线程池
-    let pool = state.engine_pool.clone();
+    let pool = state.service.engines().clone();
     let norm_wav_in = norm_wav.clone();
     let result = tokio::task::spawn_blocking(move || {
         talksage_pipeline::offline::transcribe_file(Some(&pool), kind, &engine_dir, &vad_model, &norm_wav_in)

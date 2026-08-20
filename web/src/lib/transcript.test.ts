@@ -85,6 +85,19 @@ describe("TranscriptAccumulator", () => {
     // 同行 key 不变（partial→final）
     expect(keys[0]).toBe(keys[0]);
   });
+
+  it("applySnapshot 重建 committed 与 hypothesis 尾巴", () => {
+    const acc = new TranscriptAccumulator();
+    acc.push(seg("我", "旧草稿", true));
+    acc.applySnapshot(
+      [{ speaker_label: "我", text: "已确认交付", is_partial: false, ts_ms: 1000 }],
+      [{ speaker_label: "客户", text: "We need", is_partial: true, ts_ms: 1100 }],
+    );
+    const lines = acc.getLines();
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatchObject({ speakerLabel: "我", text: "已确认交付", isPartial: false });
+    expect(lines[1]).toMatchObject({ speakerLabel: "客户", text: "We need", isPartial: true });
+  });
 });
 
 describe("splitSentences", () => {

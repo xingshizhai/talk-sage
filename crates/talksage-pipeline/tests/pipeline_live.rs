@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use talksage_core::DomainEvent;
-use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConfig};
+use talksage_pipeline::{AudioInput, LivePipelineConfig, SessionRuntime, StreamConfig};
 use talksage_asr::EngineKind;
 
 /// 解析模型根目录（TALKSAGE_MODELS_DIR 优先，其次相对 CARGO_MANIFEST_DIR 探测）。
@@ -52,8 +52,8 @@ fn run_and_collect(cfg: LivePipelineConfig) -> Vec<DomainEvent> {
         sink_events.lock().unwrap().push(ev);
     });
 
-    let mut pipeline = LivePipeline::new(cfg);
-    pipeline.start(sink).expect("pipeline 启动失败");
+    let mut runtime = SessionRuntime::new(cfg);
+    runtime.start(sink).expect("pipeline 启动失败");
 
     let deadline = Instant::now() + Duration::from_secs(150);
     loop {
@@ -66,7 +66,8 @@ fn run_and_collect(cfg: LivePipelineConfig) -> Vec<DomainEvent> {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    pipeline.stop();
+    let stopped = runtime.stop_with_timeout(Duration::from_secs(5));
+    assert!(stopped, "正常文件管道应在时限内结束");
     let result = events.lock().unwrap().clone();
     result
 }
@@ -425,4 +426,42 @@ fn min_commit_ms_suppresses_short_segments() {
         .filter(|e| matches!(e, DomainEvent::Segment { is_partial: false, .. }))
         .count();
     assert_eq!(finals_on, 0, "应丢弃全部短段: {evs_on:?}");
+}
+
+/// 时间戳可追溯到采样点：duration_ms = (end_sample - start_sample) / 16k。
+#[test]
+fn segment_timestamps_trace_to_samples() {
+    let Some(root) = model_root() else {
+        eprintln!("跳过：未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
+        return;
+    };
+    let wav = zh_model_dir(&root).join("0.wav");
+    if !vad_model(&root).is_file() || !wav.is_file() {
+        eprintln!("跳过：模型/VAD/测试音频不完整");
+        return;
+    }
+    let evs = run_and_collect(zh_file_pipeline(&root, &wav));
+    let finals: Vec<_> = evs
+        .iter()
+        .filter_map(|e| match e {
+            DomainEvent::Segment {
+                is_partial: false,
+                duration_ms,
+                start_sample,
+                end_sample,
+                revision,
+                ..
+            } => Some((*duration_ms, *start_sample, *end_sample, *revision)),
+            _ => None,
+        })
+        .collect();
+    assert!(!finals.is_empty(), "应有 final 段: {evs:?}");
+    let mut last_rev = 0u64;
+    for (duration_ms, start, end, revision) in &finals {
+        assert!(end >= start, "end_sample >= start_sample");
+        let expected = talksage_core::AudioClock::samples_to_ms(16_000, end - start);
+        assert_eq!(*duration_ms, expected, "duration_ms 应对齐采样时钟 start={start} end={end}");
+        assert!(*revision > last_rev, "revision 应递增");
+        last_rev = *revision;
+    }
 }

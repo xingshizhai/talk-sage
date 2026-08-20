@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use talksage_asr::{EngineKind, EnginePool};
 use talksage_audio::AudioHub;
 use talksage_core::DomainEvent;
-use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConfig};
+use talksage_pipeline::{AudioInput, StartListen, TalkSageService};
 
 #[derive(Parser)]
 #[command(
@@ -234,39 +234,22 @@ fn cmd_listen(
     let kind = match EngineKind::from_name(engine) {
         Some(k) => k,
         None => {
-            eprintln!("未知引擎: {engine}（可选 paraformer-zh | zipformer-en）");
+            eprintln!("未知引擎: {engine}（可选 paraformer-zh | zipformer-en | whisper-base | whisper-small | qwen3-asr）");
             return ExitCode::FAILURE;
         }
     };
-    let model_dir = match resolve_models_dir() {
-        Some(d) => d,
-        None => {
-            eprintln!("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）");
-            return ExitCode::FAILURE;
-        }
-    };
-    let engine_dir = model_dir.join(kind.model_dir_name());
-    let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
-    if !vad_model.is_file() {
-        eprintln!("缺少 VAD 模型: {}", vad_model.display());
-        return ExitCode::FAILURE;
-    }
-    if !engine_dir.is_dir() {
-        eprintln!("缺少 ASR 模型目录: {}", engine_dir.display());
-        return ExitCode::FAILURE;
-    }
 
-    let parse_input = |s: &str| -> Result<talksage_pipeline::AudioInput, String> {
+    let parse_input = |s: &str| -> Result<AudioInput, String> {
         if s.eq_ignore_ascii_case("mic") {
-            Ok(talksage_pipeline::AudioInput::Mic(None))
+            Ok(AudioInput::Mic(None))
         } else if s.eq_ignore_ascii_case("loopback") {
-            Ok(talksage_pipeline::AudioInput::Loopback)
+            Ok(AudioInput::Loopback)
         } else {
             let p = std::path::PathBuf::from(s);
             if !p.is_file() {
                 Err(format!("wav 文件不存在: {s}（或使用 mic / loopback）"))
             } else {
-                Ok(talksage_pipeline::AudioInput::File(p))
+                Ok(AudioInput::File(p))
             }
         }
     };
@@ -278,148 +261,32 @@ fn cmd_listen(
             return ExitCode::FAILURE;
         }
     };
-
-    // 客户流（英文 zipformer，可选）
-    let client_cfg = match client_input {
-        Some(c) => {
-            let en_dir = model_dir.join("sherpa-onnx-streaming-zipformer-en-2023-06-26");
-            if !en_dir.is_dir() {
-                eprintln!("缺少英文 ASR 模型目录: {}", en_dir.display());
+    let client = match client_input {
+        Some(c) => match parse_input(c) {
+            Ok(i) => talksage_pipeline::ClientCapture::Explicit(i),
+            Err(e) => {
+                eprintln!("{e}");
                 return ExitCode::FAILURE;
             }
-            let ci = match parse_input(c) {
-                Ok(i) => i,
-                Err(e) => {
-                    eprintln!("{e}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            Some(talksage_pipeline::StreamConfig {
-                engine_kind: EngineKind::ZipformerEn,
-                model_dir: en_dir,
-                input: ci,
-                speaker_id: 1,
-                speaker_label: "客户".into(),
-            })
-        }
-        None => None,
+        },
+        None => talksage_pipeline::ClientCapture::Off,
     };
-
     let is_file_input = matches!(user_input, AudioInput::File(_));
 
-    // 插件上下文：LLM（配置）+ 知识库（--kb 或配置）
     let mgr = match talksage_config::ConfigManager::load(None, None) {
-        Ok(m) => m,
+        Ok(m) => std::sync::Arc::new(m),
         Err(e) => {
             eprintln!("配置加载失败: {e}");
             return ExitCode::FAILURE;
         }
     };
     let snapshot = mgr.snapshot();
-    let llm: Option<std::sync::Arc<dyn talksage_llm::LLMProvider>> = {
-        let name = snapshot.llm.default.clone();
-        snapshot
-            .llm
-            .providers
-            .get(&name)
-            .filter(|p| !p.api_key.is_empty() || name == "ollama")
-            .map(|p| -> std::sync::Arc<dyn talksage_llm::LLMProvider> {
-                std::sync::Arc::new(talksage_llm::OpenAICompatProvider::new(
-                    p.api_key.clone(),
-                    p.model.clone(),
-                    p.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com/v1".to_string()),
-                ))
-            })
-    };
-    let kb: Option<std::sync::Arc<talksage_knowledge::KnowledgeBase>> = {
-        let folder = kb_folder
-            .map(|s| s.to_string())
-            .or_else(|| {
-                if snapshot.knowledge_base.enabled {
-                    Some(snapshot.knowledge_base.folder.clone())
-                } else {
-                    None
-                }
-            });
-        folder
-            .filter(|f| !f.is_empty())
-            .and_then(|f| {
-                let mut kb = talksage_knowledge::KnowledgeBase::new();
-                kb.index_folder(std::path::Path::new(&f));
-                if kb.chunk_count() > 0 {
-                    Some(std::sync::Arc::new(kb))
-                } else {
-                    eprintln!("知识库目录无 .md/.txt 内容: {f}");
-                    None
-                }
-            })
-    };
-    let mut plugins: Vec<std::sync::Arc<dyn talksage_plugins::AnalyzerPlugin>> = Vec::new();
-    // 场景模式：有效参数（CLI 的 --engine/--client 仍优先，其余跟随场景）
-    let scene = snapshot.scene.effective();
-    if scene.term_enabled && snapshot.plugins.term_explainer.enabled {
-        plugins.push(std::sync::Arc::new(talksage_plugins::term_explainer::TermExplainerPlugin::new(
-            snapshot.plugins.term_explainer.cooldown_seconds as f64,
-        )));
-    }
-    if scene.translation_enabled && snapshot.plugins.translator.enabled {
-        plugins.push(std::sync::Arc::new(talksage_plugins::translator::TranslatorPlugin::new()));
-    }
-    if scene.brief_enabled && snapshot.plugins.brief_retriever.enabled && kb.is_some() {
-        plugins.push(std::sync::Arc::new(talksage_plugins::brief_retriever::BriefRetrieverPlugin::new(
-            snapshot.plugins.brief_retriever.cooldown_seconds as f64,
-            0.05,
-        )));
-    }
-    let plugin_ctx = talksage_plugins::PluginContext { kb, llm };
-
-    // 录音目录（--no-record 或配置关闭时禁用）
-    let recording_dir = if no_record || !snapshot.recording.enabled {
-        None
-    } else {
-        let dir = snapshot.recording.resolve_dir(mgr.data_dir());
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| {
-                eprintln!("创建录音目录失败: {e}");
-                ExitCode::FAILURE
-            })
-            .ok();
-        Some(dir)
-    };
-    if let Some(d) = &recording_dir {
-        println!("录音保存目录: {}", d.display());
+    if !no_record && snapshot.recording.enabled {
+        println!("录音保存目录: {}", snapshot.recording.resolve_dir(mgr.data_dir()).display());
     }
 
-    let cfg = LivePipelineConfig {
-        vad_model,
-        chunk_ms: 100,
-        vad: scene.to_vad_config(),
-        denoise: scene.to_denoise_config(),
-        asr_threads: 4,
-        user: StreamConfig {
-            engine_kind: kind,
-            model_dir: engine_dir,
-            input: user_input,
-            speaker_id: 0,
-            speaker_label: "我".into(),
-        },
-        client: client_cfg,
-        plugins,
-        plugin_ctx,
-        recording_dir,
-        runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::with_noise_level(noise_level)),
-        speaker: if scene.speaker_enabled { build_speaker_config(&mgr) } else { None },
-        engine_pool: None,
-        min_commit_ms: scene.min_segment_ms,
-    };
-
-    let stop_after = seconds;
-    let mut pipeline = LivePipeline::new(cfg);
-
-    // 可选会话落库
-    let session_store = if save {
-        let data_dir = talksage_config::default_data_dir();
-        let db_path = data_dir.join("sessions.db");
+    let sessions = if save {
+        let db_path = mgr.data_dir().join("sessions.db");
         match talksage_session::SessionStore::open(&db_path.to_string_lossy()) {
             Ok(s) => Some(std::sync::Arc::new(s)),
             Err(e) => {
@@ -430,92 +297,20 @@ fn cmd_listen(
     } else {
         None
     };
-    let current_session = std::sync::Arc::new(std::sync::Mutex::new(None));
-    if let Some(store) = &session_store {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        match store.start_session(now) {
-            Ok(sid) => *current_session.lock().unwrap() = Some(sid),
-            Err(e) => eprintln!("开启会话失败: {e}"),
-        }
-    }
-    let sessions_for_sink = session_store.clone();
-    let current_for_sink = current_session.clone();
-    // 会话统计收集（质量评估；save 模式落库）
-    let stats_for_sink: std::sync::Arc<std::sync::Mutex<Vec<talksage_session::StreamMeta>>> = Default::default();
-    let texts_for_sink: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
-    let stats_sink = stats_for_sink.clone();
-    let texts_sink = texts_for_sink.clone();
+    let persist = sessions.is_some();
+    let service = TalkSageService::new(mgr, sessions, EnginePool::new());
+    let req = StartListen {
+        user_input,
+        user_engine: Some(kind),
+        client,
+        persist,
+        record: if no_record { Some(false) } else { None },
+        noise_level,
+        kb_folder_override: kb_folder.map(std::path::PathBuf::from),
+        user_label: None,
+    };
 
-    let sink: std::sync::Arc<dyn Fn(DomainEvent) + Send + Sync> = std::sync::Arc::new(move |ev: DomainEvent| {
-        // 落库（可选）
-        if let (Some(store), Ok(guard)) = (&sessions_for_sink, current_for_sink.lock()) {
-            if let Some(sid) = *guard {
-                match &ev {
-                    DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, duration_ms, rms, .. } => {
-                        if let Ok(mut t) = texts_sink.lock() {
-                            t.push(text.clone());
-                        }
-                        let _ = store.add_segment(
-                            sid,
-                            &talksage_core::TranscriptSegment {
-                                speaker_id: *speaker_id,
-                                speaker_label: speaker_label.clone(),
-                                text: text.clone(),
-                                is_partial: false,
-                                ts_ms: *ts_ms,
-                                duration_ms: *duration_ms,
-                                rms: *rms,
-                            },
-                        );
-                    }
-                    DomainEvent::Term { status: talksage_core::ResultStatus::Final, content, .. } => {
-                        let _ = store.add_term(sid, content);
-                    }
-                    DomainEvent::Translation { content, .. } => {
-                        let _ = store.add_translation(sid, "translate", content);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        // 统计收集
-        if let DomainEvent::SessionStats {
-            speaker_label,
-            total_ms,
-            speech_ms,
-            final_segments,
-            avg_rms,
-            max_rms,
-            non_speech_avg_rms,
-            recording,
-            vad_preset,
-            vad_threshold,
-            words,
-            questions,
-            ..
-        } = &ev
-        {
-            if let Ok(mut sm) = stats_sink.lock() {
-                sm.push(talksage_session::StreamMeta {
-                    speaker_label: speaker_label.clone(),
-                    total_ms: *total_ms,
-                    speech_ms: *speech_ms,
-                    final_segments: *final_segments,
-                    avg_rms: *avg_rms,
-                    max_rms: *max_rms,
-                    non_speech_avg_rms: *non_speech_avg_rms,
-                    recording: recording.clone(),
-                    vad_preset: vad_preset.clone(),
-                    vad_threshold: *vad_threshold,
-                    words: *words,
-                    questions: *questions,
-                });
-            }
-        }
-        // 打印
+    let sink: talksage_pipeline::EventSink = std::sync::Arc::new(move |ev: DomainEvent| {
         match &ev {
             DomainEvent::Status { stage, message } => {
                 println!("[status] {:?}: {}", stage, message);
@@ -550,47 +345,28 @@ fn cmd_listen(
             other => println!("[event] {other:?}"),
         }
     });
-    if let Err(e) = pipeline.start(sink) {
-        eprintln!("启动失败: {e}");
-        return ExitCode::FAILURE;
-    }
+
+    let running = match service.start(req, sink) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("启动失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     println!("监听中…（Ctrl+C 或超时停止）");
 
-    if stop_after > 0 {
-        std::thread::sleep(std::time::Duration::from_secs(stop_after));
+    if seconds > 0 {
+        std::thread::sleep(std::time::Duration::from_secs(seconds));
     } else if is_file_input {
-        // 文件模式：等 pipeline 自然结束（文件读完即停）
         std::thread::sleep(std::time::Duration::from_secs(60));
     } else {
-        // mic / loopback 模式：默认采集 30 秒（无终端环境 stdin 会立即 EOF）
         std::thread::sleep(std::time::Duration::from_secs(30));
     }
-    pipeline.stop();
-    // 结束会话 + 质量评估落库
-    if let Some(store) = &session_store {
-        if let Some(sid) = current_session.lock().unwrap().take() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let _ = store.end_session(sid, now);
-            let stats = stats_for_sink.lock().unwrap().clone();
-            let texts = texts_for_sink.lock().unwrap().clone();
-            if !stats.is_empty() {
-                let params = talksage_session::QualityParams::from_config(&snapshot.quality);
-                let meta = talksage_session::SessionMeta::evaluate(stats, &texts, now, &params);
-                let _ = store.set_session_meta(sid, &meta);
-                println!(
-                    "会话 #{sid} 质量: {}（时长 {}s，语音占比 {:.0}%，文本噪音 {:.2}，跳过下游分析={}）",
-                    meta.quality_label(),
-                    meta.duration_ms / 1000,
-                    meta.speech_ratio * 100.0,
-                    meta.text_noise,
-                    meta.skipped_analysis,
-                );
-            }
-            println!("会话 #{sid} 已保存");
-        }
+
+    match service.finish(running) {
+        Ok(Some(sid)) => println!("会话 #{sid} 已保存"),
+        Ok(None) => {}
+        Err(e) => eprintln!("停止失败: {e}"),
     }
     println!("\n已停止。");
     ExitCode::SUCCESS
@@ -624,35 +400,26 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
     }
 
     println!("导入转写: {path}（{engine}）…");
-    let cfg = LivePipelineConfig {
-        vad_model,
-        chunk_ms: 100,
-        vad: talksage_config::VadConfig::default(),
-        denoise: talksage_config::DenoiseConfig::default(),
-        asr_threads: 4,
-        user: StreamConfig {
-            engine_kind: kind,
-            model_dir: engine_dir,
-            input: AudioInput::File(audio_path),
-            speaker_id: 0,
-            speaker_label: speaker_label.to_string(),
-        },
-        client: None,
-        plugins: Vec::new(),
-        plugin_ctx: talksage_plugins::PluginContext::new(),
-        recording_dir: None,
-        runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
-        speaker: None,
-        engine_pool: None,
-        min_commit_ms: 0,
+    let mgr = match talksage_config::ConfigManager::load(None, None) {
+        Ok(m) => std::sync::Arc::new(m),
+        Err(e) => {
+            eprintln!("配置加载失败: {e}");
+            return ExitCode::FAILURE;
+        }
     };
-
-    // 收集 final 段
+    let sessions = match talksage_session::SessionStore::open(&mgr.data_dir().join("sessions.db").to_string_lossy()) {
+        Ok(s) => Some(std::sync::Arc::new(s)),
+        Err(e) => {
+            eprintln!("打开会话库失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let service = TalkSageService::new(mgr, sessions, EnginePool::new());
     let segments = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let segs_for_sink = segments.clone();
     let done_for_sink = done.clone();
-    let sink: std::sync::Arc<dyn Fn(DomainEvent) + Send + Sync> = std::sync::Arc::new(move |ev| {
+    let sink: talksage_pipeline::EventSink = std::sync::Arc::new(move |ev| {
         match &ev {
             DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, duration_ms, rms, .. } => {
                 segs_for_sink.lock().unwrap().push(talksage_core::TranscriptSegment {
@@ -671,53 +438,36 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
             _ => {}
         }
     });
-
-    let mut pipeline = LivePipeline::new(cfg);
-    if let Err(e) = pipeline.start(sink) {
-        eprintln!("启动失败: {e}");
-        return ExitCode::FAILURE;
-    }
-
-    // 等待完成（文件模式自然结束）
+    let running = match service.start(
+        StartListen::import_file(audio_path, kind, speaker_label.to_string()),
+        sink,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("启动失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     while !done.load(std::sync::atomic::Ordering::SeqCst) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    pipeline.stop();
+    let sid = match service.finish(running) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("保存会话失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let segs = segments.lock().unwrap();
     if segs.is_empty() {
         eprintln!("未识别到语音内容");
         return ExitCode::FAILURE;
     }
-
-    // 保存新会话
-    let data_dir = talksage_config::default_data_dir();
-    let store = match talksage_session::SessionStore::open(&data_dir.join("sessions.db").to_string_lossy()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("打开会话库失败: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    match store.start_session(now) {
-        Ok(sid) => {
-            for s in segs.iter() {
-                let _ = store.add_segment(sid, s);
-            }
-            let _ = store.end_session(sid, now);
-            println!("\n已保存会话 #{sid}（{} 段）", segs.len());
-        }
-        Err(e) => {
-            eprintln!("保存会话失败: {e}");
-            return ExitCode::FAILURE;
-        }
+    if let Some(sid) = sid {
+        println!("\n已保存会话 #{sid}（{} 段）", segs.len());
     }
-
     println!("转写结果（{} 段）:", segs.len());
     for s in segs.iter() {
         println!("  [{}] {}", s.speaker_label, s.text);
@@ -782,21 +532,6 @@ fn cmd_session(id: i64, dup_only: bool) -> ExitCode {
         println!("\n提示: 时间戳为 epoch ms；同说话人相邻段间隔小且文本相似 = VAD 把一句话切成两段重复识别。");
     }
     ExitCode::SUCCESS
-}
-
-/// 构造说话人识别配置：wespeaker 模型 + 已注册的主人声纹（有则启用）。
-fn build_speaker_config(mgr: &talksage_config::ConfigManager) -> Option<talksage_pipeline::SpeakerConfig> {
-    let model_dir = resolve_models_dir()?;
-    let model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
-    if !model.is_file() {
-        return None;
-    }
-    let owner = talksage_pipeline::speaker::load_owner_embedding(mgr.data_dir());
-    Some(talksage_pipeline::SpeakerConfig {
-        model,
-        owner_embedding: owner,
-        threshold: talksage_pipeline::speaker::DEFAULT_THRESHOLD,
-    })
 }
 
 fn cmd_trim(path: &str, output: Option<&str>, preset: &str, model: Option<&str>) -> ExitCode {
@@ -1181,22 +916,6 @@ fn count_wav(dir: &std::path::Path) -> usize {
         .unwrap_or(0)
 }
 
-/// 解析模型根目录：优先环境变量，其次相对可执行文件/当前目录探测。
 fn resolve_models_dir() -> Option<std::path::PathBuf> {
-    if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
-        let p = std::path::PathBuf::from(d);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(base) = exe.parent() {
-            candidates.push(base.join("../../models"));
-            candidates.push(base.join("../../../models"));
-        }
-    }
-    candidates.push(std::path::PathBuf::from("models"));
-    candidates.push(std::path::PathBuf::from("../models"));
-    candidates.into_iter().find(|c| c.is_dir())
+    TalkSageService::resolve_models_dir()
 }

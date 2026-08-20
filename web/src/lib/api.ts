@@ -115,7 +115,16 @@ export type DomainEvent =
       questions?: number;
     }
   | { type: "metrics"; metrics: ConversationMetrics }
-  | { type: "nudge"; nudge: NudgeEvent };
+  | { type: "nudge"; nudge: NudgeEvent }
+  | {
+      type: "snapshot";
+      revision: number;
+      committed: { speaker_id: number; speaker_label: string; text: string; ts_ms: number; duration_ms?: number }[];
+      hypothesis: { speaker_id: number; speaker_label: string; text: string; ts_ms: number }[];
+      processed_until_sample?: number;
+      committed_until_sample?: number;
+      stage: string;
+    };
 
 /** 会话指标（会中实时；借鉴 Call.md conversation-metrics）。 */
 export interface ConversationMetrics {

@@ -1,5 +1,7 @@
 //! TalkSage v2 LLM Provider 抽象（OpenAI 兼容端点：DeepSeek/Kimi/Groq/Ollama…）。
 
+use std::time::Duration;
+
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
 
@@ -53,7 +55,9 @@ impl LLMProvider for OpenAICompatProvider {
             "temperature": 0.3,
         });
 
-        let mut req = ureq::post(&url).set("Content-Type", "application/json");
+        let mut req = ureq::post(&url)
+            .timeout(Duration::from_secs(15))
+            .set("Content-Type", "application/json");
         if !self.api_key.is_empty() && self.api_key != "ollama" {
             req = req.set("Authorization", &format!("Bearer {}", self.api_key));
         }

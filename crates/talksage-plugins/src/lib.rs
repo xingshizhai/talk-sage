@@ -37,6 +37,10 @@ impl Default for PluginContext {
 pub trait AnalyzerPlugin: Send + Sync {
     fn name(&self) -> &'static str;
     fn should_trigger(&self, seg: &TranscriptSegment) -> bool;
+    /// 是否消费 hypothesis（partial）。默认 false：只处理 committed。
+    fn accepts_speculative(&self) -> bool {
+        false
+    }
     /// 本地即时骨架（无 LLM），同步发出。
     fn skeleton(&self, seg: &TranscriptSegment) -> Option<DomainEvent>;
     /// 完整执行（可含 LLM），pipeline 在独立线程调用。

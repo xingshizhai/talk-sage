@@ -7,20 +7,45 @@
 //! 每条流独立 VAD 分段 + 流式 ASR（增量 partial → 段结束 final）。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
-use talksage_asr::{EngineKind, EnginePool, SegmentEngine, SherpaStreamingEngine};
+use talksage_asr::{EngineKind, EnginePool, SherpaStreamingEngine};
 use talksage_audio::{AudioHub, Preprocessor};
 use talksage_config::{DenoiseConfig, VadConfig};
-use talksage_core::{DomainEvent, StatusStage, TranscriptSegment};
+use talksage_core::{AudioClock, DomainEvent, StatusStage, TranscriptSegment};
 use talksage_plugins::AnalyzerPlugin;
 
 pub mod offline;
+pub mod runtime;
+pub mod service;
 pub mod speaker;
+
+pub use runtime::SessionRuntime;
+pub use service::{ClientCapture, RunningListen, StartListen, TalkSageService};
+
+/// 停止管道时等待工作线程收尾的时限。超时返回，不卡死 UI；后台仍可能继续 ASR `finish`。
+pub const STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 插件 `run`（含 LLM）结果超过此时长则丢弃，避免停止后迟到事件。
+pub const PLUGIN_RUN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 旁路 `join`：`std::thread::JoinHandle` 无超时，用 channel 包一层。
+fn join_with_timeout(handle: std::thread::JoinHandle<()>, timeout: Duration) -> bool {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = handle.join();
+        let _ = tx.send(());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(()) => true,
+        Err(mpsc::RecvTimeoutError::Timeout) => false,
+        Err(mpsc::RecvTimeoutError::Disconnected) => true,
+    }
+}
 
 /// 运行期可调参数（监听中可实时修改，无需重启；跨线程共享）。
 ///
@@ -122,6 +147,8 @@ pub struct LivePipeline {
     handle: Option<std::thread::JoinHandle<()>>,
     /// 运行期参数（与 cfg 共享，`set_noise_level` 实时更新）。
     runtime: Arc<RuntimeParams>,
+    /// 停止/取消标志（插件线程在发出结果前检查）。
+    cancel: Arc<AtomicBool>,
 }
 
 impl LivePipeline {
@@ -132,6 +159,7 @@ impl LivePipeline {
             tx_stop: None,
             handle: None,
             runtime,
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -150,12 +178,14 @@ impl LivePipeline {
 
     /// 在专用线程中启动管道；返回后可用 `stop()` 停止。
     pub fn start(&mut self, emit: EventSink) -> anyhow::Result<()> {
+        self.cancel.store(false, Ordering::Relaxed);
         let (tx_stop, rx_stop) = mpsc::channel::<()>();
         let cfg = self.cfg.clone();
+        let cancel = self.cancel.clone();
         let handle = std::thread::Builder::new()
             .name("talksage-pipeline".into())
             .spawn(move || {
-                if let Err(e) = run_loop(cfg, rx_stop, emit) {
+                if let Err(e) = run_loop(cfg, rx_stop, emit, cancel) {
                     log::error!("pipeline 退出异常: {e}");
                 }
             })?;
@@ -164,13 +194,27 @@ impl LivePipeline {
         Ok(())
     }
 
-    /// 停止管道：发送停止信号并**等待线程结束**（保证录音收尾/文件头回填完成）。
+    /// 停止管道：发停止信号并等待线程结束（默认 [`STOP_JOIN_TIMEOUT`]）。
     pub fn stop(&mut self) {
+        let _ = self.stop_with_timeout(STOP_JOIN_TIMEOUT);
+    }
+
+    /// 停止管道并在时限内 join。超时返回 `false`（不卡死调用方）。
+    pub fn stop_with_timeout(&mut self, timeout: Duration) -> bool {
+        self.cancel.store(true, Ordering::Relaxed);
         if let Some(tx) = self.tx_stop.take() {
             let _ = tx.send(());
         }
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
+        match self.handle.take() {
+            Some(h) => {
+                if join_with_timeout(h, timeout) {
+                    true
+                } else {
+                    log::warn!("管道停止超时 ({timeout:?})，后台线程仍在收尾");
+                    false
+                }
+            }
+            None => true,
         }
     }
 }
@@ -270,8 +314,8 @@ struct StreamWorker {
     /// 录音输出路径（收尾时记录日志）。
     recording_path: Option<PathBuf>,
     // ── 统计（质量评估 / 历史回溯） ──
-    /// 当前语音段开始时刻（now_ms）。
-    seg_start_ms: u64,
+    /// 当前语音段开始采样（该流 AudioClock）。
+    seg_start_sample: u64,
     /// 当前语音段样本数。
     seg_samples: u64,
     /// 当前语音段能量平方和。
@@ -308,6 +352,10 @@ struct StreamWorker {
     words: usize,
     /// final 段累计问句数（会话指标用）。
     questions: usize,
+    /// 该流采样时钟。
+    clock: AudioClock,
+    /// 会话墙钟原点（ms）；`ts_ms = origin_ms + clock.ms()`。
+    origin_ms: u64,
 }
 
 impl StreamWorker {
@@ -324,6 +372,7 @@ impl StreamWorker {
         level: Arc<AtomicU32>,
         engine_pool: Option<Arc<EnginePool>>,
         min_commit_ms: u64,
+        origin_ms: u64,
     ) -> anyhow::Result<Self> {
         let (threshold, min_speech, min_silence, window, max_speech) = vad_cfg.effective();
         log::info!(
@@ -403,7 +452,7 @@ impl StreamWorker {
             on_final: None,
             recorder,
             recording_path,
-            seg_start_ms: 0,
+            seg_start_sample: 0,
             seg_samples: 0,
             seg_rms_acc: 0.0,
             total_samples: 0,
@@ -423,6 +472,8 @@ impl StreamWorker {
             min_commit_ms,
             words: 0,
             questions: 0,
+            clock: AudioClock::new(talksage_audio::TARGET_SAMPLE_RATE),
+            origin_ms,
         })
     }
 
@@ -494,7 +545,8 @@ impl StreamWorker {
         } else {
             (chunk.iter().map(|&x| x * x).sum::<f32>() / chunk.len() as f32).sqrt()
         };
-        self.total_samples += chunk.len() as u64;
+        let chunk_start = self.clock.accept(chunk.len() as u64);
+        self.total_samples = self.clock.accepted();
         self.rms_sum += (block_rms as f64) * (block_rms as f64) * chunk.len() as f64;
         if block_rms > self.max_rms {
             self.max_rms = block_rms;
@@ -530,7 +582,7 @@ impl StreamWorker {
             if let Some(e) = &mut self.engine {
                 e.reset();
             }
-            self.seg_start_ms = now_ms();
+            self.seg_start_sample = chunk_start;
             self.seg_samples = 0;
             self.seg_rms_acc = 0.0;
             self.seg_audio.clear();
@@ -558,9 +610,12 @@ impl StreamWorker {
                             speaker_label: self.speaker_label.clone(),
                             text,
                             is_partial: true,
-                            ts_ms: now_ms(),
+                            ts_ms: self.origin_ms + self.clock.ms(),
                             duration_ms: 0,
                             rms: 0.0,
+                            revision: 0,
+                            start_sample: self.seg_start_sample,
+                            end_sample: self.clock.accepted(),
                         });
                     }
                 }
@@ -585,12 +640,9 @@ impl StreamWorker {
             None => String::new(),
         };
         if !final_text.is_empty() {
-            // 段统计：时长（VAD 起点到当前）+ 段能量 RMS
-            let duration_ms = if self.seg_start_ms > 0 {
-                now_ms().saturating_sub(self.seg_start_ms)
-            } else {
-                self.seg_samples * 1000 / talksage_audio::TARGET_SAMPLE_RATE as u64
-            };
+            let end_sample = self.clock.accepted();
+            let duration_ms = AudioClock::samples_to_ms(self.clock.sample_rate(), self.seg_samples);
+            let ts_ms = self.origin_ms + AudioClock::samples_to_ms(self.clock.sample_rate(), end_sample);
             // 最短提交时长：短段丢弃（噪音短段抑制，减少无效短段污染转写/历史）
             if self.min_commit_ms > 0 && duration_ms < self.min_commit_ms {
                 log::info!(
@@ -637,7 +689,7 @@ impl StreamWorker {
                 speaker_label: label.clone(),
                 text: final_text.clone(),
                 is_partial: false,
-                ts_ms: now_ms(),
+                ts_ms,
                 duration_ms,
                 rms,
             };
@@ -654,6 +706,9 @@ impl StreamWorker {
                 ts_ms: seg.ts_ms,
                 duration_ms: seg.duration_ms,
                 rms: seg.rms,
+                revision: 0,
+                start_sample: self.seg_start_sample,
+                end_sample,
             });
             if let Some(hook) = &self.on_final {
                 hook(&seg);
@@ -694,8 +749,28 @@ impl StreamWorker {
         }
     }
 
+    fn capture_overruns(&self) -> u64 {
+        if let Some(h) = &self.hub {
+            return h.overruns();
+        }
+        #[cfg(windows)]
+        if let Some(l) = &self.loopback {
+            return l.overruns();
+        }
+        0
+    }
+
     /// 关闭流：收尾未完成的语音段 + 结束录音 + 归还引擎（停止监听/输入结束时调用）。
     fn shutdown(&mut self, emit: &EventSink) {
+        let overruns = self.capture_overruns();
+        if overruns > 0 {
+            log::warn!(
+                "流[{}] 采集 overrun={} 帧（队列容量 {}）",
+                self.speaker_label,
+                overruns,
+                talksage_audio::CAPTURE_QUEUE_CAP
+            );
+        }
         self.finish_speech(emit);
         self.stop();
         // 归还 ASR 引擎到池（常驻复用；下次监听热启动）
@@ -721,7 +796,12 @@ impl StreamWorker {
     }
 }
 
-fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: EventSink) -> anyhow::Result<()> {
+fn run_loop(
+    cfg: Arc<LivePipelineConfig>,
+    rx_stop: mpsc::Receiver<()>,
+    emit: EventSink,
+    cancel: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     fn fire(emit: &EventSink, ev: DomainEvent) {
         emit(ev);
     }
@@ -826,9 +906,9 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let dt = chrono_like_ts(now);
-        dt
+        chrono_like_ts(now)
     };
+    let origin_ms = now_ms();
     // 电平指示（麦克风 / 回环），Level 事件节流推送
     let mic_level: Arc<AtomicU32> = Arc::new(AtomicU32::new(0.0f32.to_bits()));
     let loopback_level: Arc<AtomicU32> = Arc::new(AtomicU32::new(0.0f32.to_bits()));
@@ -853,6 +933,7 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
             level,
             cfg.engine_pool.clone(),
             cfg.min_commit_ms,
+            origin_ms,
         )?;
         w.start_input(cfg.chunk_ms)?;
         log::info!(
@@ -866,7 +947,7 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
     };
     match build(&cfg.user) {
         Ok(mut w) => {
-            w.on_final = Some(make_on_final(&cfg, &emit));
+            w.on_final = Some(make_on_final(&cfg, &emit, cancel.clone()));
             workers.push(w);
         }
         Err(e) => {
@@ -881,7 +962,7 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
     if let Some(c) = &cfg.client {
         match build(c) {
             Ok(mut w) => {
-                w.on_final = Some(make_on_final(&cfg, &emit));
+                w.on_final = Some(make_on_final(&cfg, &emit, cancel.clone()));
                 workers.push(w);
             }
             Err(e) => {
@@ -905,6 +986,9 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
     let mut tick_err: Option<anyhow::Error> = None;
     let mut last_level_at = std::time::Instant::now();
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         match rx_stop.try_recv() {
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
             Err(mpsc::TryRecvError::Empty) => {}
@@ -982,27 +1066,43 @@ fn run_loop(cfg: Arc<LivePipelineConfig>, rx_stop: mpsc::Receiver<()>, emit: Eve
 }
 
 /// 构造 final 段回调：骨架同步发，最终（LLM）在独立线程执行。
-fn make_on_final(cfg: &LivePipelineConfig, emit: &EventSink) -> Arc<dyn Fn(&TranscriptSegment) + Send + Sync> {
+fn make_on_final(
+    cfg: &LivePipelineConfig,
+    emit: &EventSink,
+    cancel: Arc<AtomicBool>,
+) -> Arc<dyn Fn(&TranscriptSegment) + Send + Sync> {
     let cfg = cfg.clone();
     let emit = emit.clone();
     Arc::new(move |seg: &TranscriptSegment| {
         for plugin in &cfg.plugins {
+            if seg.is_partial && !plugin.accepts_speculative() {
+                continue;
+            }
             if !plugin.should_trigger(seg) {
                 continue;
             }
             log::debug!("插件[{}] 触发: 段=[{}] {}", plugin.name(), seg.speaker_label, seg.text.chars().take(60).collect::<String>());
-            // 骨架（本地即时）
+            // 骨架（本地即时，无 HTTP）
             if let Some(skel) = plugin.skeleton(seg) {
                 emit(skel);
             }
-            // 最终（可能 LLM）：独立线程，不阻塞管道
+            // 最终（可能 LLM）：独立线程，不阻塞管道 / 音频回调
             let plugin = plugin.clone();
             let ctx = cfg.plugin_ctx.clone();
             let emit = emit.clone();
             let seg = seg.clone();
+            let cancel = cancel.clone();
             std::thread::spawn(move || {
-                let t0 = std::time::Instant::now();
+                let t0 = Instant::now();
                 let result = plugin.run(&seg, &ctx);
+                if cancel.load(Ordering::Relaxed) {
+                    log::info!("插件[{}] 会话已停止，丢弃结果", plugin.name());
+                    return;
+                }
+                if t0.elapsed() > PLUGIN_RUN_TIMEOUT {
+                    log::warn!("插件[{}] 超时 {:?}，丢弃结果", plugin.name(), t0.elapsed());
+                    return;
+                }
                 log::info!("插件[{}] 完成: 耗时={:?} 有结果={}", plugin.name(), t0.elapsed(), result.is_some());
                 if let Some(ev) = result {
                     emit(ev);
@@ -1010,4 +1110,21 @@ fn make_on_final(cfg: &LivePipelineConfig, emit: &EventSink) -> Arc<dyn Fn(&Tran
             });
         }
     })
+}
+
+#[cfg(test)]
+mod stop_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn join_with_timeout_returns_true_when_thread_exits() {
+        let h = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(20)));
+        assert!(join_with_timeout(h, Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn join_with_timeout_returns_false_when_exceeded() {
+        let h = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(400)));
+        assert!(!join_with_timeout(h, Duration::from_millis(50)));
+    }
 }

@@ -32,6 +32,24 @@ export class TranscriptAccumulator {
     return this.lines;
   }
 
+  /** 清空（订阅快照重建前）。 */
+  reset(): void {
+    this.lines = [];
+    this.partialKeyBySpeaker.clear();
+    this.nextKey = 0;
+  }
+
+  /** 用服务端快照重建 committed + 各说话人 hypothesis。 */
+  applySnapshot(committed: SegmentEvent[], hypothesis: SegmentEvent[]): void {
+    this.reset();
+    for (const s of committed) {
+      this.push({ ...s, is_partial: false });
+    }
+    for (const h of hypothesis) {
+      this.push({ ...h, is_partial: true });
+    }
+  }
+
   /** 处理一条 segment 事件。 */
   push(seg: SegmentEvent): void {
     const tsMs = seg.ts_ms ?? Date.now();

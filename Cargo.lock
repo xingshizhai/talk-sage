@@ -4214,6 +4214,7 @@ dependencies = [
  "talksage-audio",
  "talksage-config",
  "talksage-core",
+ "talksage-knowledge",
  "talksage-llm",
  "talksage-plugins",
  "talksage-session",

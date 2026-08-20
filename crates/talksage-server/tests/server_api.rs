@@ -14,14 +14,18 @@ fn test_state() -> ServerState {
     let config = Arc::new(talksage_config::ConfigManager::load(None, None).unwrap());
     let sessions = Arc::new(talksage_session::SessionStore::open(":memory:").unwrap());
     let (tx, _rx) = broadcast::channel::<DomainEvent>(16);
+    let service = talksage_pipeline::TalkSageService::new(
+        config.clone(),
+        Some(sessions.clone()),
+        talksage_asr::EnginePool::new(),
+    );
     ServerState {
         config,
         sessions,
         events: tx,
-        pipeline: Arc::new(std::sync::Mutex::new(None)),
-        current_session: Arc::new(std::sync::Mutex::new(None)),
+        running: Arc::new(std::sync::Mutex::new(None)),
         token: String::new(),
-        engine_pool: talksage_asr::EnginePool::new(),
+        service,
     }
 }
 
@@ -105,14 +109,18 @@ async fn export_returns_markdown_for_session() {
             .unwrap();
         sessions.set_notes(id, "# 纪要").unwrap();
         let (tx, _rx) = broadcast::channel::<DomainEvent>(16);
+        let service = talksage_pipeline::TalkSageService::new(
+            config.clone(),
+            Some(sessions.clone()),
+            talksage_asr::EnginePool::new(),
+        );
         ServerState {
             config,
             sessions,
             events: tx,
-            pipeline: Arc::new(std::sync::Mutex::new(None)),
-            current_session: Arc::new(std::sync::Mutex::new(None)),
+            running: Arc::new(std::sync::Mutex::new(None)),
             token: String::new(),
-            engine_pool: talksage_asr::EnginePool::new(),
+            service,
         }
     };
     let resp = build_router(state, &std::path::PathBuf::from("nonexistent-dist"))

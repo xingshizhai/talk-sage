@@ -17,7 +17,8 @@ use anyhow::Result;
 use talksage_asr::{EngineKind, EnginePool};
 use talksage_core::{DomainEvent, StatusStage};
 
-use crate::{AudioInput, EventSink, LivePipeline, LivePipelineConfig, RuntimeParams, StreamConfig};
+use crate::runtime::SessionRuntime;
+use crate::{AudioInput, EventSink, LivePipelineConfig, RuntimeParams, StreamConfig};
 
 /// 单个 final 段信息（verbose_json 输出用）。
 #[derive(Debug, Clone)]
@@ -116,13 +117,13 @@ pub fn transcribe_file(
                 _ => {}
             }
         });
-        let mut pipeline = LivePipeline::new(cfg);
-        pipeline.start(sink)?;
+        let mut runtime = SessionRuntime::new(cfg);
+        runtime.start(sink)?;
         let deadline = Instant::now() + std::time::Duration::from_secs(300);
         while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        pipeline.stop();
+        runtime.stop();
     }
     let elapsed = start.elapsed().as_millis() as f64;
     let text = texts.lock().unwrap().clone();

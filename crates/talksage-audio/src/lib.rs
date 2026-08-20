@@ -1,13 +1,15 @@
 //! TalkSage v2 音频采集中枢。
 //!
 //! M1：麦克风采集（cpal）→ 单声道 → 重采样到 16kHz → 按固定时长块
-//! 通过 mpsc 通道交给 pipeline 线程（回调线程不做重活）。
+//! 通过有界 mpsc 通道交给 pipeline 线程（回调线程 `try_send`，满载丢帧）。
 //!
 //! 回环采集（WASAPI loopback / ScreenCaptureKit）为 M1b 预留。
 //!
 //! 录音与音频处理：wav 读写（wav）、静音裁剪（silence_trim）。
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -16,6 +18,59 @@ pub mod wav;
 
 /// 目标采样率（sherpa-onnx 模型统一 16kHz）。
 pub const TARGET_SAMPLE_RATE: u32 = 16000;
+
+/// 采集 → 处理循环的有界队列容量（帧）。满载记录 overrun 并丢帧，不阻塞系统音频回调。
+pub const CAPTURE_QUEUE_CAP: usize = 32;
+
+/// 采集发送端：`try_push` 永不阻塞。
+#[derive(Clone)]
+pub struct CaptureTx {
+    tx: mpsc::SyncSender<Vec<f32>>,
+    overruns: Arc<AtomicU64>,
+    closed: Arc<AtomicBool>,
+}
+
+impl CaptureTx {
+    /// 尝试入队一帧。队列满则丢弃并累计 overrun，立即返回 `false`（不阻塞）。
+    pub fn try_push(&self, chunk: Vec<f32>) -> bool {
+        match self.tx.try_send(chunk) {
+            Ok(()) => true,
+            Err(mpsc::TrySendError::Full(_)) => {
+                let n = self.overruns.fetch_add(1, Ordering::Relaxed) + 1;
+                if n == 1 || n % 32 == 0 {
+                    log::warn!("采集队列满（容量 {CAPTURE_QUEUE_CAP}），丢帧 overrun={n}");
+                }
+                false
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                self.closed.store(true, Ordering::Relaxed);
+                false
+            }
+        }
+    }
+
+    pub fn overruns(&self) -> u64 {
+        self.overruns.load(Ordering::Relaxed)
+    }
+
+    /// 接收端已断开（停止切块，避免空转）。
+    pub fn closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+}
+
+/// 创建有界采集通道（容量 [`CAPTURE_QUEUE_CAP`]）。
+pub fn capture_channel() -> (CaptureTx, mpsc::Receiver<Vec<f32>>) {
+    let (tx, rx) = mpsc::sync_channel(CAPTURE_QUEUE_CAP);
+    (
+        CaptureTx {
+            tx,
+            overruns: Arc::new(AtomicU64::new(0)),
+            closed: Arc::new(AtomicBool::new(false)),
+        },
+        rx,
+    )
+}
 
 #[cfg(windows)]
 mod loopback;
@@ -164,8 +219,8 @@ pub struct AudioHub {
     pub sample_rate: u32,
     /// 每个块的目标采样数（chunk_ms * sr / 1000）。
     chunk_samples: usize,
-    /// 发给 pipeline 的块通道。
-    tx: mpsc::Sender<Vec<f32>>,
+    /// 发给 pipeline 的块通道（有界，满载丢帧）。
+    tx: CaptureTx,
     /// cpal 输入流。
     stream: Option<cpal::Stream>,
 }
@@ -173,7 +228,7 @@ pub struct AudioHub {
 impl AudioHub {
     /// 创建采集中枢，返回 (hub, 块接收端)。
     pub fn new(chunk_ms: u64) -> (Self, mpsc::Receiver<Vec<f32>>) {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = capture_channel();
         let chunk_samples = (TARGET_SAMPLE_RATE as u64 * chunk_ms / 1000) as usize;
         (
             Self {
@@ -256,6 +311,11 @@ impl AudioHub {
             drop(s);
         }
     }
+
+    /// 采集 overrun 累计（队列满丢帧次数）。
+    pub fn overruns(&self) -> u64 {
+        self.tx.overruns()
+    }
 }
 
 /// 采集回调公共逻辑：mono 化 → 重采样 → 按块发送。
@@ -266,7 +326,7 @@ fn collect_and_send(
     resampler: &mut LinearResampler,
     pending: &mut Vec<f32>,
     chunk_samples: usize,
-    tx: &mpsc::Sender<Vec<f32>>,
+    tx: &CaptureTx,
 ) {
     // mono 化（平均）
     let mono: Vec<f32> = if channels > 1 {
@@ -283,7 +343,7 @@ fn collect_and_send(
     while pending.len() - i >= chunk_samples {
         let chunk: Vec<f32> = pending[i..i + chunk_samples].to_vec();
         i += chunk_samples;
-        if tx.send(chunk).is_err() {
+        if !tx.try_push(chunk) && tx.closed() {
             break;
         }
     }
@@ -325,7 +385,7 @@ mod tests {
 
     #[test]
     fn chunking_mono_exact_blocks() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = capture_channel();
         let mut pending = Vec::new();
         let mut resampler = LinearResampler::new(16000, 16000);
         let data: Vec<f32> = (0..3200).map(|i| i as f32).collect(); // 200ms @16k = 3200
@@ -342,7 +402,7 @@ mod tests {
 
     #[test]
     fn chunking_stereo_mixes_to_mono() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = capture_channel();
         let mut pending = Vec::new();
         let mut resampler = LinearResampler::new(16000, 16000);
         // 立体声：左 0,2,4..；右 1,3,5.. → mono 平均值
@@ -357,7 +417,7 @@ mod tests {
 
     #[test]
     fn chunking_partial_block_kept_in_pending() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = capture_channel();
         let mut pending = Vec::new();
         let mut resampler = LinearResampler::new(16000, 16000);
         let data: Vec<f32> = (0..1000).map(|i| i as f32).collect(); // 不足一块
@@ -418,5 +478,43 @@ mod tests {
         let mut out = src.clone();
         p.process(&mut out);
         assert_eq!(out, src, "关闭时不应改动");
+    }
+
+    #[test]
+    fn bounded_queue_drops_when_full_without_blocking() {
+        use std::time::{Duration, Instant};
+        let (tx, rx) = capture_channel();
+        for i in 0..CAPTURE_QUEUE_CAP {
+            assert!(tx.try_push(vec![i as f32]), "前 {CAPTURE_QUEUE_CAP} 帧应入队");
+        }
+        let t0 = Instant::now();
+        assert!(!tx.try_push(vec![99.0]), "第 33 帧应丢弃");
+        assert!(
+            t0.elapsed() < Duration::from_millis(50),
+            "try_push 不得阻塞回调: {:?}",
+            t0.elapsed()
+        );
+        assert!(tx.overruns() >= 1);
+        let _ = rx.recv().unwrap();
+        assert!(tx.try_push(vec![1.0]), "腾出一槽后应能再入队");
+    }
+
+    #[test]
+    fn collect_and_send_overrun_drops_extra_chunks() {
+        use std::time::{Duration, Instant};
+        let (tx, rx) = capture_channel();
+        let mut pending = Vec::new();
+        let mut resampler = LinearResampler::new(16000, 16000);
+        let n = (CAPTURE_QUEUE_CAP + 2) * 1600;
+        let data: Vec<f32> = vec![0.1; n];
+        let t0 = Instant::now();
+        collect_and_send(&data, 1, &mut resampler, &mut pending, 1600, &tx);
+        assert!(t0.elapsed() < Duration::from_millis(200), "不得阻塞: {:?}", t0.elapsed());
+        assert!(tx.overruns() >= 2);
+        let mut got = 0usize;
+        while rx.try_recv().is_ok() {
+            got += 1;
+        }
+        assert_eq!(got, CAPTURE_QUEUE_CAP);
     }
 }

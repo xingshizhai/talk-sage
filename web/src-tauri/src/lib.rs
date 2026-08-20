@@ -19,30 +19,22 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use talksage_audio::AudioHub;
 use talksage_config::ConfigManager;
-use talksage_core::{DomainEvent, ResultStatus, StatusStage};
-use talksage_pipeline::{AudioInput, LivePipeline, LivePipelineConfig, StreamConfig};
-use talksage_asr::{EngineKind, EnginePool};
-use talksage_llm::{LLMProvider, OpenAICompatProvider};
-use talksage_plugins::{brief_retriever::BriefRetrieverPlugin, term_explainer::TermExplainerPlugin, translator::TranslatorPlugin, PluginContext};
+use talksage_core::{DomainEvent, StatusStage};
+use talksage_pipeline::{RunningListen, StartListen, TalkSageService};
+use talksage_asr::EnginePool;
 use talksage_session::SessionStore;
 
 mod window_state;
 
 /// 应用状态（Tauri managed state）。
 pub struct AppState {
-    config: ConfigManager,
-    /// 当前监听管道（None = 未监听）。
-    pipeline: Mutex<Option<LivePipeline>>,
+    config: Arc<ConfigManager>,
     /// 会话存储（常驻 SQLite）。
     sessions: Arc<SessionStore>,
-    /// 当前会话 id（监听期间有效）。
-    current_session: Arc<Mutex<Option<i64>>>,
-    /// 当前会话的流统计（SessionStats 事件收集，stop 时评估质量落库）。
-    session_stats: Arc<Mutex<Vec<talksage_session::StreamMeta>>>,
-    /// 当前会话 final 段文本（质量评估用）。
-    session_texts: Arc<Mutex<Vec<String>>>,
-    /// ASR 引擎池（常驻，跨监听复用 → 热启动）。
-    engine_pool: Arc<talksage_asr::EnginePool>,
+    /// 共享用例入口（装配 Pipeline / 落库 / 质量评估）。
+    service: TalkSageService,
+    /// 当前监听（None = 未监听）。
+    running: Mutex<Option<RunningListen>>,
 }
 
 /// 版本。
@@ -245,238 +237,30 @@ fn ping(app: tauri::AppHandle) -> Result<(), String> {
 /// 开始实时监听（麦克风 → VAD → ASR → 事件推送）。
 #[tauri::command]
 fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.pipeline.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+    let mut guard = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
     if guard.is_some() {
         return Err("已在监听中".into());
     }
-
-    let model_dir = resolve_models_dir();
-    let snapshot = state.config.snapshot();
-    // 场景模式：有效参数（自定义 = custom，其他 = 内置模板）
-    let scene = snapshot.scene.effective();
-    let user_engine = EngineKind::from_name(&scene.user_engine).unwrap_or(EngineKind::ParaformerZh);
-    let vad_model = model_dir
-        .join("silero-vad")
-        .join("silero_vad.onnx");
-    let user_model = model_dir.join(user_engine.model_dir_name());
-    if !vad_model.is_file() {
-        return Err(format!("缺少 VAD 模型: {}", vad_model.display()));
-    }
-    if !user_model.is_dir() {
-        return Err(format!("缺少用户 ASR 模型目录: {}", user_model.display()));
-    }
-
-    let recording_dir = if snapshot.recording.enabled {
-        let dir = snapshot.recording.resolve_dir(state.config.data_dir());
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            log::warn!("创建录音目录失败（本次不录音）: {e}");
-            None
-        } else {
-            Some(dir)
-        }
-    } else {
-        None
-    };
-    // 客户流（场景决定是否启用双流）
-    let client_engine = EngineKind::from_name(&scene.client_engine).unwrap_or(EngineKind::ZipformerEn);
-    let client_model = model_dir.join(client_engine.model_dir_name());
-    let cfg = LivePipelineConfig {
-        vad_model,
-        chunk_ms: 100,
-        vad: scene.to_vad_config(),
-        denoise: scene.to_denoise_config(),
-        asr_threads: 4,
-        user: StreamConfig {
-            engine_kind: user_engine,
-            model_dir: user_model,
-            input: AudioInput::Mic(None),
-            speaker_id: 0,
-            speaker_label: "我".into(),
-        },
-        // 客户流：系统回环采集（视频会议中客户语音）+ 客户引擎；场景关闭双流时为 None
-        client: if scene.client_enabled && client_model.is_dir() {
-            #[cfg(windows)]
-            {
-                Some(StreamConfig {
-                    engine_kind: client_engine,
-                    model_dir: client_model,
-                    input: AudioInput::Loopback,
-                    speaker_id: 1,
-                    speaker_label: "客户".into(),
-                })
-            }
-            #[cfg(not(windows))]
-            {
-                None
-            }
-        } else {
-            None
-        },
-        plugins: build_plugins(&state.config, scene.term_enabled, scene.translation_enabled, scene.brief_enabled),
-        plugin_ctx: build_plugin_ctx(&state.config),
-        recording_dir,
-        runtime: Arc::new(talksage_pipeline::RuntimeParams::default()),
-        // 说话人识别：场景启用 + wespeaker 模型 + 已注册的主人声纹
-        speaker: if scene.speaker_enabled {
-            let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
-            if spk_model.is_file() {
-                let owner = talksage_pipeline::speaker::load_owner_embedding(state.config.data_dir());
-                Some(talksage_pipeline::SpeakerConfig {
-                    model: spk_model,
-                    owner_embedding: owner,
-                    threshold: talksage_pipeline::speaker::DEFAULT_THRESHOLD,
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        },
-        // 引擎池：常驻复用（热启动，参考 WhisperLiveKit 引擎单例）
-        engine_pool: Some(state.engine_pool.clone()),
-        // 最短提交时长：场景参数（噪音短段抑制）
-        min_commit_ms: scene.min_segment_ms,
-    };
-
-    let mut pipeline = LivePipeline::new(cfg);
-    let sessions = state.sessions.clone();
-    let current_session = state.current_session.clone();
-    // 统计收集（会话质量评估）
-    *state.session_stats.lock().unwrap() = Vec::new();
-    *state.session_texts.lock().unwrap() = Vec::new();
-    let session_stats = state.session_stats.clone();
-    let session_texts = state.session_texts.clone();
-    let sink: Arc<dyn Fn(DomainEvent) + Send + Sync> = Arc::new(move |ev: DomainEvent| {
-        // 会话落库（监听期间）
-        if let Ok(guard) = current_session.lock() {
-            if let Some(sid) = *guard {
-                match &ev {
-                    DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, duration_ms, rms, .. } => {
-                        if let Ok(mut t) = session_texts.lock() {
-                            t.push(text.clone());
-                        }
-                        let _ = sessions.add_segment(
-                            sid,
-                            &talksage_core::TranscriptSegment {
-                                speaker_id: *speaker_id,
-                                speaker_label: speaker_label.clone(),
-                                text: text.clone(),
-                                is_partial: false,
-                                ts_ms: *ts_ms,
-                                duration_ms: *duration_ms,
-                                rms: *rms,
-                            },
-                        );
-                    }
-                    DomainEvent::Term { status: ResultStatus::Final, content, .. } => {
-                        let _ = sessions.add_term(sid, content);
-                    }
-                    DomainEvent::Translation { content, .. } => {
-                        let _ = sessions.add_translation(sid, "translate", content);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        // 会话统计收集
-        if let DomainEvent::SessionStats {
-            speaker_label,
-            total_ms,
-            speech_ms,
-            final_segments,
-            samples: _,
-            avg_rms,
-            max_rms,
-            non_speech_avg_rms,
-            recording,
-            vad_preset,
-            vad_threshold,
-            words,
-            questions,
-        } = &ev
-        {
-            if let Ok(mut sm) = session_stats.lock() {
-                sm.push(talksage_session::StreamMeta {
-                    speaker_label: speaker_label.clone(),
-                    total_ms: *total_ms,
-                    speech_ms: *speech_ms,
-                    final_segments: *final_segments,
-                    avg_rms: *avg_rms,
-                    max_rms: *max_rms,
-                    non_speech_avg_rms: *non_speech_avg_rms,
-                    recording: recording.clone(),
-                    vad_preset: vad_preset.clone(),
-                    vad_threshold: *vad_threshold,
-                    words: *words,
-                    questions: *questions,
-                });
-            }
-        }
-        let _ = app.emit("talksage://event", ev);
-    });
-    pipeline.start(sink).map_err(|e| e.to_string())?;
-    // 开启会话
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let sid = state
-        .sessions
-        .start_session(now)
-        .map_err(|e| format!("开启会话失败: {e}"))?;
-    *state.current_session.lock().unwrap() = Some(sid);
-    *guard = Some(pipeline);
+    let app = app.clone();
+    let running = state
+        .service
+        .start(
+            StartListen::desktop(),
+            Arc::new(move |ev: DomainEvent| {
+                let _ = app.emit("talksage://event", ev);
+            }),
+        )
+        .map_err(|e| e.to_string())?;
+    *guard = Some(running);
     Ok(())
 }
 
 /// 停止实时监听。
 #[tauri::command]
 fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.pipeline.lock().map_err(|_| "pipeline 锁失败".to_string())?;
-    if let Some(mut p) = guard.take() {
-        p.stop();
-    }    // 结束会话
-    if let Some(sid) = state.current_session.lock().unwrap().take() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let _ = state.sessions.end_session(sid, now);
-        // 质量评估落库（stats + 段文本；auto_detect 跟随场景参数）
-        let stats = state.session_stats.lock().unwrap().clone();
-        let texts = state.session_texts.lock().unwrap().clone();
-        if !stats.is_empty() {
-            let mut params = talksage_session::QualityParams::from_config(&state.config.snapshot().quality);
-            params.auto_detect = state.config.snapshot().scene.effective().noise_auto_detect;
-            let meta = talksage_session::SessionMeta::evaluate(stats, &texts, now, &params);
-            if let Err(e) = state.sessions.set_session_meta(sid, &meta) {
-                log::warn!("保存会话元数据失败: {e}");
-            }
-            log::info!(
-                "会话 #{sid} 质量评估: {}（时长 {}s，语音占比 {:.0}%，文本噪音 {:.2}，跳过下游分析={}）",
-                meta.quality_label(),
-                meta.duration_ms / 1000,
-                meta.speech_ratio * 100.0,
-                meta.text_noise,
-                meta.skipped_analysis,
-            );
-        }
-        // 会议结束 Webhook（借鉴 Call.md workflow-webhook；配置启用 + SSRF 防护）
-        let wh_cfg = state.config.snapshot().webhooks;
-        if wh_cfg.enabled && !wh_cfg.urls.is_empty() {
-            let sessions = state.sessions.clone();
-            std::thread::spawn(move || {
-                if let Ok(detail) = sessions.get_session(sid) {
-                    let results = talksage_session::trigger_meeting_webhooks(&detail, &wh_cfg);
-                    for r in &results {
-                        log::info!("webhook {}: {}（{}）", if r.ok { "成功" } else { "失败" }, r.url, r.message);
-                    }
-                    if results.iter().any(|r| !r.ok) {
-                        log::warn!("部分 webhook 失败: {:?}", results.iter().filter(|r| !r.ok).map(|r| &r.url).collect::<Vec<_>>());
-                    }
-                }
-            });
-        }
+    let mut guard = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+    if let Some(running) = guard.take() {
+        state.service.finish(running).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -484,7 +268,7 @@ fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
 /// 实时调节噪音电平阈值（0 = 关闭；无需停止监听，下一音频块即生效）。
 #[tauri::command]
 fn set_noise_level(level: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let guard = state.pipeline.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+    let guard = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
     match guard.as_ref() {
         Some(p) => {
             p.set_noise_level(level);
@@ -509,7 +293,7 @@ fn get_voiceprint_status(state: tauri::State<'_, AppState>) -> serde_json::Value
 #[tauri::command]
 fn enroll_voice(seconds: u32, state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
     // 正在监听时不允许注册（麦克风被占用）
-    if state.pipeline.lock().unwrap().is_some() {
+    if state.running.lock().unwrap().is_some() {
         return Err("请先停止监听再录制声音".into());
     }
     let model = speaker_model_path();
@@ -558,7 +342,10 @@ fn remove_voiceprint(state: tauri::State<'_, AppState>) -> Result<(), String> {
 
 /// 声纹模型路径（models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx）。
 fn speaker_model_path() -> PathBuf {
-    resolve_models_dir().join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx")
+    TalkSageService::resolve_models_dir()
+        .unwrap_or_else(|| PathBuf::from("models"))
+        .join("wespeaker")
+        .join("wespeaker_zh_cnceleb_resnet34.onnx")
 }
 
 /// 会话列表（历史）。
@@ -623,7 +410,7 @@ fn list_notes_templates() -> Vec<serde_json::Value> {
 /// 按模板生成纪要并保存到会话。
 #[tauri::command]
 fn generate_notes(session_id: i64, template_id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let Some(llm) = build_llm(&state.config) else {
+    let Some(llm) = TalkSageService::build_llm(&state.config) else {
         return Err("未配置 LLM（请设置 llm.providers.<provider>.api_key）".into());
     };
     let Some(template) = talksage_notes::get_template(&template_id) else {
@@ -644,7 +431,7 @@ fn generate_notes(session_id: i64, template_id: String, state: tauri::State<'_, 
 /// 三段式智能纪要（概述 / 归属要点 / 行动项；借鉴 Call.md summary-generator），保存到会话。
 #[tauri::command]
 fn generate_trio_notes(session_id: i64, meeting_name: Option<String>, meeting_description: Option<String>, state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let Some(llm) = build_llm(&state.config) else {
+    let Some(llm) = TalkSageService::build_llm(&state.config) else {
         return Err("未配置 LLM（请设置 llm.providers.<provider>.api_key）".into());
     };
     let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
@@ -676,112 +463,31 @@ fn export_session_markdown(session_id: i64, state: tauri::State<'_, AppState>) -
 /// LLM 提炼核心要点（历史详情；无 LLM 时返回错误，前端提示）。
 #[tauri::command]
 fn generate_highlights(session_id: i64, state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
-    let Some(llm) = build_llm(&state.config) else {
+    let Some(llm) = TalkSageService::build_llm(&state.config) else {
         return Err("未配置 LLM（请设置 llm.providers.<provider>.api_key）".into());
     };
     let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
     talksage_notes::generate_highlights(&detail.segments, &llm).map_err(|e| format!("要点提炼失败: {e}"))
 }
 
-/// 根据配置构建 LLM Provider（OpenAI 兼容）。
-fn build_llm(config: &ConfigManager) -> Option<Arc<dyn LLMProvider>> {
-    let snapshot = config.snapshot();
-    let name = snapshot.llm.default.clone();
-    let provider = snapshot.llm.providers.get(&name)?;
-    if provider.api_key.is_empty() && name != "ollama" {
-        return None;
-    }
-    Some(Arc::new(OpenAICompatProvider::new(
-        provider.api_key.clone(),
-        provider.model.clone(),
-        provider.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com/v1".to_string()),
-    )))
-}
-
-/// 构建插件列表（按配置开关）。
-fn build_plugins(config: &ConfigManager, term: bool, translation: bool, brief: bool) -> Vec<Arc<dyn talksage_plugins::AnalyzerPlugin>> {
-    let mut plugins: Vec<Arc<dyn talksage_plugins::AnalyzerPlugin>> = Vec::new();
-    let plugins_cfg = &config.snapshot().plugins;
-    if term && plugins_cfg.term_explainer.enabled {
-        plugins.push(Arc::new(TermExplainerPlugin::new(plugins_cfg.term_explainer.cooldown_seconds as f64)));
-    }
-    if translation && plugins_cfg.translator.enabled {
-        plugins.push(Arc::new(TranslatorPlugin::new()));
-    }
-    if brief && plugins_cfg.brief_retriever.enabled {
-        plugins.push(Arc::new(BriefRetrieverPlugin::new(
-            plugins_cfg.brief_retriever.cooldown_seconds as f64,
-            0.05,
-        )));
-    }
-    plugins
-}
-
-/// 构建插件上下文（知识库 + LLM）。
-fn build_plugin_ctx(config: &ConfigManager) -> PluginContext {
-    let llm = build_llm(config);
-    let kb = {
-        let kb_cfg = &config.snapshot().knowledge_base;
-        if kb_cfg.enabled && !kb_cfg.folder.is_empty() {
-            let mut kb = talksage_knowledge::KnowledgeBase::new();
-            kb.index_folder(std::path::Path::new(&kb_cfg.folder));
-            if kb.chunk_count() > 0 {
-                Some(Arc::new(kb))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    };
-    PluginContext { kb, llm }
-}
-
-/// 解析模型根目录：优先环境变量，其次相对可执行文件探测。
-fn resolve_models_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
-        let p = PathBuf::from(d);
-        if p.is_dir() {
-            return p;
-        }
-    }
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(base) = exe.parent() {
-            candidates.push(base.join("../../models")); // target/debug → 仓库根/models
-            candidates.push(base.join("../../../models"));
-        }
-    }
-    candidates.push(PathBuf::from("models"));
-    candidates.push(PathBuf::from("../models"));
-    for c in candidates {
-        if c.is_dir() {
-            return c;
-        }
-    }
-    PathBuf::from("models")
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let config = ConfigManager::load(None, None).expect("加载配置失败");
+    let config = Arc::new(ConfigManager::load(None, None).expect("加载配置失败"));
     let data_dir = config.data_dir().to_path_buf();
     let _log_guard = talksage_logging::init(Some(&data_dir));
     log::info!("TalkSage 桌面应用启动，数据目录: {}", data_dir.display());
     let sessions = Arc::new(
         SessionStore::open(&data_dir.join("sessions.db").to_string_lossy()).expect("打开会话库失败"),
     );
+    let service = TalkSageService::new(config.clone(), Some(sessions.clone()), EnginePool::new());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             config,
-            pipeline: Mutex::new(None),
             sessions,
-            current_session: Arc::new(Mutex::new(None)),
-            session_stats: Arc::new(Mutex::new(Vec::new())),
-            session_texts: Arc::new(Mutex::new(Vec::new())),
-            engine_pool: EnginePool::new(),
+            service,
+            running: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             get_version,

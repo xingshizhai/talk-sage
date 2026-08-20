@@ -24,12 +24,12 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 
-use crate::LinearResampler;
+use crate::{CaptureTx, LinearResampler};
 
 /// WASAPI 回环采集器。
 pub struct LoopbackCapture {
     chunk_samples: usize,
-    tx: mpsc::Sender<Vec<f32>>,
+    tx: CaptureTx,
     thread: Option<JoinHandle<()>>,
     tx_stop: Option<mpsc::Sender<()>>,
 }
@@ -37,7 +37,7 @@ pub struct LoopbackCapture {
 impl LoopbackCapture {
     /// 创建回环采集器（Windows 专属；非 Windows 平台 start 会报错）。
     pub fn new(chunk_ms: u64) -> (Self, mpsc::Receiver<Vec<f32>>) {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::capture_channel();
         let chunk_samples = (crate::TARGET_SAMPLE_RATE as u64 * chunk_ms / 1000) as usize;
         (
             Self {
@@ -68,6 +68,11 @@ impl LoopbackCapture {
         self.thread = Some(handle);
         self.tx_stop = Some(tx_stop);
         Ok(())
+    }
+
+    /// 采集 overrun 累计（队列满丢帧次数）。
+    pub fn overruns(&self) -> u64 {
+        self.tx.overruns()
     }
 
     /// 停止采集。
@@ -107,7 +112,7 @@ fn parse_format(format: &WAVEFORMATEX) -> (u32, u16, u16, bool) {
 /// 采集主循环（专用线程内）。
 fn loopback_loop(
     rx_stop: mpsc::Receiver<()>,
-    tx: mpsc::Sender<Vec<f32>>,
+    tx: CaptureTx,
     chunk_samples: usize,
 ) -> Result<()> {
     unsafe {
@@ -216,7 +221,7 @@ fn loopback_loop(
             while pending.len() - i >= chunk_samples {
                 let chunk: Vec<f32> = pending[i..i + chunk_samples].to_vec();
                 i += chunk_samples;
-                if tx.send(chunk).is_err() {
+                if !tx.try_push(chunk) && tx.closed() {
                     break 'outer;
                 }
             }

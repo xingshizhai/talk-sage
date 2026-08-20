@@ -104,6 +104,39 @@ export default function App() {
         if (ev.stage === "recording") setListening(true);
         if (ev.stage === "idle" || ev.stage === "asr_ready") setListening(false);
       }
+      if (ev.type === "snapshot") {
+        const acc = accumulatorRef.current;
+        acc.applySnapshot(
+          ev.committed.map((s) => ({
+            speaker_label: s.speaker_label,
+            text: s.text,
+            is_partial: false,
+            ts_ms: s.ts_ms,
+          })),
+          ev.hypothesis.map((h) => ({
+            speaker_label: h.speaker_label,
+            text: h.text,
+            is_partial: true,
+            ts_ms: h.ts_ms,
+          })),
+        );
+        setLines(
+          acc.getLines().map((l) => {
+            const st = speakerStyle(l.speakerLabel);
+            return {
+              key: l.key,
+              time: fmtTime(l.tsMs),
+              speaker: l.speakerLabel,
+              speakerColor: st.color,
+              engine: st.engine,
+              text: l.text,
+              isPartial: l.isPartial,
+              translation: lastTranslationRef.current[l.speakerLabel],
+            };
+          }),
+        );
+        if (ev.stage === "recording") setListening(true);
+      }
       if (ev.type === "level") {
         setMicRms(ev.mic_rms);
       }
