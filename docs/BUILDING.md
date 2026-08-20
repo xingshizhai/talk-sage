@@ -28,9 +28,22 @@
 .\scripts\talksage.ps1 logs       # 查看最近日志
 .\scripts\talksage.ps1 clean      # 清理构建产物
 
-# macOS / Linux
-./scripts/talksage.sh env deps build serve ...
+# macOS / Linux（首次运行）
+chmod +x scripts/talksage.sh
+./scripts/talksage.sh env       # 检查 Rust/Node/Xcode/模型
+./scripts/talksage.sh deps      # 下载当前平台的 sherpa 库、模型和前端依赖
+./scripts/talksage.sh build     # 编译 Rust workspace + React 前端
+./scripts/talksage.sh doctor    # 验证运行目录和模型
+./scripts/talksage.sh run       # 启动 Vite + macOS Tauri 应用（推荐本地运行方式）
+
+# 开发热更新 / dmg 打包
+./scripts/talksage.sh dev
+./scripts/talksage.sh package
 ```
+
+> 注意：不要直接运行 `target/debug/talksage-app`。普通 `cargo build` 的 Tauri
+> debug 二进制会连接配置中的 `devUrl`，需要 Vite 开发服务器；直接执行只会得到
+> 空窗口。使用 `talksage.sh run/dev`，或通过 `talksage.sh package` 生成可独立运行的应用。
 
 > 脚本内部命令（`python`/`npm`/`npx`/`cargo`）需在 PATH 中；代理通过 `$env:https_proxy` / `$env:http_proxy` 设置后运行即可。
 > 下面章节为手动步骤（脚本内部执行的等价操作），供定制/排障参考。

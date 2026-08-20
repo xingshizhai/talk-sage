@@ -13,7 +13,8 @@ from pathlib import Path
 
 VERSION = "1.13.5"
 BASE = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
-PROXY = "http://127.0.0.1:10808"
+# 默认直连；需要代理时用 --proxy 或环境变量 https_proxy / HTTPS_PROXY。
+PROXY = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY") or ""
 
 # 平台 → 归档文件名模板（与 sherpa-onnx-sys build.rs 一致）
 ARCHIVES = {

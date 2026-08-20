@@ -1,6 +1,9 @@
-"""下载 sherpa-onnx streaming 模型（经代理 127.0.0.1:10808）。
+"""下载 sherpa-onnx streaming 模型。
 
-用法: python scripts/download_models.py [paraformer-zh | zipformer-en | all]
+用法: python scripts/download_models.py [paraformer-zh | zipformer-en | wespeaker | all] [--proxy URL]
+
+代理策略（默认直连）：
+  1. --proxy 显式指定；2. 环境变量 https_proxy / HTTPS_PROXY；3. 都没有则直连。
 下载到 models/<repo>/
 """
 import os
@@ -8,13 +11,20 @@ import sys
 import urllib.request
 from pathlib import Path
 
-PROXY = "http://127.0.0.1:10808"
 BASE = "https://huggingface.co"
-OUT_ROOT = Path(__file__).resolve().parent.parent / "models"
+# 镜像：HF_ENDPOINT=https://hf-mirror.com 可切换到国内镜像
+BASE = os.environ.get("HF_ENDPOINT", BASE).rstrip("/")
+OUT_ROOT = Path(os.environ.get("TALKSAGE_MODELS_DIR") or Path(__file__).resolve().parent.parent / "models")
 
-opener = urllib.request.build_opener(
-    urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
-)
+
+def build_opener(proxy: str) -> urllib.request.OpenerDirector:
+    """proxy 为空 = 直连（ProxyHandler({}) 显式禁用系统代理探测）。"""
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy else {})
+    )
+
+
+opener = build_opener("")
 
 TARGETS: dict[str, list[tuple[str | None, str, str]]] = {
     "paraformer-zh": [
@@ -32,6 +42,10 @@ TARGETS: dict[str, list[tuple[str | None, str, str]]] = {
         ("csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26", "joiner-epoch-99-avg-1-chunk-16-left-64.int8.onnx", ""),
         ("csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26", "bpe.model", ""),
         ("csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26", "tokens.txt", ""),
+    ],
+    # VAD 模型：整条流水线的前置依赖（分段、静音裁剪、录音都要用），沿用 sherpa-onnx 官方分发版本。
+    "silero-vad": [
+        (None, "silero_vad.onnx", "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"),
     ],
     # 声纹模型（说话人识别）：GitHub release（sherpa-onnx speaker-recongition-models，官方 tag 拼写如此）
     "wespeaker": [
@@ -58,8 +72,9 @@ TARGETS: dict[str, list[tuple[str | None, str, str]]] = {
 }
 
 
-def download(repo: str | None, filename: str, url: str) -> Path:
-    out_dir = OUT_ROOT / (repo.split("/")[-1] if repo else "wespeaker")
+def download(repo: str | None, filename: str, url: str, group: str) -> Path:
+    """repo 为 None 时（直链下载）按目标组名建目录，与代码里的模型路径约定一致。"""
+    out_dir = OUT_ROOT / (repo.split("/")[-1] if repo else group)
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / filename
     if out.exists() and out.stat().st_size > 0:
@@ -79,12 +94,25 @@ def download(repo: str | None, filename: str, url: str) -> Path:
 
 
 def main() -> None:
-    want = sys.argv[1] if len(sys.argv) > 1 else "all"
+    global opener
+    args = sys.argv[1:]
+    proxy = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY") or ""
+    if "--proxy" in args:
+        i = args.index("--proxy")
+        proxy = args[i + 1] if i + 1 < len(args) else ""
+        del args[i : i + 2]
+    opener = build_opener(proxy)
+
+    want = args[0] if args else "all"
+    if want not in TARGETS and want != "all":
+        print(f"未知目标: {want}（可选: all, {', '.join(TARGETS)}）")
+        raise SystemExit(2)
+    print(f"源: {BASE}  代理: {proxy or '直连'}  输出: {OUT_ROOT}")
     for name, files in TARGETS.items():
         if want in ("all", name):
             print(f"== {name} ==")
             for repo, filename, url in files:
-                download(repo, filename, url)
+                download(repo, filename, url, name)
 
 
 if __name__ == "__main__":
