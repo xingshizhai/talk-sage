@@ -46,7 +46,7 @@ export default function SettingsSection({
     term_enabled: config?.scene?.custom?.term_enabled ?? true,
     translation_enabled: config?.scene?.custom?.translation_enabled ?? true,
     brief_enabled: config?.scene?.custom?.brief_enabled ?? true,
-    speaker_enabled: config?.scene?.custom?.speaker_enabled ?? true,
+    speaker_enabled: config?.scene?.custom?.speaker_enabled ?? false,
     noise_auto_detect: config?.scene?.custom?.noise_auto_detect ?? true,
   }));
   const [defaultProvider, setDefaultProvider] = useState(config?.llm?.default ?? "deepseek");
@@ -287,7 +287,8 @@ export default function SettingsSection({
                   <div>· VAD：灵敏（threshold 0.35 / 最小语音 150ms / 段尾静音 300ms）——抓日常短句与弱语音</div>
                   <div>· 降噪：关闭（弱信号优先）</div>
                   <div>· 最短提交：不限制（生活短句不丢）</div>
-                  <div>· 单流（仅中文 paraformer）；说话人识别开启；分析插件关闭（省资源）</div>
+                  <div>· 单流（仅中文 paraformer）；分析插件关闭（省资源）</div>
+                  <div>· 说话人识别：默认关闭（可在「自定义」开启）</div>
                 </>
               )}
               {sceneMode === "meeting" && (
@@ -295,14 +296,16 @@ export default function SettingsSection({
                   <div>· VAD：标准（threshold 0.5 / 最小语音 250ms / 段尾静音 500ms）</div>
                   <div>· 降噪：关闭；最短提交：不限制</div>
                   <div>· 双流：我（中文 paraformer）+ 客户（英文 zipformer，系统回环）</div>
-                  <div>· 术语解释 / 实时翻译 / 简报检索全开；说话人识别开启</div>
+                  <div>· 术语解释 / 实时翻译 / 简报检索全开</div>
+                  <div>· 说话人识别：默认关闭（可在「自定义」开启）</div>
                 </>
               )}
               {sceneMode === "talk" && (
                 <>
                   <div>· VAD：标准（threshold 0.5 / 最小语音 250ms / 段尾静音 500ms）</div>
                   <div>· 降噪：关闭；最短提交：300ms（滤掉谈判中的无效短音）</div>
-                  <div>· 双流：我 + 客户；术语 / 翻译 / 简报全开；说话人识别开启</div>
+                  <div>· 双流：我 + 客户；术语 / 翻译 / 简报全开</div>
+                  <div>· 说话人识别：默认关闭（可在「自定义」开启）</div>
                 </>
               )}
               <div style={{ marginTop: 6, color: "var(--muted)" }}>

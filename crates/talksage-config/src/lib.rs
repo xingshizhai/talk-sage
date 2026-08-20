@@ -123,7 +123,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             term_enabled: false, // 省资源/安静
             translation_enabled: false,
             brief_enabled: false,
-            speaker_enabled: true, // 家人/朋友识别
+            speaker_enabled: false, // 默认关闭说话人识别（回环双录时在线聚类会产生重复标签，先把实时转写做好）
             noise_auto_detect: true,
         },
         SceneMode::Meeting => SceneParams {
@@ -142,7 +142,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             term_enabled: true,
             translation_enabled: true,
             brief_enabled: true,
-            speaker_enabled: true,
+            speaker_enabled: false, // 默认关闭说话人识别（先把实时转写做好）
             noise_auto_detect: true,
         },
         SceneMode::Talk => SceneParams {
@@ -160,7 +160,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             term_enabled: true,
             translation_enabled: true,
             brief_enabled: true,
-            speaker_enabled: true,
+            speaker_enabled: false, // 默认关闭说话人识别（先把实时转写做好）
             noise_auto_detect: true,
         },
         SceneMode::Custom => SceneParams {
@@ -178,7 +178,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             term_enabled: true,
             translation_enabled: true,
             brief_enabled: true,
-            speaker_enabled: true,
+            speaker_enabled: false, // 默认关闭说话人识别（先把实时转写做好）
             noise_auto_detect: true,
         },
     }
@@ -1057,7 +1057,9 @@ min_segment_ms = 600
         assert_eq!(p.min_segment_ms, 0);
         assert_eq!(p.user_engine, "paraformer-zh");
         assert!(p.client_enabled);
-        assert!(p.term_enabled && p.translation_enabled && p.brief_enabled && p.speaker_enabled);
+        assert!(p.term_enabled && p.translation_enabled && p.brief_enabled);
+        // 说话人识别默认关闭（回环双录时在线聚类产生重复标签；先把实时转写做好）
+        assert!(!p.speaker_enabled);
         // 与场景 to_* 转换一致
         assert_eq!(p.to_vad_config().effective(), (0.50, 0.25, 0.50, 512, 10.0));
     }
