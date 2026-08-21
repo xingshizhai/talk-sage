@@ -15,7 +15,9 @@ pub mod conversation_metrics;
 pub mod session_quality;
 pub mod webhook;
 
-pub use builtin::{build_registry, builtin_plugins};
+pub use builtin::{
+    build_registry, builtin_plugins, effective_plugin_configs, ANALYSIS_PLUGIN_IDS,
+};
 
 pub use registry::{
     EventFilter, FinalizeContext, FinalizeReport, HookRegistry, Plugin, PluginConfig,

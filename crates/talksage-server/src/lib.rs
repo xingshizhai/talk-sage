@@ -163,11 +163,9 @@ async fn get_config_api(State(state): State<ServerState>, headers: axum::http::H
             "terminology": cfg.asr.terminology,
         },
         "audio": cfg.audio,
-        "plugins": {
-            "term_explainer": cfg.plugins.term_explainer,
-            "translator": cfg.plugins.translator,
-            "brief_retriever": cfg.plugins.brief_retriever,
-        },
+        // 通用表：每个插件的默认值 + 用户覆盖，键就是插件 id。
+        // 前端不需要预先知道有哪些插件（Task 4 的 /plugins 端点给出元数据）。
+        "plugins": talksage_plugins::effective_plugin_configs(&cfg.plugins.entries),
         "server": { "host": cfg.server.host, "port": cfg.server.port },
     });
     (StatusCode::OK, Json(body)).into_response()
@@ -230,21 +228,7 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
         }
     }
     if let Some(plugins) = updates.get("plugins") {
-        if let Some(t) = plugins.get("term_explainer") {
-            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
-                c.plugins.term_explainer.enabled = e;
-            }
-        }
-        if let Some(t) = plugins.get("translator") {
-            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
-                c.plugins.translator.enabled = e;
-            }
-        }
-        if let Some(t) = plugins.get("brief_retriever") {
-            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
-                c.plugins.brief_retriever.enabled = e;
-            }
-        }
+        c.plugins.apply_updates(plugins);
     }
     if let Some(kb) = updates.get("knowledge_base") {
         if let Some(e) = kb.get("enabled").and_then(|v| v.as_bool()) {

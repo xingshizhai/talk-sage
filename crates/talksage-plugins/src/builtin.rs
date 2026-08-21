@@ -15,6 +15,16 @@ use crate::short_segment::ShortSegmentPlugin;
 use crate::webhook::WebhookPlugin;
 use crate::PluginContext;
 
+/// 受场景 allowlist 约束的插件 id —— 「会议辅助功能」那一类。
+///
+/// 只有这些插件的 `enabled` 会被 `SceneParams::plugin_allowlist` 裁决。
+/// short_segment / cross_stream_dedup / session_quality / webhook /
+/// conversation_metrics **不在**这里：它们是基础设施，不是产品功能。生活模式
+/// 关掉术语解释是产品意图；关掉短段抑制不是。
+///
+/// 新增分析类插件时这里要同步加一行（另一行加在 `builtin_plugins()`）。
+pub const ANALYSIS_PLUGIN_IDS: &[&str] = &["term_explainer", "translator", "brief_retriever"];
+
 /// 内置插件清单。
 ///
 /// **顺序即执行顺序**（设计 §3.4 S2）。改动顺序前先看 builtin.rs 里的
@@ -59,6 +69,27 @@ pub fn build_registry(
         p.register(&cfg, ctx, &mut hooks);
     }
     hooks
+}
+
+/// 每个内置插件的**生效配置**：`default_config()` + 用户覆盖。
+///
+/// 宿主拿去展示（doctor / 配置 API / 设置页）。用户表里没写的插件也会出现在
+/// 结果里，值是插件默认 —— 前端因此不必知道有哪些插件、默认值是多少。
+///
+/// 刻意**不**施加场景 allowlist：那是「本次会话会不会装上」的运行期裁决，
+/// 不是用户配置。混进来的话，切一次场景就像被人改了配置。
+pub fn effective_plugin_configs(
+    user: &std::collections::BTreeMap<String, Value>,
+) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    for p in builtin_plugins() {
+        let mut cfg = p.default_config();
+        if let Some(u) = user.get(p.id()) {
+            cfg.merge(u);
+        }
+        out.insert(p.id().to_string(), cfg.as_value().clone());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -155,6 +186,41 @@ mod tests {
         let mut with = HookRegistry::default();
         p.register(&p.default_config(), &ctx, &mut with);
         assert_eq!(with.observers().len(), 1, "有知识库时应注册");
+    }
+
+    /// 生效配置要覆盖全部插件（用户没写的用默认），且用户值要压过默认值。
+    #[test]
+    fn effective_configs_cover_every_plugin_and_apply_user_values() {
+        let mut user = std::collections::BTreeMap::new();
+        user.insert("short_segment".to_string(), serde_json::json!({ "min_ms": 777 }));
+        let eff = effective_plugin_configs(&user);
+        assert_eq!(eff.len(), builtin_plugins().len(), "每个插件都该有一项");
+        assert_eq!(eff["short_segment"]["min_ms"], serde_json::json!(777));
+        assert_eq!(eff["short_segment"]["enabled"], serde_json::json!(true), "未覆盖的键取默认");
+        assert_eq!(eff["webhook"]["enabled"], serde_json::json!(false), "webhook 默认关闭");
+    }
+
+    /// ANALYSIS_PLUGIN_IDS 里的 id 必须真的存在，否则场景 allowlist 会静默失效。
+    #[test]
+    fn analysis_plugin_ids_all_exist() {
+        let ids: Vec<&str> = builtin_plugins().iter().map(|p| p.id()).collect();
+        for id in ANALYSIS_PLUGIN_IDS {
+            assert!(ids.contains(id), "ANALYSIS_PLUGIN_IDS 里的 {id} 不在注册表: {ids:?}");
+        }
+    }
+
+    /// 基础设施类插件不受场景 allowlist 约束 —— 这是 allowlist 只列分析类的前提。
+    #[test]
+    fn infrastructure_plugins_are_not_subject_to_the_allowlist() {
+        for id in [
+            "short_segment",
+            "cross_stream_dedup",
+            "conversation_metrics",
+            "session_quality",
+            "webhook",
+        ] {
+            assert!(!ANALYSIS_PLUGIN_IDS.contains(&id), "{id} 是基础设施，不该受场景裁决");
+        }
     }
 
     #[test]

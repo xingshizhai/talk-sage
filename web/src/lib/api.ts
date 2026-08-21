@@ -28,11 +28,11 @@ export interface AppConfig {
     port: number;
     token: string;
   };
-  plugins: {
-    term_explainer: { enabled: boolean; cooldown_seconds: number };
-    translator: { enabled: boolean; cooldown_seconds: number };
-    brief_retriever: { enabled: boolean; cooldown_seconds: number };
-  };
+  /**
+   * 通用插件表：键是插件 id，值的结构由插件自己定义（`enabled` 是唯一约定键）。
+   * 后端返回的是「插件默认值 + 用户覆盖」的生效配置，所以每个内置插件都会出现。
+   */
+  plugins: Record<string, { enabled?: boolean; [key: string]: unknown }>;
   audio: {
     input_gain_db: number;
     vad: { preset: "standard" | "sensitive" | "strict"; threshold: number | null };
@@ -81,9 +81,8 @@ export interface SceneParams {
   user_engine: string;
   client_enabled: boolean;
   client_engine: string;
-  term_enabled: boolean;
-  translation_enabled: boolean;
-  brief_enabled: boolean;
+  /** 该场景允许启用的分析类插件 id；不在列表里的一律关闭（allowlist，非 denylist）。 */
+  plugin_allowlist: string[];
   speaker_enabled: boolean;
   noise_auto_detect: boolean;
 }

@@ -11,6 +11,17 @@ const VOICE_ENROLL_SECONDS = 16;
 const VOICE_ENROLL_TEXT =
   "你好，我正在为拓思者录制声音标识。今天阳光明亮，我会清楚、自然、连续地读完这段文字。会议结束后，请帮我整理重点、时间和下一步行动。";
 
+/**
+ * 受场景 allowlist 约束的分析类插件（与 Rust 侧 `ANALYSIS_PLUGIN_IDS` 对应）。
+ * 阶段 5 Task 5 会改成从 `/plugins` 元数据端点取，届时这份常量删除。
+ */
+const ANALYSIS_PLUGIN_IDS = ["term_explainer", "translator", "brief_retriever"] as const;
+const ANALYSIS_PLUGIN_LABELS: Record<string, string> = {
+  term_explainer: "术语解释",
+  translator: "实时翻译",
+  brief_retriever: "简报检索",
+};
+
 type SettingsTab = "scene" | "asr" | "plugins" | "recording" | "quality" | "voice" | "llm" | "webhooks";
 
 const TABS: { key: SettingsTab; label: string; desc: string }[] = [
@@ -46,9 +57,7 @@ export default function SettingsSection({
     user_engine: config?.scene?.custom?.user_engine ?? "paraformer-zh",
     client_enabled: config?.scene?.custom?.client_enabled ?? true,
     client_engine: config?.scene?.custom?.client_engine ?? "zipformer-en",
-    term_enabled: config?.scene?.custom?.term_enabled ?? true,
-    translation_enabled: config?.scene?.custom?.translation_enabled ?? true,
-    brief_enabled: config?.scene?.custom?.brief_enabled ?? true,
+    plugin_allowlist: config?.scene?.custom?.plugin_allowlist ?? [...ANALYSIS_PLUGIN_IDS],
     speaker_enabled: config?.scene?.custom?.speaker_enabled ?? false,
     noise_auto_detect: config?.scene?.custom?.noise_auto_detect ?? true,
   }));
@@ -415,13 +424,24 @@ export default function SettingsSection({
               </label>
               <div style={hint}>「离线段级」模型在 VAD 段结束后对整段识别——准确率更高（尤其中英夹杂），但没有逐字增量（partial）；「流式」模型实时增量、延迟低。</div>
               <label style={labelBlock}>
-                <input type="checkbox" checked={sceneCustom.term_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, term_enabled: e.target.checked })} /> 术语解释
-                <span style={{ marginLeft: 12 }}>
-                  <input type="checkbox" checked={sceneCustom.translation_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, translation_enabled: e.target.checked })} /> 实时翻译
-                </span>
-                <span style={{ marginLeft: 12 }}>
-                  <input type="checkbox" checked={sceneCustom.brief_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, brief_enabled: e.target.checked })} /> 简报检索
-                </span>
+                {ANALYSIS_PLUGIN_IDS.map((id, i) => (
+                  <span key={id} style={i === 0 ? undefined : { marginLeft: 12 }}>
+                    <input
+                      type="checkbox"
+                      checked={sceneCustom.plugin_allowlist.includes(id)}
+                      onChange={(e) =>
+                        setSceneCustom({
+                          ...sceneCustom,
+                          // allowlist：勾上=加进列表，取消=从列表移除
+                          plugin_allowlist: e.target.checked
+                            ? [...sceneCustom.plugin_allowlist, id]
+                            : sceneCustom.plugin_allowlist.filter((x) => x !== id),
+                        })
+                      }
+                    />{" "}
+                    {ANALYSIS_PLUGIN_LABELS[id] ?? id}
+                  </span>
+                ))}
               </label>
               <label style={labelBlock}>
                 <input type="checkbox" checked={sceneCustom.speaker_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, speaker_enabled: e.target.checked })} /> 说话人识别
