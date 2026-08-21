@@ -2,11 +2,14 @@
 // 保存写入 talksage.toml。
 
 import { useEffect, useState } from "react";
-import type { AppConfig, SceneParams } from "../lib/api";
+import type { AppConfig, AsrModelInfo, SceneParams } from "../lib/api";
 import { getApi } from "../lib/transport";
 
 const api = getApi();
 const PROVIDERS = ["deepseek", "kimi", "minimax", "groq", "ollama", "claude"];
+const VOICE_ENROLL_SECONDS = 16;
+const VOICE_ENROLL_TEXT =
+  "你好，我正在为拓思者录制声音标识。今天阳光明亮，我会清楚、自然、连续地读完这段文字。会议结束后，请帮我整理重点、时间和下一步行动。";
 
 type SettingsTab = "scene" | "asr" | "plugins" | "recording" | "quality" | "voice" | "llm" | "webhooks";
 
@@ -58,10 +61,21 @@ export default function SettingsSection({
   const [kbEnabled, setKbEnabled] = useState(false);
   const [clientEngine, setClientEngine] = useState(config?.asr?.client_engine ?? "zipformer-en");
   const [userEngine, setUserEngine] = useState(config?.asr?.user_engine ?? "paraformer-zh");
+  const [terminologyEnabled, setTerminologyEnabled] = useState(config?.asr?.terminology?.enabled ?? false);
+  const [hotwordScore, setHotwordScore] = useState(config?.asr?.terminology?.hotword_score ?? 1.5);
+  const [terminologyTerms, setTerminologyTerms] = useState((config?.asr?.terminology?.terms ?? []).join("\n"));
+  const [terminologyCorrections, setTerminologyCorrections] = useState(
+    Object.entries(config?.asr?.terminology?.corrections ?? {}).map(([wrong, right]) => `${wrong} => ${right}`).join("\n")
+  );
   const [vadPreset, setVadPreset] = useState<string>(config?.audio?.vad?.preset ?? "standard");
   const [denoiseEnabled, setDenoiseEnabled] = useState(config?.audio?.denoise?.enabled ?? false);
   const [highpass, setHighpass] = useState(config?.audio?.denoise?.highpass ?? true);
   const [minSegmentMs, setMinSegmentMs] = useState<number>(config?.audio?.min_segment_ms ?? 0);
+  const [inputGainDb, setInputGainDb] = useState<number>(config?.audio?.input_gain_db ?? 12);
+  const [endpointEnabled, setEndpointEnabled] = useState(config?.audio?.endpoint?.enabled ?? true);
+  const [endpointStableMs, setEndpointStableMs] = useState(config?.audio?.endpoint?.stable_ms ?? 350);
+  const [endpointQuietMs, setEndpointQuietMs] = useState(config?.audio?.endpoint?.quiet_ms ?? 450);
+  const [endpointForceQuietMs, setEndpointForceQuietMs] = useState(config?.audio?.endpoint?.force_quiet_ms ?? 850);
   const [recEnabled, setRecEnabled] = useState(config?.recording?.enabled ?? true);
   const [recDir, setRecDir] = useState<string>(config?.recording?.dir ?? "");
   const [qAutoDetect, setQAutoDetect] = useState(config?.quality?.auto_detect ?? true);
@@ -74,39 +88,58 @@ export default function SettingsSection({
   const [whUrls, setWhUrls] = useState<string>((config?.webhooks?.urls ?? []).join("\n"));
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const [asrModels, setAsrModels] = useState<AsrModelInfo[]>([]);
   // 声音标识
   const [voiceStatus, setVoiceStatus] = useState<{ model_available: boolean; enrolled: boolean } | null>(null);
   const [enrolling, setEnrolling] = useState(false);
   const [enrollCount, setEnrollCount] = useState(0);
+  const [enrollStage, setEnrollStage] = useState<"idle" | "countdown" | "recording" | "processing">("idle");
 
   // 加载声纹状态
   useEffect(() => {
     (async () => {
       try {
-        setVoiceStatus(await api.getVoiceprintStatus());
+        const [voice, models] = await Promise.all([api.getVoiceprintStatus(), api.listAsrModels()]);
+        setVoiceStatus(voice);
+        setAsrModels(models);
       } catch (e) {
-        console.error("读取声纹状态失败:", e);
+        console.error("读取本地能力状态失败:", e);
       }
     })();
   }, []);
 
-  /** 录制主人声音（countdown 秒）并保存声纹。 */
+  const modelOptions = (selected: string) => asrModels.map((m) => {
+    const speed = m.speed === "realtime" ? "实时" : m.speed === "balanced" ? "平衡" : "准确优先";
+    const unavailable = !m.installed && m.id !== selected;
+    return <option key={m.id} value={m.id} disabled={unavailable}>{m.label}（{speed}{m.streaming ? " / 流式" : " / 段级"}）{m.installed ? "" : " — 未安装"}</option>;
+  });
+
+  /** 固定文本引导注册：准备倒计时 → 录制 → 本地多窗口声纹处理。 */
   async function handleEnroll() {
-    const seconds = 6;
     setEnrolling(true);
     setMessage("");
-    setEnrollCount(seconds);
-    // 倒计时 UI
-    const timer = setInterval(() => setEnrollCount((c) => c - 1), 1000);
     try {
-      const r = await api.enrollVoice(seconds);
+      setEnrollStage("countdown");
+      for (let count = 3; count > 0; count--) {
+        setEnrollCount(count);
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      }
+      setEnrollStage("recording");
+      setEnrollCount(VOICE_ENROLL_SECONDS);
+      const timer = window.setInterval(() => setEnrollCount((c) => Math.max(0, c - 1)), 1000);
+      const processingTimer = window.setTimeout(() => setEnrollStage("processing"), VOICE_ENROLL_SECONDS * 1000);
+      const pending = api.enrollVoice(VOICE_ENROLL_SECONDS);
+      const r = await pending.finally(() => {
+        window.clearInterval(timer);
+        window.clearTimeout(processingTimer);
+      });
       setVoiceStatus({ model_available: true, enrolled: true });
-      setMessage(`声音标识已保存（声纹维度 ${r.dim}）。监听时将优先识别为「我」。`);
+      setMessage(`主人声纹已保存：有效语音 ${(r.voiced_ms / 1000).toFixed(1)} 秒，${r.windows} 个窗口，维度 ${r.dim}。`);
     } catch (e) {
-      setMessage(`声音标识失败: ${e}`);
+      setMessage(`注册失败：${e}。请保持 20–40 厘米距离，按提示连续朗读后重试。`);
     } finally {
-      clearInterval(timer);
       setEnrollCount(0);
+      setEnrollStage("idle");
       setEnrolling(false);
     }
   }
@@ -140,6 +173,10 @@ export default function SettingsSection({
     setSaving(true);
     setMessage("");
     try {
+      const corrections = Object.fromEntries(terminologyCorrections.split("\n").map((line) => {
+        const [wrong, ...right] = line.split("=>");
+        return [wrong?.trim(), right.join("=>").trim()];
+      }).filter(([wrong, right]) => wrong && right));
       const updates: Record<string, unknown> = {
         llm: {
           default: defaultProvider,
@@ -161,12 +198,25 @@ export default function SettingsSection({
         asr: {
           client_engine: clientEngine,
           user_engine: userEngine,
+          terminology: {
+            enabled: terminologyEnabled,
+            hotword_score: hotwordScore,
+            terms: terminologyTerms.split("\n").map((v) => v.trim()).filter(Boolean),
+            corrections,
+          },
         },
         audio: {
+          input_gain_db: inputGainDb,
           vad: { preset: vadPreset },
           denoise: {
             enabled: denoiseEnabled,
             highpass,
+          },
+          endpoint: {
+            enabled: endpointEnabled,
+            stable_ms: endpointStableMs,
+            quiet_ms: endpointQuietMs,
+            force_quiet_ms: endpointForceQuietMs,
           },
           min_segment_ms: minSegmentMs,
         },
@@ -337,7 +387,7 @@ export default function SettingsSection({
                 </label>
                 <label>
                   最长语音 ms：
-                  <input type="number" min={1000} step={1000} value={sceneCustom.vad_max_speech_ms ?? 10000} onChange={(e) => setSceneCustom({ ...sceneCustom, vad_max_speech_ms: Number(e.target.value) || null })} style={numStyle} />
+                  <input type="number" min={1000} step={1000} value={sceneCustom.vad_max_speech_ms ?? 30000} onChange={(e) => setSceneCustom({ ...sceneCustom, vad_max_speech_ms: Number(e.target.value) || null })} style={numStyle} />
                 </label>
               </div>
               <label style={labelBlock}>
@@ -351,11 +401,7 @@ export default function SettingsSection({
               <label style={labelBlock}>
                 我的引擎：
                 <select value={sceneCustom.user_engine} onChange={(e) => setSceneCustom({ ...sceneCustom, user_engine: e.target.value })} style={inputStyle}>
-                  <option value="paraformer-zh">中文 paraformer-zh（流式，含 fp32 更准）</option>
-                  <option value="whisper-base">Whisper base（离线段级，多语言更准）</option>
-                  <option value="whisper-small">Whisper small（离线段级，更准更慢）</option>
-                  <option value="qwen3-asr">Qwen3-ASR（离线段级，多语言）</option>
-                  <option value="zipformer-en">英文 zipformer-en（流式）</option>
+                  {modelOptions(sceneCustom.user_engine)}
                 </select>
               </label>
               <label style={labelBlock}>
@@ -364,9 +410,7 @@ export default function SettingsSection({
               <label style={labelBlock}>
                 客户引擎：
                 <select value={sceneCustom.client_engine} onChange={(e) => setSceneCustom({ ...sceneCustom, client_engine: e.target.value })} style={inputStyle}>
-                  <option value="zipformer-en">英文 zipformer-en（流式）</option>
-                  <option value="whisper-base">Whisper base（离线段级，多语言）</option>
-                  <option value="paraformer-zh">中文 paraformer-zh（流式）</option>
+                  {modelOptions(sceneCustom.client_engine)}
                 </select>
               </label>
               <div style={hint}>「离线段级」模型在 VAD 段结束后对整段识别——准确率更高（尤其中英夹杂），但没有逐字增量（partial）；「流式」模型实时增量、延迟低。</div>
@@ -396,14 +440,46 @@ export default function SettingsSection({
           <h3 style={groupTitle}>转写引擎</h3>
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
             <select value={clientEngine} onChange={(e) => setClientEngine(e.target.value)} style={inputStyle}>
-              <option value="zipformer-en">客户（英文）zipformer-en</option>
-              <option value="paraformer-zh">客户（英文）paraformer-zh</option>
+              {modelOptions(clientEngine)}
             </select>
             <select value={userEngine} onChange={(e) => setUserEngine(e.target.value)} style={inputStyle}>
-              <option value="paraformer-zh">我（中文）paraformer-zh</option>
-              <option value="zipformer-en">我（中文）zipformer-en</option>
+              {modelOptions(userEngine)}
             </select>
           </div>
+          <div style={hint}>实时模型持续输出字幕；平衡/准确优先模型在 VAD 段结束后输出，延迟更高。未完整安装的模型不可选择。</div>
+
+          <h3 style={{ ...groupTitle, marginTop: 10 }}>麦克风输入电平</h3>
+          <label style={labelBlock}>
+            输入增益：
+            <input type="number" min={0} max={24} step={1} value={inputGainDb} onChange={(e) => setInputGainDb(Math.min(24, Math.max(0, Number(e.target.value) || 0)))} style={numStyle} /> dB
+          </label>
+          <div style={hint}>默认 +12dB；无线麦双声道自动选择电平较高的通道，并在放大后限幅，避免与静音通道平均导致声音变小。</div>
+
+          <h3 style={{ ...groupTitle, marginTop: 10 }}>专业术语增强</h3>
+          <label style={labelBlock}>
+            <input type="checkbox" checked={terminologyEnabled} onChange={(e) => setTerminologyEnabled(e.target.checked)} /> 启用会议术语上下文
+          </label>
+          <textarea
+            value={terminologyTerms}
+            onChange={(e) => setTerminologyTerms(e.target.value)}
+            disabled={!terminologyEnabled}
+            placeholder={"每行一个术语，例如：\nTalkSage\nParaformer\n向量数据库"}
+            rows={5}
+            style={{ ...inputStyle, width: "100%", resize: "vertical", opacity: terminologyEnabled ? 1 : 0.5 }}
+          />
+          <label style={{ ...labelBlock, opacity: terminologyEnabled ? 1 : 0.5 }}>
+            热词强度：
+            <input type="number" min={0} max={10} step={0.1} disabled={!terminologyEnabled} value={hotwordScore} onChange={(e) => setHotwordScore(Math.min(10, Math.max(0, Number(e.target.value) || 0)))} style={numStyle} />
+          </label>
+          <textarea
+            value={terminologyCorrections}
+            onChange={(e) => setTerminologyCorrections(e.target.value)}
+            disabled={!terminologyEnabled}
+            placeholder={"常见误识别 => 标准术语，例如：\n怕热佛母 => Paraformer"}
+            rows={4}
+            style={{ ...inputStyle, width: "100%", resize: "vertical", opacity: terminologyEnabled ? 1 : 0.5 }}
+          />
+          <div style={hint}>Zipformer 与 Qwen3-ASR 会使用模型热词；Paraformer 使用纠错表。纠错同步作用于 partial/final，不增加模型推理延迟。修改后下次监听生效。</div>
 
           <h3 style={{ ...groupTitle, marginTop: 10 }}>识别灵敏度（VAD）</h3>
           <select
@@ -415,6 +491,17 @@ export default function SettingsSection({
             <option value="sensitive">灵敏（弱语音/快速问答，会议室轻声）</option>
             <option value="strict">严格（抗背景噪音，长句稳定）</option>
           </select>
+          <label style={labelBlock}>
+            <input type="checkbox" checked={endpointEnabled} onChange={(e) => setEndpointEnabled(e.target.checked)} /> 启用自然断句（文本稳定 + 短暂停顿）
+          </label>
+          {endpointEnabled && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+              <label>文本稳定 ms：<input type="number" min={100} step={50} value={endpointStableMs} onChange={(e) => setEndpointStableMs(Math.max(100, Number(e.target.value) || 350))} style={numStyle} /></label>
+              <label>短暂停顿 ms：<input type="number" min={100} step={50} value={endpointQuietMs} onChange={(e) => setEndpointQuietMs(Math.max(100, Number(e.target.value) || 450))} style={numStyle} /></label>
+              <label>强制停顿 ms：<input type="number" min={200} step={50} value={endpointForceQuietMs} onChange={(e) => setEndpointForceQuietMs(Math.max(200, Number(e.target.value) || 850))} style={numStyle} /></label>
+            </div>
+          )}
+          <div style={hint}>短暂停顿需文本稳定；达到强制停顿时直接提交。两者均可独立于 Silero VAD 断句且不重复推理；关闭后完全使用 VAD。</div>
 
           <h3 style={{ ...groupTitle, marginTop: 10 }}>背景噪音处理</h3>
           <label style={labelBlock}>
@@ -579,9 +666,28 @@ export default function SettingsSection({
               )}
             </div>
           </div>
-          <div style={hint}>
-            点击「录制我的声音」，对着麦克风正常说话 6 秒（保持环境安静）。之后监听时：
-            您的发言标记为「我」，其他说话人自动区分为「客户1」「客户2」…
+          <div style={{ ...hint, marginBottom: 8 }}>
+            声音只在本机处理。请保持环境安静，距离麦克风约 20–40 厘米，用平时开会的音量连续朗读。
+          </div>
+          <div style={{ padding: "14px 16px", borderRadius: 10, border: `1px solid ${enrollStage === "recording" ? "var(--live)" : "var(--border)"}`, background: "var(--surface-2)" }}>
+            <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 700, letterSpacing: "0.08em", marginBottom: 8 }}>
+              固定朗读文本
+            </div>
+            <div style={{ fontSize: 16, lineHeight: 1.9, color: "var(--text)", userSelect: "text" }}>{VOICE_ENROLL_TEXT}</div>
+            {enrolling && (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 12, color: enrollStage === "recording" ? "var(--live)" : "var(--brief)", fontWeight: 700 }}>
+                  {enrollStage === "countdown" && `${enrollCount} 秒后开始，请准备`}
+                  {enrollStage === "recording" && `● 正在录制，请朗读（剩余约 ${enrollCount} 秒）`}
+                  {enrollStage === "processing" && "正在本地检查音频并生成声纹…"}
+                </div>
+                {enrollStage === "recording" && (
+                  <div style={{ height: 5, background: "var(--border)", borderRadius: 3, marginTop: 7, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${((VOICE_ENROLL_SECONDS - enrollCount) / VOICE_ENROLL_SECONDS) * 100}%`, background: "var(--live)", transition: "width 1s linear" }} />
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
             <button
@@ -589,7 +695,7 @@ export default function SettingsSection({
               disabled={enrolling || !voiceStatus?.model_available}
               style={{ fontSize: 12 }}
             >
-              {enrolling ? `录制中… ${enrollCount}s` : voiceStatus?.enrolled ? "重新录制我的声音" : "录制我的声音"}
+              {enrolling ? "注册进行中…" : voiceStatus?.enrolled ? "重新录制主人声纹" : "开始录制主人声纹"}
             </button>
             {voiceStatus?.enrolled && (
               <button onClick={handleRemoveVoice} disabled={enrolling} style={{ fontSize: 12 }}>
@@ -597,7 +703,7 @@ export default function SettingsSection({
               </button>
             )}
           </div>
-          <div style={hint}>未注册声音时保持原双流标签（我 / 客户）；录音仍可用于测试闭环。</div>
+          <div style={hint}>固定文字用于覆盖更多发音特征；无需刻意模仿播音腔。未注册时保持原双流标签（我 / 客户）。</div>
         </div>
       )}
 

@@ -63,6 +63,14 @@ impl SessionRuntime {
         self.pipeline.noise_level()
     }
 
+    pub fn set_paused(&self, paused: bool) {
+        self.pipeline.set_paused(paused);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.pipeline.is_paused()
+    }
+
     pub fn snapshot(&self) -> SessionSnapshot {
         let stage = *self.stage.lock().unwrap();
         self.transcript.lock().unwrap().snapshot(stage)
@@ -101,6 +109,8 @@ fn stamp_revision(ev: DomainEvent, revision: u64) -> DomainEvent {
 #[cfg(test)]
 mod tests {
     use super::stamp_revision;
+    use crate::RuntimeParams;
+    use std::sync::atomic::Ordering;
     use talksage_core::DomainEvent;
 
     #[test]
@@ -122,5 +132,13 @@ mod tests {
             DomainEvent::Segment { revision, .. } => assert_eq!(revision, 7),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn pause_flag_is_shared_and_defaults_to_running() {
+        let params = RuntimeParams::default();
+        assert!(!params.paused.load(Ordering::Acquire));
+        params.paused.store(true, Ordering::Release);
+        assert!(params.paused.load(Ordering::Acquire));
     }
 }

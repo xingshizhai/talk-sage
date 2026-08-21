@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use talksage_asr::{EngineKind, EnginePool};
-use talksage_config::ConfigManager;
+use talksage_config::{ConfigManager, SceneMode};
 use talksage_core::{DomainEvent, ResultStatus, TranscriptSegment};
 use talksage_llm::{LLMProvider, OpenAICompatProvider};
 use talksage_plugins::{
@@ -95,6 +95,14 @@ impl RunningListen {
 
     pub fn noise_level(&self) -> f32 {
         self.runtime.noise_level()
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        self.runtime.set_paused(paused);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.runtime.is_paused()
     }
 
     pub fn session_id(&self) -> Option<i64> {
@@ -263,18 +271,35 @@ impl TalkSageService {
     pub fn build_live_config(&self, req: &StartListen) -> Result<LivePipelineConfig> {
         let model_dir = Self::resolve_models_dir().ok_or_else(|| anyhow!("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）"))?;
         let snapshot = self.config.snapshot();
+        let terminology = snapshot.asr.terminology.clone();
+        let engine_options = talksage_asr::EngineOptions {
+            hotwords: terminology.normalized_terms(),
+            hotword_score: terminology.hotword_score.clamp(0.0, 10.0),
+        };
         let scene = snapshot.scene.effective();
+        // 内置场景只决定 VAD/插件组合；ASR 页的全局模型选择仍应生效。
+        // 自定义场景则使用场景自身的模型设置。
+        let configured_user_engine = if snapshot.scene.mode == SceneMode::Custom {
+            &scene.user_engine
+        } else {
+            &snapshot.asr.user_engine
+        };
+        let configured_client_engine = if snapshot.scene.mode == SceneMode::Custom {
+            &scene.client_engine
+        } else {
+            &snapshot.asr.client_engine
+        };
         let user_engine = req
             .user_engine
-            .or_else(|| EngineKind::from_name(&scene.user_engine))
+            .or_else(|| EngineKind::from_name(configured_user_engine))
             .unwrap_or(EngineKind::ParaformerZh);
         let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
         let user_model = model_dir.join(user_engine.model_dir_name());
         if !vad_model.is_file() {
             return Err(anyhow!("缺少 VAD 模型: {}", vad_model.display()));
         }
-        if !user_model.is_dir() {
-            return Err(anyhow!("缺少用户 ASR 模型目录: {}", user_model.display()));
+        if !user_engine.is_available(&model_dir) {
+            return Err(anyhow!("用户 ASR 模型未安装或文件不完整: {}", user_model.display()));
         }
 
         let want_record = req.record.unwrap_or(snapshot.recording.enabled);
@@ -290,11 +315,11 @@ impl TalkSageService {
             None
         };
 
-        let client_engine = EngineKind::from_name(&scene.client_engine).unwrap_or(EngineKind::ZipformerEn);
+        let client_engine = EngineKind::from_name(configured_client_engine).unwrap_or(EngineKind::ZipformerEn);
         let client_model = model_dir.join(client_engine.model_dir_name());
         let client = Self::resolve_client_input(scene.client_enabled, &req.client).and_then(|input| {
-            if !client_model.is_dir() {
-                log::warn!("缺少客户 ASR 模型目录: {}；关闭客户流", client_model.display());
+            if !client_engine.is_available(&model_dir) {
+                log::warn!("客户 ASR 模型未安装或文件不完整: {}；关闭客户流", client_model.display());
                 return None;
             }
             Some(StreamConfig {
@@ -303,6 +328,8 @@ impl TalkSageService {
                 input,
                 speaker_id: 1,
                 speaker_label: "客户".into(),
+                engine_options: engine_options.clone(),
+                terminology: terminology.clone(),
             })
         });
 
@@ -342,14 +369,19 @@ impl TalkSageService {
 
         let speaker = if scene.speaker_enabled {
             let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
-            if spk_model.is_file() {
-                let owner = speaker::load_owner_embedding(self.config.data_dir());
+            let owner = speaker::load_owner_embedding(self.config.data_dir());
+            if spk_model.is_file() && owner.is_some() {
                 Some(SpeakerConfig {
                     model: spk_model,
                     owner_embedding: owner,
                     threshold: DEFAULT_THRESHOLD,
+                    classify_user_stream: client.is_none(),
                 })
             } else {
+                log::warn!(
+                    "说话人识别已请求但未启用：{}",
+                    if !spk_model.is_file() { "缺少 WeSpeaker 模型" } else { "尚未注册主人声纹" }
+                );
                 None
             }
         } else {
@@ -376,13 +408,17 @@ impl TalkSageService {
             chunk_ms: 100,
             vad: scene.to_vad_config(),
             denoise: scene.to_denoise_config(),
+            endpoint: snapshot.audio.endpoint.clone(),
             asr_threads: 4,
+            input_gain_db: snapshot.audio.input_gain_db,
             user: StreamConfig {
                 engine_kind: user_engine,
                 model_dir: user_model,
                 input: req.user_input.clone(),
                 speaker_id: 0,
                 speaker_label: req.user_label.clone().unwrap_or_else(|| "我".into()),
+                engine_options,
+                terminology,
             },
             client,
             plugins,

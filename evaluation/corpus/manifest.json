@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "sample_rate": 16000,
+  "samples": [
+    {
+      "id": "sherpa-zh-mixed-001",
+      "audio": "zh/sherpa-zh-mixed-001.wav",
+      "reference": "zh/sherpa-zh-mixed-001.txt",
+      "language": "zh-mixed",
+      "scenario": "clean_near_field",
+      "terms": ["monday", "礼拜二", "星期三"],
+      "source": "sherpa-onnx-streaming-paraformer-zh/test_wavs/0.wav"
+    },
+    {
+      "id": "sherpa-en-reading-001",
+      "audio": "en/sherpa-en-reading-001.wav",
+      "reference": "en/sherpa-en-reading-001.txt",
+      "language": "en",
+      "scenario": "clean_near_field",
+      "terms": ["nightfall", "brothel"],
+      "source": "sherpa-onnx-streaming-zipformer-en-2023-06-26/test_wavs/0.wav"
+    }
+  ]
+}

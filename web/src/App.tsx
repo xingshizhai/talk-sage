@@ -48,6 +48,7 @@ export default function App() {
   const [version, setVersion] = useState<string>("—");
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [listening, setListening] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [status, setStatus] = useState<string>("待机");
   // 启动默认进入「实时转写」页（不跨启动恢复导航页）
   const [navPage, setNavPage] = useState<string>("transcript");
@@ -101,19 +102,31 @@ export default function App() {
     const off = api.onEvent((ev: DomainEvent) => {
       if (ev.type === "status") {
         setStatus(ev.message);
-        if (ev.stage === "recording") setListening(true);
-        if (ev.stage === "idle" || ev.stage === "asr_ready") setListening(false);
+        if (ev.stage === "recording") {
+          setListening(true);
+          setPaused(false);
+        }
+        if (ev.stage === "paused") {
+          setListening(true);
+          setPaused(true);
+        }
+        if (ev.stage === "idle" || ev.stage === "asr_ready") {
+          setListening(false);
+          setPaused(false);
+        }
       }
       if (ev.type === "snapshot") {
         const acc = accumulatorRef.current;
         acc.applySnapshot(
           ev.committed.map((s) => ({
+            speaker_id: s.speaker_id,
             speaker_label: s.speaker_label,
             text: s.text,
             is_partial: false,
             ts_ms: s.ts_ms,
           })),
           ev.hypothesis.map((h) => ({
+            speaker_id: h.speaker_id,
             speaker_label: h.speaker_label,
             text: h.text,
             is_partial: true,
@@ -197,7 +210,7 @@ export default function App() {
 
   // 运行状态行
   const healthRows: HealthRow[] = [
-    { dot: listening ? "var(--live)" : "var(--muted)", label: "监听", value: listening ? "活跃" : "待机" },
+    { dot: paused ? "var(--brief)" : listening ? "var(--live)" : "var(--muted)", label: "监听", value: paused ? "暂停" : listening ? "活跃" : "待机" },
     { dot: "var(--client)", label: "客户流(VAD)", value: "双流" },
     { dot: "var(--me)", label: "用户流", value: "paraformer" },
     { dot: "var(--live)", label: "ASR", value: status },
@@ -362,6 +375,7 @@ export default function App() {
       if (listening) {
         await api.stopListen();
         setListening(false);
+        setPaused(false);
         setStatus("已停止");
       } else {
         setStatus("启动中…");
@@ -373,6 +387,34 @@ export default function App() {
       setStatus(`错误: ${e}`);
     }
   }, [listening]);
+
+  const handlePause = useCallback(async () => {
+    if (!listening) return;
+    try {
+      await api.setListenPaused(!paused);
+    } catch (e) {
+      setStatus(`错误: ${e}`);
+    }
+  }, [listening, paused]);
+
+  // 应用内快捷键：Cmd/Ctrl+Shift+L 开始/停止；监听期间 Space 暂停/继续。
+  // 输入框、文本域和可编辑内容中不接管按键，避免影响正常输入。
+  useEffect(() => {
+    const onKeyDown = (ev: KeyboardEvent) => {
+      const target = ev.target as HTMLElement | null;
+      const editing = target?.isContentEditable || target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.tagName === "SELECT";
+      if (editing || ev.repeat) return;
+      if (ev.code === "KeyL" && ev.shiftKey && (ev.metaKey || ev.ctrlKey)) {
+        ev.preventDefault();
+        void handleListen();
+      } else if (ev.code === "Space" && listening && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+        ev.preventDefault();
+        void handlePause();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [handleListen, handlePause, listening]);
 
   const handleNavigate = useCallback(
     (key: string) => {
@@ -406,7 +448,9 @@ export default function App() {
         navItems={navItems}
         healthRows={healthRows}
         listening={listening}
+        paused={paused}
         onToggleListen={handleListen}
+        onTogglePause={handlePause}
         onOpenDebug={() => setShowDebug(true)}
         onNavigate={handleNavigate}
         noiseLevel={noiseLevel}

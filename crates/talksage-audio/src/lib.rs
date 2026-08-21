@@ -223,6 +223,8 @@ pub struct AudioHub {
     chunk_samples: usize,
     /// 发给 pipeline 的块通道（有界，满载丢帧）。
     tx: CaptureTx,
+    /// 输入线性增益（声道选择后、重采样前）。
+    input_gain: f32,
     /// cpal 输入流。
     stream: Option<cpal::Stream>,
 }
@@ -230,13 +232,20 @@ pub struct AudioHub {
 impl AudioHub {
     /// 创建采集中枢，返回 (hub, 块接收端)。
     pub fn new(chunk_ms: u64) -> (Self, mpsc::Receiver<Vec<f32>>) {
+        Self::new_with_gain(chunk_ms, 0.0)
+    }
+
+    /// 创建带输入增益的采集中枢。增益限制在 0..24dB，输出限幅到 ±0.98。
+    pub fn new_with_gain(chunk_ms: u64, input_gain_db: f32) -> (Self, mpsc::Receiver<Vec<f32>>) {
         let (tx, rx) = capture_channel();
         let chunk_samples = (TARGET_SAMPLE_RATE as u64 * chunk_ms / 1000) as usize;
+        let gain_db = input_gain_db.clamp(0.0, 24.0);
         (
             Self {
                 sample_rate: TARGET_SAMPLE_RATE,
                 chunk_samples,
                 tx,
+                input_gain: 10.0f32.powf(gain_db / 20.0),
                 stream: None,
             },
             rx,
@@ -272,6 +281,7 @@ impl AudioHub {
 
         let tx = self.tx.clone();
         let chunk_samples = self.chunk_samples;
+        let input_gain = self.input_gain;
         let mut resampler = LinearResampler::new(src_sr, TARGET_SAMPLE_RATE);
         let mut pending: Vec<f32> = Vec::with_capacity(chunk_samples);
 
@@ -282,7 +292,7 @@ impl AudioHub {
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _| {
-                        collect_and_send(data, channels, &mut resampler, &mut pending, chunk_samples, &tx);
+                        collect_and_send(data, channels, input_gain, &mut resampler, &mut pending, chunk_samples, &tx);
                     },
                     err_fn,
                     None,
@@ -293,7 +303,7 @@ impl AudioHub {
                     &config.into(),
                     move |data: &[i16], _| {
                         let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
-                        collect_and_send(&f, channels, &mut resampler, &mut pending, chunk_samples, &tx);
+                        collect_and_send(&f, channels, input_gain, &mut resampler, &mut pending, chunk_samples, &tx);
                     },
                     err_fn,
                     None,
@@ -325,20 +335,30 @@ impl AudioHub {
 fn collect_and_send(
     data: &[f32],
     channels: usize,
+    input_gain: f32,
     resampler: &mut LinearResampler,
     pending: &mut Vec<f32>,
     chunk_samples: usize,
     tx: &CaptureTx,
 ) {
-    // mono 化（平均）
+    // 多声道设备（尤其无线麦接收器）常只有一个通道有信号。整段选择
+    // RMS 最大的通道，避免与静音通道平均造成约 6dB 衰减或反相抵消。
     let mono: Vec<f32> = if channels > 1 {
-        data.chunks(channels)
-            .map(|c| c.iter().sum::<f32>() / c.len() as f32)
+        let mut energy = vec![0.0f64; channels];
+        for frame in data.chunks_exact(channels) {
+            for (channel, sample) in frame.iter().enumerate() {
+                energy[channel] += (*sample as f64) * (*sample as f64);
+            }
+        }
+        let selected = energy.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap_or(0);
+        data.chunks_exact(channels)
+            .map(|frame| frame[selected])
             .collect()
     } else {
         data.to_vec()
     };
-    let resampled = resampler.process(&mono);
+    let amplified: Vec<f32> = mono.into_iter().map(|sample| (sample * input_gain).clamp(-0.98, 0.98)).collect();
+    let resampled = resampler.process(&amplified);
     pending.extend_from_slice(&resampled);
     // 按块切分发送
     let mut i = 0;
@@ -390,8 +410,8 @@ mod tests {
         let (tx, rx) = capture_channel();
         let mut pending = Vec::new();
         let mut resampler = LinearResampler::new(16000, 16000);
-        let data: Vec<f32> = (0..3200).map(|i| i as f32).collect(); // 200ms @16k = 3200
-        collect_and_send(&data, 1, &mut resampler, &mut pending, 1600, &tx);
+        let data: Vec<f32> = (0..3200).map(|i| i as f32 / 10_000.0).collect(); // 200ms @16k = 3200
+        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx);
         assert!(pending.is_empty());
         let c1 = rx.recv().unwrap();
         let c2 = rx.recv().unwrap();
@@ -399,22 +419,46 @@ mod tests {
         assert_eq!(c2.len(), 1600);
         assert!(rx.try_recv().is_err());
         assert_eq!(c1[0], 0.0);
-        assert_eq!(c2[0], 1600.0);
+        assert!((c2[0] - 0.16).abs() < 1e-5);
     }
 
     #[test]
-    fn chunking_stereo_mixes_to_mono() {
+    fn chunking_stereo_selects_strongest_channel() {
         let (tx, rx) = capture_channel();
         let mut pending = Vec::new();
         let mut resampler = LinearResampler::new(16000, 16000);
-        // 立体声：左 0,2,4..；右 1,3,5.. → mono 平均值
-        let data: Vec<f32> = (0..640).map(|i| i as f32).collect(); // 320 帧立体声
-        collect_and_send(&data, 2, &mut resampler, &mut pending, 320, &tx);
+        // 右声道能量更高，应选择右声道而不是与左声道平均。
+        let data: Vec<f32> = (0..320).flat_map(|_| [0.1, 0.2]).collect();
+        collect_and_send(&data, 2, 1.0, &mut resampler, &mut pending, 320, &tx);
         assert!(pending.is_empty());
         let c = rx.recv().unwrap();
         assert_eq!(c.len(), 320);
-        assert!((c[0] - 0.5).abs() < 1e-5);
-        assert!((c[1] - 2.5).abs() < 1e-5);
+        assert!((c[0] - 0.2).abs() < 1e-5);
+        assert!((c[1] - 0.2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn input_gain_amplifies_and_limits_samples() {
+        let (tx, rx) = capture_channel();
+        let mut pending = Vec::new();
+        let mut resampler = LinearResampler::new(16000, 16000);
+        let mut data = vec![0.1; 1600];
+        data[0] = 0.8;
+        collect_and_send(&data, 1, 4.0, &mut resampler, &mut pending, 1600, &tx);
+        let chunk = rx.recv().unwrap();
+        assert!((chunk[1] - 0.4).abs() < 1e-5, "+12dB 应把普通样本放大约四倍");
+        assert!((chunk[0] - 0.98).abs() < 1e-5, "峰值必须限幅，避免 WAV 爆音");
+    }
+
+    #[test]
+    fn silent_second_channel_does_not_reduce_wireless_mic_level() {
+        let (tx, rx) = capture_channel();
+        let mut pending = Vec::new();
+        let mut resampler = LinearResampler::new(16000, 16000);
+        let data: Vec<f32> = (0..320).flat_map(|_| [0.2, 0.0]).collect();
+        collect_and_send(&data, 2, 1.0, &mut resampler, &mut pending, 320, &tx);
+        let chunk = rx.recv().unwrap();
+        assert!(chunk.iter().all(|sample| (*sample - 0.2).abs() < 1e-5));
     }
 
     #[test]
@@ -423,7 +467,7 @@ mod tests {
         let mut pending = Vec::new();
         let mut resampler = LinearResampler::new(16000, 16000);
         let data: Vec<f32> = (0..1000).map(|i| i as f32).collect(); // 不足一块
-        collect_and_send(&data, 1, &mut resampler, &mut pending, 1600, &tx);
+        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx);
         assert!(rx.try_recv().is_err());
         assert_eq!(pending.len(), 1000);
     }
@@ -510,7 +554,7 @@ mod tests {
         let n = (CAPTURE_QUEUE_CAP + 2) * 1600;
         let data: Vec<f32> = vec![0.1; n];
         let t0 = Instant::now();
-        collect_and_send(&data, 1, &mut resampler, &mut pending, 1600, &tx);
+        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx);
         assert!(t0.elapsed() < Duration::from_millis(200), "不得阻塞: {:?}", t0.elapsed());
         assert!(tx.overruns() >= 2);
         let mut got = 0usize;

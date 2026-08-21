@@ -68,7 +68,8 @@ fn paraformer_zh_streaming_recognizes_chinese_audio() {
     // 流式喂入前 ~3s（块 200ms），断言增量出字
     let chunk_size = 16000 * 200 / 1000;
     let mut collected = String::new();
-    for chunk in wave.samples().chunks(chunk_size).take(15) {
+    let mut chunks = wave.samples().chunks(chunk_size);
+    for chunk in chunks.by_ref().take(15) {
         if let Some(text) = StreamingASREngine::accept(&mut engine, chunk) {
             collected = text;
         }
@@ -78,6 +79,17 @@ fn paraformer_zh_streaming_recognizes_chinese_audio() {
         "paraformer-zh 流式识别无输出（前 3s）"
     );
     eprintln!("asr 集成测试识别: {collected}");
+
+    // 继续送完整段并结束。固定语料末尾是“星期三”；这个断言专门防止
+    // 流式模型缺少右侧上下文时把最后一个“三”吞掉。
+    for chunk in chunks {
+        let _ = StreamingASREngine::accept(&mut engine, chunk);
+    }
+    let final_text = SegmentEngine::finish(&mut engine);
+    assert!(
+        final_text.trim().ends_with('三'),
+        "流式结束必须保留句尾字符，实际: {final_text}"
+    );
 }
 
 #[test]

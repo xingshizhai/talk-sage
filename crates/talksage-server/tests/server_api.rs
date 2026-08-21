@@ -87,6 +87,38 @@ async fn missing_session_returns_404() {
 }
 
 #[tokio::test]
+async fn recording_query_token_supports_native_audio_playback() {
+    let mut state = test_state();
+    state.token = "history-audio-token".to_string();
+    let router = build_router(state, &std::path::PathBuf::from("nonexistent-dist"));
+
+    let unauthorized = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/recordings/missing.wav")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    // HTMLAudioElement 无法设置自定义鉴权头；正确的查询令牌应通过鉴权，
+    // 随后才因测试文件不存在返回 404。
+    let authorized = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/recordings/missing.wav?token=history-audio-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn templates_list_builtin() {
     let (status, body) = get("/api/templates").await;
     assert_eq!(status, StatusCode::OK);

@@ -23,7 +23,9 @@ export default function SideNav({
   navItems,
   healthRows,
   listening,
+  paused,
   onToggleListen,
+  onTogglePause,
   onOpenDebug,
   onNavigate,
   noiseLevel,
@@ -35,7 +37,9 @@ export default function SideNav({
   navItems: NavItem[];
   healthRows: HealthRow[];
   listening: boolean;
+  paused: boolean;
   onToggleListen: () => void;
+  onTogglePause: () => void;
   onOpenDebug: () => void;
   onNavigate: (key: string) => void;
   noiseLevel: number;
@@ -178,20 +182,46 @@ export default function SideNav({
 
       {/* 监听 / 调试 */}
       <div style={{ margin: "0 10px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
-        <button
-          onClick={onToggleListen}
-          style={{
-            padding: "9px 0",
-            borderRadius: 9,
-            border: "none",
-            fontWeight: 600,
-            cursor: "pointer",
-            background: listening ? "var(--danger)" : "var(--live)",
-            color: "#fff",
-          }}
-        >
-          {listening ? "⏹ 停止监听" : "▶ 开始监听"}
-        </button>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            onClick={onToggleListen}
+            title="开始/停止（⌘/Ctrl+Shift+L）"
+            style={{
+              flex: 1,
+              padding: "9px 0",
+              borderRadius: 9,
+              border: "none",
+              fontWeight: 600,
+              cursor: "pointer",
+              background: listening ? "var(--danger)" : "var(--live)",
+              color: "#fff",
+            }}
+          >
+            {listening ? "⏹ 停止" : "▶ 开始监听"}
+          </button>
+          {listening && (
+            <button
+              onClick={onTogglePause}
+              title="暂停/继续（空格）"
+              aria-pressed={paused}
+              style={{
+                minWidth: 72,
+                padding: "9px 8px",
+                borderRadius: 9,
+                border: "1px solid var(--border)",
+                fontWeight: 600,
+                cursor: "pointer",
+                background: paused ? "var(--brief)" : "var(--surface-2)",
+                color: paused ? "#fff" : "var(--text)",
+              }}
+            >
+              {paused ? "▶ 继续" : "⏸ 暂停"}
+            </button>
+          )}
+        </div>
+        <div style={{ fontSize: 9, textAlign: "center", color: "var(--muted)", fontFamily: "monospace" }}>
+          ⌘/Ctrl+Shift+L 开始/停止 · Space 暂停
+        </div>
         <button
           onClick={onOpenDebug}
           style={{ padding: "8px 0", borderRadius: 9, cursor: "pointer", background: "var(--surface-2)", color: "var(--text)", border: "1px solid var(--border)" }}

@@ -117,7 +117,7 @@ enum Command {
     },
     /// 诊断环境：配置、目录、平台。
     Doctor,
-    /// 固定语料转写评测：CER/WER + 实时率(RTF) + 首词延迟（参考 WhisperLiveKit bench）。
+    /// 固定语料转写评测：CER/WER + 端到端实时系数 + 首段 final 延迟。
     Bench {
         /// 语料目录（*.wav + 同名 .txt 参考文本；缺省 ./bench-corpus）
         #[arg(short, long)]
@@ -714,7 +714,8 @@ fn cmd_record_mic(path: &std::path::Path, seconds: u64) -> ExitCode {
 
 /// 固定语料转写评测：对 `*.wav` 逐个跑流式转写（引擎池热启动），
 /// 有同名 `.txt` 参考文本时计算 CER（中文）/ WER（英文），并输出
-/// 实时率 RTF（处理耗时/音频时长）与首词延迟（管道启动→首个 final 段）。
+/// 端到端实时系数（处理耗时/音频时长）与首段 final 延迟。
+/// 文件输入会按真实时间喂块，因此该系数包含音频播放时间，不是纯模型计算 RTF。
 fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode {
     let kind = match EngineKind::from_name(engine) {
         Some(k) => k,
@@ -764,7 +765,7 @@ fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode 
     let pool = EnginePool::new();
     println!("== 拓思者 bench ==");
     println!("语料: {}（{} 个文件） 引擎: {}（引擎池热启动）", dir.display(), wavs.len(), kind.display_name());
-    println!("{:<36} {:>8} {:>8} {:>10} {:>12}", "文件", "时长s", "CER/WER%", "RTF", "首词延迟ms");
+    println!("{:<36} {:>8} {:>8} {:>10} {:>12}", "文件", "时长s", "CER/WER%", "实时系数", "首段final ms");
     println!("{}", "-".repeat(80));
 
     let mut total_audio = 0.0f64;
@@ -814,6 +815,7 @@ fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode 
                         base, audio_secs, "-", rtf, latency_ms.unwrap_or(0.0)
                     );
                 }
+                println!("  识别: {}", tr.text.replace('\n', " "));
             }
             Err(e) => {
                 eprintln!("  [{base}] 失败: {e}");
@@ -835,7 +837,7 @@ fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode 
         avg_latency,
         if latency_n == 0 { "（无 final 段）".to_string() } else { String::new() },
     );
-    println!("RTF < 1.0 表示实时；越小越快。准备参考文本（<同名>.txt）即可得到准确率。");
+    println!("实时系数约 1 表示管道能跟随音频时钟；它包含文件实时喂入时间。准备参考文本（<同名>.txt）即可得到准确率。");
     ExitCode::SUCCESS
 }
 

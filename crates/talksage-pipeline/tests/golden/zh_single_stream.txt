@@ -3,18 +3,21 @@ status	AsrReady
 status	Recording
 partial
 partial
-final	我	2000	天是 mon
+partial
+final	我	2400	昨天是 mon
 metrics
 partial
 partial
 partial
-final	我	2400	he is 礼八
+partial
+final	我	3200	today denis li 班二
 metrics
 partial
 partial
 partial
 partial
-final	我	3253	a after tomorrow 是星期
+partial
+final	我	3153	the day after tomorrow 是星期
 metrics
 stats	我	3
 status	Idle

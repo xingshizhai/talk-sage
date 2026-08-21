@@ -116,13 +116,17 @@ fn zh_file_pipeline(root: &Path, wav: &Path) -> LivePipelineConfig {
         chunk_ms: 100,
         vad: talksage_config::VadConfig::default(),
         denoise: talksage_config::DenoiseConfig::default(),
+        endpoint: talksage_config::EndpointConfig::default(),
         asr_threads: 2,
+        input_gain_db: 0.0,
         user: StreamConfig {
             engine_kind: EngineKind::ParaformerZh,
             model_dir: zh_model_dir(root),
             input: AudioInput::File(wav.to_path_buf()),
             speaker_id: 0,
             speaker_label: "我".into(),
+            engine_options: Default::default(),
+            terminology: Default::default(),
         },
         client: None,
         plugins: Vec::new(),
@@ -247,6 +251,8 @@ fn dual_stream_user_and_client_both_produce_segments() {
         input: AudioInput::File(en_wav),
         speaker_id: 1,
         speaker_label: "客户".into(),
+        engine_options: Default::default(),
+        terminology: Default::default(),
     });
 
     let evs = run_and_collect(cfg);
@@ -302,6 +308,8 @@ fn cross_stream_echo_dedup_keeps_single_copy() {
         input: AudioInput::File(wav),
         speaker_id: 1,
         speaker_label: "客户".into(),
+        engine_options: Default::default(),
+        terminology: Default::default(),
     });
     let evs = run_and_collect(cfg);
     let finals: Vec<(u32, String)> = evs
@@ -415,6 +423,8 @@ fn filtered_segments_never_reach_observers() {
         input: AudioInput::File(wav),
         speaker_id: 1,
         speaker_label: "客户".into(),
+        engine_options: Default::default(),
+        terminology: Default::default(),
     });
     let (dual, dual_calls) = run_with_counting_observer(cfg);
     let dual_finals = count_finals(&dual);
@@ -586,13 +596,17 @@ fn plugins_emit_term_and_translation_events() {
         chunk_ms: 100,
         vad: talksage_config::VadConfig::default(),
         denoise: talksage_config::DenoiseConfig::default(),
+        endpoint: talksage_config::EndpointConfig::default(),
         asr_threads: 2,
+        input_gain_db: 0.0,
         user: StreamConfig {
             engine_kind: EngineKind::ZipformerEn,
             model_dir: en_model,
             input: AudioInput::File(en_wav),
             speaker_id: 1,
             speaker_label: "客户".into(),
+            engine_options: Default::default(),
+            terminology: Default::default(),
         },
         client: None,
         plugins,

@@ -20,6 +20,8 @@ web/src-tauri/gen/
 # 模型与测试临时产物（由 scripts/download_models.py 下载）
 models/
 .pytest_tmp/
+evaluation/corpus/**/*.wav
+evaluation/reports/
 
 # 分析用临时目录
 _meetily_src/

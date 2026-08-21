@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use talksage_pipeline::speaker::SpeakerIdentifier;
+use talksage_pipeline::speaker::{SpeakerDecision, SpeakerIdentifier};
 
 /// 同一进程里并发创建 `SpeakerEmbeddingExtractor` 会让 onnxruntime 抛出
 /// `Ort::Exception` 并 abort（整个测试进程挂掉，SIGABRT）。用真实模型的测试
@@ -89,16 +89,34 @@ fn identifies_owner_and_new_speaker() {
     let _serial = model_guard();
     let spk = SpeakerIdentifier::new(&model, None, 0.5).expect("wespeaker 模型加载失败");
     // 注册主人 = 中文说话人
-    let emb = spk.compute_embedding(&zh).expect("中文音频应能提取声纹");
+    let emb = spk
+        .enrollment_embedding(&zh)
+        .expect("中文音频应通过多窗口注册质量检查");
     assert!(spk.add_owner(&emb));
     assert!(spk.has_owner());
 
     // 同一说话人 → "我"
-    assert_eq!(spk.identify(&zh, "我"), "我");
+    let owner = spk.query(&zh, "我");
+    assert_eq!(owner.label(), "我");
+    assert_eq!(owner.decision(), SpeakerDecision::OwnerMatch);
+    assert!(owner.similarity().is_some());
 
-    // 不同说话人（英文）→ 新建 "客户1"，且再次出现复用
-    assert_eq!(spk.identify(&en, "客户"), "客户1");
-    assert_eq!(spk.identify(&en, "客户"), "客户1");
+    // 双流的回环通道不能被主人声纹改写为“我”；业务角色由通道决定。
+    assert_eq!(spk.query_for_role(&zh, "客户", false).label(), "客户");
+
+    // 不同说话人第一次只建立候选，第二个相似片段才确认“客户1”。
+    let first = spk.query(&en, "客户");
+    assert_eq!(first.label(), "客户");
+    assert_eq!(first.decision(), SpeakerDecision::CandidateStarted);
+    spk.commit(&first);
+    let second = spk.query(&en, "客户");
+    assert_eq!(second.label(), "客户1");
+    assert_eq!(second.decision(), SpeakerDecision::CandidateConfirmed);
+    spk.commit(&second);
+    let third = spk.query(&en, "客户");
+    assert_eq!(third.label(), "客户1");
+    assert!(matches!(third.decision(), SpeakerDecision::ExistingMatch | SpeakerDecision::GrayZoneReuse));
+    spk.commit(&third);
     assert_eq!(spk.num_speakers(), 2);
 
     // 中英文都识别人数稳定
@@ -124,16 +142,22 @@ fn a_filtered_out_segment_registers_no_speaker() {
 
     // 产生点：先查询标签（>0.5s 音频，足以算出声纹）
     let dropped = spk.query(&en, "客户");
-    assert_eq!(dropped.label(), "客户1", "新说话人应预分配标签");
+    assert_eq!(dropped.label(), "客户", "首次出现只保留通用角色标签");
     assert!(dropped.is_new());
     // 这一段随后被 filter 吞掉 → 不 commit，不得留下任何注册副作用
     drop(dropped);
     assert_eq!(spk.num_speakers(), before, "被吞掉的段注册了幻影说话人");
 
-    // 下一段没被吞掉：编号未被上一段消耗，commit 后才真正注册
+    // 下一段没被吞掉：编号未被上一段消耗，commit 后只建立候选。
     let kept = spk.query(&en, "客户");
-    assert_eq!(kept.label(), "客户1", "被吞掉的段不应消耗客户编号");
-    assert!(spk.commit(&kept), "放行的段应完成注册");
+    assert_eq!(kept.label(), "客户", "被吞掉的段不应消耗客户编号");
+    assert!(!spk.commit(&kept), "首个放行片段只建立候选");
+    assert_eq!(spk.num_speakers(), before, "候选不能计为正式说话人");
+
+    // 第二个相似片段确认后才正式注册。
+    let confirmed = spk.query(&en, "客户");
+    assert_eq!(confirmed.label(), "客户1");
+    assert!(spk.commit(&confirmed), "第二个相似片段应确认候选");
     assert_eq!(spk.num_speakers(), before + 1);
     // 注册之后同一说话人应被复用，而不是再开一个编号
     let again = spk.query(&en, "客户");

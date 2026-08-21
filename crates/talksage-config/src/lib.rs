@@ -381,6 +381,48 @@ pub struct AsrConfig {
     pub user_engine: String,
     /// 推理后端：auto | cpu | cuda | metal。
     pub backend: String,
+    /// 专业术语热词和确定性纠错配置。
+    pub terminology: TerminologyConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminologyConfig {
+    pub enabled: bool,
+    /// 上下文偏置强度；仅支持热词的模型使用。
+    pub hotword_score: f32,
+    /// 每项一个产品名、人名、缩写或行业术语。
+    pub terms: Vec<String>,
+    /// 常见误识别 → 正确术语。匹配在 ASR 输出后同步完成，不增加推理延迟。
+    pub corrections: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for TerminologyConfig {
+    fn default() -> Self {
+        Self { enabled: false, hotword_score: 1.5, terms: Vec::new(), corrections: Default::default() }
+    }
+}
+
+impl TerminologyConfig {
+    pub fn normalized_terms(&self) -> Vec<String> {
+        if !self.enabled { return Vec::new(); }
+        let mut terms: Vec<String> = self.terms.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        terms.sort();
+        terms.dedup();
+        terms.truncate(256);
+        terms
+    }
+
+    pub fn correct(&self, text: &str) -> String {
+        if !self.enabled { return text.to_string(); }
+        let mut entries: Vec<_> = self.corrections.iter()
+            .filter(|(wrong, right)| !wrong.is_empty() && !right.is_empty())
+            .take(256)
+            .collect();
+        // 长别名优先，避免“向量”先替换导致“向量数据库”规则失效。
+        entries.sort_by_key(|(wrong, _)| std::cmp::Reverse(wrong.chars().count()));
+        entries.into_iter().fold(text.to_string(), |out, (wrong, right)| out.replace(wrong, right))
+    }
 }
 
 impl Default for AsrConfig {
@@ -389,6 +431,7 @@ impl Default for AsrConfig {
             client_engine: "zipformer-en".into(),
             user_engine: "paraformer-zh".into(),
             backend: "auto".into(),
+            terminology: TerminologyConfig::default(),
         }
     }
 }
@@ -398,9 +441,13 @@ impl Default for AsrConfig {
 pub struct AudioConfig {
     pub mic_device: Option<i32>,
     pub loopback_device: Option<i32>,
+    /// 麦克风输入增益（dB，0..24）；声道选择后、录音和 ASR 前应用。
+    pub input_gain_db: f32,
     pub ducking: DuckingConfig,
     pub vad: VadConfig,
     pub denoise: DenoiseConfig,
+    /// 流式 ASR 文本稳定性端点：结合短暂停顿自然提交。
+    pub endpoint: EndpointConfig,
     /// 最短提交时长（ms）：final 段时长低于该值的丢弃（噪音短段抑制，
     /// 减少"无效短段"污染转写/历史）；None/0 = 不限制。
     pub min_segment_ms: Option<u64>,
@@ -411,11 +458,32 @@ impl Default for AudioConfig {
         Self {
             mic_device: None,
             loopback_device: None,
+            input_gain_db: 12.0,
             ducking: DuckingConfig::default(),
             vad: VadConfig::default(),
             denoise: DenoiseConfig::default(),
+            endpoint: EndpointConfig::default(),
             min_segment_ms: None,
         }
+    }
+}
+
+/// 流式识别的低开销混合端点配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EndpointConfig {
+    pub enabled: bool,
+    pub stable_ms: u64,
+    pub quiet_ms: u64,
+    /// 即使文本仍变化，连续强停顿达到该时长也提交。
+    pub force_quiet_ms: u64,
+    pub quiet_rms: f32,
+    pub min_segment_ms: u64,
+}
+
+impl Default for EndpointConfig {
+    fn default() -> Self {
+        Self { enabled: true, stable_ms: 350, quiet_ms: 450, force_quiet_ms: 850, quiet_rms: 0.008, min_segment_ms: 1000 }
     }
 }
 
@@ -441,9 +509,9 @@ impl VadPreset {
     /// 预设参数 (threshold, min_speech_s, min_silence_s, window, max_speech_s)。
     pub fn params(&self) -> (f32, f32, f32, i32, f32) {
         match self {
-            VadPreset::Standard => (0.50, 0.25, 0.50, 512, 10.0),
-            VadPreset::Sensitive => (0.35, 0.15, 0.30, 512, 10.0),
-            VadPreset::Strict => (0.65, 0.35, 0.80, 512, 10.0),
+            VadPreset::Standard => (0.50, 0.25, 0.50, 512, 30.0),
+            VadPreset::Sensitive => (0.35, 0.15, 0.30, 512, 30.0),
+            VadPreset::Strict => (0.65, 0.35, 0.80, 512, 30.0),
         }
     }
 }
@@ -832,10 +900,12 @@ fn merge_config(default: Config, user: Config) -> Config {
             client_engine: take_or(user.asr.client_engine, default.asr.client_engine),
             user_engine: take_or(user.asr.user_engine, default.asr.user_engine),
             backend: take_or(user.asr.backend, default.asr.backend),
+            terminology: user.asr.terminology,
         },
         audio: AudioConfig {
             mic_device: user.audio.mic_device.or(default.audio.mic_device),
             loopback_device: user.audio.loopback_device.or(default.audio.loopback_device),
+            input_gain_db: user.audio.input_gain_db.clamp(0.0, 24.0),
             ducking: DuckingConfig {
                 enabled: user.audio.ducking.enabled,
                 threshold: user.audio.ducking.threshold,
@@ -854,6 +924,7 @@ fn merge_config(default: Config, user: Config) -> Config {
                 highpass: user.audio.denoise.highpass,
                 highpass_cutoff_hz: user.audio.denoise.highpass_cutoff_hz,
             },
+            endpoint: user.audio.endpoint,
             min_segment_ms: user.audio.min_segment_ms.or(default.audio.min_segment_ms),
         },
         llm: LlmConfig {
@@ -969,7 +1040,7 @@ mod tests {
         assert_eq!(c.asr.user_engine, "paraformer-zh");
         assert_eq!(c.server.host, "127.0.0.1");
         assert!(!c.server.enabled);
-        assert_eq!(c.audio.vad.effective(), (0.50, 0.25, 0.50, 512, 10.0));
+        assert_eq!(c.audio.vad.effective(), (0.50, 0.25, 0.50, 512, 30.0));
     }
 
     #[test]
@@ -1061,7 +1132,7 @@ min_segment_ms = 600
         // 说话人识别默认关闭（回环双录时在线聚类产生重复标签；先把实时转写做好）
         assert!(!p.speaker_enabled);
         // 与场景 to_* 转换一致
-        assert_eq!(p.to_vad_config().effective(), (0.50, 0.25, 0.50, 512, 10.0));
+        assert_eq!(p.to_vad_config().effective(), (0.50, 0.25, 0.50, 512, 30.0));
     }
 
     #[test]
@@ -1123,5 +1194,29 @@ mode = "life"
         assert_eq!(p.min_segment_ms, 500);
         assert!(!p.client_enabled);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn terminology_normalizes_and_corrects_long_alias_first() {
+        let mut terminology = TerminologyConfig {
+            enabled: true,
+            hotword_score: 1.5,
+            terms: vec![" TalkSage ".into(), "".into(), "TalkSage".into(), "向量数据库".into()],
+            corrections: Default::default(),
+        };
+        terminology.corrections.insert("向量".into(), "Vector".into());
+        terminology.corrections.insert("向量数据库".into(), "Vector DB".into());
+        terminology.corrections.insert("拓思者".into(), "TalkSage".into());
+        assert_eq!(terminology.normalized_terms(), vec!["TalkSage", "向量数据库"]);
+        assert_eq!(terminology.correct("拓思者使用向量数据库"), "TalkSage使用Vector DB");
+    }
+
+    #[test]
+    fn disabled_terminology_is_a_passthrough() {
+        let mut terminology = TerminologyConfig::default();
+        terminology.terms.push("TalkSage".into());
+        terminology.corrections.insert("拓思者".into(), "TalkSage".into());
+        assert!(terminology.normalized_terms().is_empty());
+        assert_eq!(terminology.correct("拓思者"), "拓思者");
     }
 }

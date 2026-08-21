@@ -207,6 +207,7 @@ pub enum StatusStage {
     AsrLoading,
     AsrReady,
     Recording,
+    Paused,
     Importing,
     Idle,
 }
