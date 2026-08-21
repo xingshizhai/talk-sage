@@ -31,6 +31,8 @@ export default function SideNav({
   noiseLevel,
   onNoiseLevel,
   micRms,
+  version,
+  transport,
 }: {
   theme: Theme;
   onToggleTheme: () => void;
@@ -45,6 +47,8 @@ export default function SideNav({
   noiseLevel: number;
   onNoiseLevel: (level: number) => void;
   micRms: number;
+  version: string;
+  transport: string;
 }) {
   return (
     <nav
@@ -228,6 +232,21 @@ export default function SideNav({
         >
           调试
         </button>
+      </div>
+
+      {/* 版本号（左侧底部） */}
+      <div
+        style={{
+          padding: "0 10px 10px",
+          textAlign: "center",
+          fontSize: 10,
+          color: "var(--muted)",
+          fontFamily: "monospace",
+          userSelect: "none",
+        }}
+      >
+        v{version}
+        {transport && <span style={{ marginLeft: 6, opacity: 0.7 }}>{transport}</span>}
       </div>
     </nav>
   );
