@@ -36,7 +36,7 @@ VAD 需要累计 `min_speech` 才确认起音。确认之前的最近 500 ms 音
 
 ## 配置语义
 
-- `asr.user_engine` / `asr.client_engine`：生活、会议、会谈等内置场景使用的模型。
+- `scene_params(mode)`：每个内置场景显式指定用户流/对方流模型；自定义场景可分别选择。`StartListen` 的显式覆盖优先级最高。
 - `scene.custom.user_engine` / `client_engine`：仅自定义场景使用。
 - 实时模型持续产生 partial；段级模型只在 VAD 结束后产生 final。
 - 未安装或文件不完整的模型不能开始识别，客户流可安全降级关闭。

@@ -26,8 +26,8 @@
 ## Features
 
 - **Real-time streaming ASR** — Chinese (paraformer) + English (zipformer) dual streams, incremental partials, VAD segmentation; **smart punctuation** (streaming ASR emits no punctuation → heuristic 。，？ from question tails / conjunctions / subject & time words, then sentence-split display); **denoise off by default** so faint/distant speech is still recognized (enable in Settings for noisy rooms)
-- **Scene modes** — one-click **Life / Meeting / Talk / Custom**: Life (sensitive VAD for short/faint speech, single stream, analysis plugins off), Meeting (dual stream + all plugins, default), Talk (dual stream + 300 ms min-commit); Custom lets you edit VAD / denoise / min-commit / engines / plugins / speaker / noise detection per-field (Settings → 场景模式)
-- **Multi-speaker identification** — voiceprint registration of the owner in Settings ("我的声音"); **off by default** (online clustering can produce duplicate labels under loopback double-capture; re-enable in Scene → Custom). When enabled, every final segment is matched: owner → 「我」, others → 「客户1」「客户2」… (online clustering, labels reused)
+- **Scene modes** — six complete runtime presets: **Dictation / Conversation / Bilingual / Meeting / Lecture / Custom**. Conversation is the default and uses low-cost channel attribution; only Meeting enables WeSpeaker voiceprint clustering by default. Bilingual explicitly binds Chinese/English models and translation direction to the two input streams.
+- **Speaker attribution** — explicit `off / channel / voiceprint` policy instead of a boolean. Channel attribution labels microphone/system-audio roles without loading a model; voiceprint mode identifies the enrolled owner and clusters other speakers as 「客户1」「客户2」…
 - **Live meeting intelligence** — term/acronym explanations, real-time translation (en↔zh), rule-based key-point aggregation (questions / requirements / decisions / actions / technical, with numeric & time heuristics), knowledge-base brief retrieval; History offers **AI-extracted key points** (LLM, needs config)
 - **Meeting minutes** — template-based generation via any OpenAI-compatible LLM (DeepSeek, Kimi, Ollama, …)
 - **Recording & testing loop** — every listening session saves raw PCM wav per stream; `talksage trim` removes silence with the same VAD; `scripts/recording_loop.ps1` trims + replays for regression
@@ -163,7 +163,7 @@ stop → writer barrier → session finalizers (quality / webhook)
 
 `TalkSageService` is the single composition root used by the desktop app, headless server, CLI listen/import, and offline transcription. Each stream owns its VAD, ASR engine, sample clock, endpoint state, statistics, and speaker assignment. SQLite and LLM work stay off the audio path; queues are bounded so slow consumers cannot grow memory without limit.
 
-Meeting/talk scenes enable lightweight online speaker clustering when the WeSpeaker model is installed. Owner enrollment is optional; it names a matching cluster “我”. A sliding voiceprint window can also split a long VAD segment after a stable speaker change while keeping ASR partial text responsive.
+Meeting mode enables online speaker clustering when the WeSpeaker model is installed. Owner enrollment is optional; it names a matching cluster “我”. Other presets keep voiceprint inference off unless Custom selects it. A sliding voiceprint window can split a long VAD segment after a stable speaker change while keeping ASR partial text responsive.
 
 | Crate | Responsibility |
 |---|---|

@@ -225,7 +225,7 @@ flowchart LR
   - 流式 paraformer-zh / zipformer-en：`accept` 出 hypothesis，`finish` 出 committed
   - 离线 Whisper base/small、Qwen3-ASR：`accept` 只攒音频，VAD 段结束 `finish()` 整段识别（无 partial）
 - **引擎池**：`EnginePool` 按 `(kind, model_dir)` 缓存 `Box<dyn SegmentEngine>`，监听会话间 `reset` 复用
-- **说话人**：实时先保留物理来源（麦克风 / 回环），再用 WeSpeaker 做在线聚类；会议/会谈默认开启客户侧多人区分。主人声纹不是聚类前置条件，只负责把匹配身份命名为“我”。段内使用 1.5s 滑动声纹窗口、500ms 步长和连续两次确认检测换人，确认后复用 `finish_speech` 安全切段。推理由每流容量 1 的后台 worker 执行，忙时跳过新窗口而不阻塞 ASR
+- **说话人**：角色策略分为关闭、按物理通道和 WeSpeaker 声纹聚类。只有多人会议（或自定义 voiceprint）加载声纹模型。主人声纹不是聚类前置条件，只负责把匹配身份命名为“我”。段内使用 1.5s 滑动声纹窗口、500ms 步长和连续两次确认检测换人，确认后复用 `finish_speech` 安全切段。推理由每流容量 1 的后台 worker 执行，忙时跳过新窗口而不阻塞 ASR
 - **GPU**：配置里有 `backend = auto`；CUDA / CoreML 真正接线仍是产品项，不是本轮架构门
 
 ### 8.3 管道与插件（talksage-pipeline / talksage-plugins）
@@ -490,13 +490,13 @@ token = ""
 - **Markdown 导出**：`talksage_session::export_markdown` 单文件（概览/指标 → 会议纪要 → 智能纪要 → 转写）；入口 Tauri `export_session_markdown`（写入 `<data_dir>/exports/session-{id}.md`）+ server `GET /api/session/{id}/export`；历史页「导出 Markdown」按钮（blob 下载 + 桌面端显示落盘路径）
 - 测试：core webhook 4 项（URL 校验含云元数据端点拒绝 + 本地 TcpListener 端到端 POST）；session payload/export 单测；server export API 集成测试
 
-### 18.10 场景模式（生活 / 会议 / 会谈 / 自定义）
-- 配置：`[scene] mode = "life"|"meeting"|"talk"|"custom"` + `[scene.custom]` 全量参数
-- `SceneParams`：VAD 预设与覆盖（threshold/最小语音/段尾静音/最长语音）、降噪开关与门限、最短提交时长、用户/客户引擎与双流开关、术语/翻译/简报开关、说话人识别、噪音自动检测
-- 内置模板：`scene_params(mode)`——生活（Sensitive VAD 0.35/0.15s/0.3s、单流、插件关）、会议（Standard、双流、插件全开；= 历史默认，行为不突变）、会谈（Standard、双流、min_segment 300ms）；`SceneConfig::effective()` 自定义模式用 custom，否则用模板
-- 应用：`TalkSageService` 构建管道时取 `snapshot.scene.effective()` → VAD/降噪 + 引擎/客户流/插件/说话人开关 + `min_commit_ms`；质量评估 auto_detect 跟随场景
+### 18.10 场景模式（听写 / 会话 / 双语 / 会议 / 课堂 / 自定义）
+- 配置：`[scene] mode = "dictation"|"conversation"|"translation"|"meeting"|"lecture"|"custom"` + `[scene.custom]` 全量参数
+- `SceneParams`：VAD/降噪/最短段、两条流的 ASR 引擎与语言、翻译策略、分析插件 allowlist，以及显式角色策略 `off / channel / voiceprint`。只有 `voiceprint` 加载 WeSpeaker；`channel` 直接使用麦克风/系统音频的来源角色。
+- 内置模板：单人听写（灵敏 VAD、单流、最低资源）、一对一会话（默认、同语言双流、按通道角色）、双语对话（中文用户流 + 英文对方流、双向翻译）、多人会议（在线声纹聚类）、演讲/课堂（长段单流、术语与简报）和自定义。场景是完整运行预设，pipeline 不再从 speaker id 猜测语言或用全局 ASR 设置暗中覆盖场景模型。
+- 应用：`TalkSageService` 构建管道时取 `snapshot.scene.effective()` → VAD/降噪 + 每流引擎和语言 + 翻译策略 + 插件 + 角色模式 + `min_commit_ms`；质量评估 auto_detect 跟随场景
 - 前端：设置页「场景模式」tab（4 模式按钮 + 非自定义只读摘要 + 自定义全量编辑），保存 `scene.{mode,custom}`
-- 测试：config 4 项（会议模板=历史默认、生活/会谈差异、toml roundtrip、custom 持久化）；端到端：mode=life → VAD 日志 preset=Sensitive 生效
+- 测试：锁定六种预设的输入流、语言、翻译、插件和角色策略，并覆盖 TOML roundtrip、自定义参数持久化及翻译方向。
 
 ---
 

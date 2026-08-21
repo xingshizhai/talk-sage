@@ -2,7 +2,7 @@
 // 保存写入 talksage.toml。
 
 import { useEffect, useState } from "react";
-import type { AppConfig, AsrModelInfo, PluginMeta, SceneParams } from "../lib/api";
+import type { AppConfig, AsrModelInfo, PluginMeta, SceneMode, SceneParams } from "../lib/api";
 import type { PluginValues } from "../lib/plugins";
 import { analysisPluginIds, buildPluginUpdates, fieldLabel, initialPluginValues, pluginFields } from "../lib/plugins";
 import { getApi } from "../lib/transport";
@@ -16,7 +16,7 @@ const VOICE_ENROLL_TEXT =
 type SettingsTab = "scene" | "asr" | "plugins" | "recording" | "quality" | "voice" | "llm" | "webhooks";
 
 const TABS: { key: SettingsTab; label: string; desc: string }[] = [
-  { key: "scene", label: "场景模式", desc: "生活 / 会议 / 会谈 / 自定义" },
+  { key: "scene", label: "场景模式", desc: "听写 / 会话 / 双语 / 会议 / 课堂 / 自定义" },
   { key: "asr", label: "ASR 转写", desc: "引擎 / 灵敏度 / 降噪" },
   { key: "plugins", label: "插件分析", desc: "术语 / 翻译 / 简报 / 知识库" },
   { key: "recording", label: "会议录音", desc: "录音开关与目录" },
@@ -35,7 +35,7 @@ export default function SettingsSection({
 }) {
   const [tab, setTab] = useState<SettingsTab>("asr");
   // 场景模式
-  const [sceneMode, setSceneMode] = useState<"life" | "meeting" | "talk" | "custom">(config?.scene?.mode ?? "meeting");
+  const [sceneMode, setSceneMode] = useState<SceneMode>(config?.scene?.mode ?? "conversation");
   const [sceneCustom, setSceneCustom] = useState<SceneParams>(() => ({
     vad_preset: config?.scene?.custom?.vad_preset ?? "standard",
     vad_threshold: config?.scene?.custom?.vad_threshold ?? null,
@@ -48,10 +48,13 @@ export default function SettingsSection({
     user_engine: config?.scene?.custom?.user_engine ?? "paraformer-zh",
     client_enabled: config?.scene?.custom?.client_enabled ?? true,
     client_engine: config?.scene?.custom?.client_engine ?? "zipformer-en",
+    user_language: config?.scene?.custom?.user_language ?? "zh",
+    client_language: config?.scene?.custom?.client_language ?? "en",
+    translation_mode: config?.scene?.custom?.translation_mode ?? "off",
     // 配置没给 allowlist 时，元数据到货后回填「全部分析类插件」（见下方 effect）——
     // 这里不能写死 id 列表：哪些插件算分析类归 Rust 侧 ANALYSIS_PLUGIN_IDS。
     plugin_allowlist: config?.scene?.custom?.plugin_allowlist ?? [],
-    speaker_enabled: config?.scene?.custom?.speaker_enabled ?? false,
+    speaker_mode: config?.scene?.custom?.speaker_mode ?? "channel",
     noise_auto_detect: config?.scene?.custom?.noise_auto_detect ?? true,
   }));
   const [defaultProvider, setDefaultProvider] = useState(config?.llm?.default ?? "deepseek");
@@ -405,9 +408,11 @@ export default function SettingsSection({
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
             {(
               [
-                { key: "life", label: "生活", desc: "日常对话：灵敏 VAD 抓短句弱语音，单流，关分析插件" },
-                { key: "meeting", label: "会议", desc: "正式会议：双流（我+客户），分析插件全开（默认）" },
-                { key: "talk", label: "会谈", desc: "商务洽谈：双流，术语/翻译/简报全开，300ms 短段提交" },
+                { key: "dictation", label: "单人听写", desc: "单麦克风、灵敏 VAD、最低资源消耗" },
+                { key: "conversation", label: "一对一会话", desc: "双人会话，按输入通道区分双方，不运行声纹模型" },
+                { key: "translation", label: "双语对话", desc: "中文与英文双通道识别，双向实时翻译" },
+                { key: "meeting", label: "多人会议", desc: "两人以上，启用 WeSpeaker 在线角色识别" },
+                { key: "lecture", label: "演讲/课堂", desc: "长段单流，术语和简报增强，关闭角色识别" },
                 { key: "custom", label: "自定义", desc: "使用下方全部参数" },
               ] as const
             ).map((m) => (
@@ -434,30 +439,37 @@ export default function SettingsSection({
 
           {sceneMode !== "custom" ? (
             <div style={{ background: "var(--surface-2)", borderRadius: 6, padding: 8, fontSize: 11, color: "var(--text-2)", lineHeight: 1.9 }}>
-              {sceneMode === "life" && (
+              {sceneMode === "dictation" && (
                 <>
-                  <div>· VAD：灵敏（threshold 0.35 / 最小语音 150ms / 段尾静音 300ms）——抓日常短句与弱语音</div>
-                  <div>· 降噪：关闭（弱信号优先）</div>
-                  <div>· 最短提交：不限制（生活短句不丢）</div>
-                  <div>· 单流（仅中文 paraformer）；分析插件关闭（省资源）</div>
-                  <div>· 说话人识别：默认关闭（可在「自定义」开启）</div>
+                  <div>· 单麦克风中文听写；灵敏 VAD，短句不丢</div>
+                  <div>· 角色、翻译和分析插件关闭，资源消耗最低</div>
+                </>
+              )}
+              {sceneMode === "conversation" && (
+                <>
+                  <div>· 双方默认使用中文实时模型；最短提交 300ms</div>
+                  <div>· 按麦克风/系统音频通道标记“我/对方”，不加载声纹模型</div>
+                  <div>· 开启术语和简报，关闭翻译</div>
+                </>
+              )}
+              {sceneMode === "translation" && (
+                <>
+                  <div>· 我的通道：中文 Paraformer；对方通道：英文 Zipformer</div>
+                  <div>· 双向中英翻译；按通道确定角色，不加载声纹模型</div>
+                  <div>· macOS 远程通话需选择可捕获系统音频的设备；共享麦克风暂不自动分语言</div>
                 </>
               )}
               {sceneMode === "meeting" && (
                 <>
-                  <div>· VAD：标准（threshold 0.5 / 最小语音 250ms / 段尾静音 500ms）</div>
-                  <div>· 降噪：关闭；最短提交：不限制</div>
-                  <div>· 双流：我（中文 paraformer）+ 客户（英文 zipformer，系统回环）</div>
-                  <div>· 术语解释 / 实时翻译 / 简报检索全开</div>
-                  <div>· 说话人识别：默认关闭（可在「自定义」开启）</div>
+                  <div>· 两人以上会议，开启 WeSpeaker 在线聚类和段内换人检测</div>
+                  <div>· 双方默认中文；术语、简报等会议分析开启，翻译默认关闭</div>
+                  <div>· 角色识别会增加 CPU 和内存占用</div>
                 </>
               )}
-              {sceneMode === "talk" && (
+              {sceneMode === "lecture" && (
                 <>
-                  <div>· VAD：标准（threshold 0.5 / 最小语音 250ms / 段尾静音 500ms）</div>
-                  <div>· 降噪：关闭；最短提交：300ms（滤掉谈判中的无效短音）</div>
-                  <div>· 双流：我 + 客户；术语 / 翻译 / 简报全开</div>
-                  <div>· 说话人识别：默认关闭（可在「自定义」开启）</div>
+                  <div>· 单流中文，严格 VAD；段尾静音 700ms，最长语音 60s</div>
+                  <div>· 关闭角色识别；开启术语和简报，适合长时间连续发言</div>
                 </>
               )}
               <div style={{ marginTop: 6, color: "var(--muted)" }}>
@@ -507,12 +519,32 @@ export default function SettingsSection({
                 </select>
               </label>
               <label style={labelBlock}>
+                我的语言：
+                <select value={sceneCustom.user_language} onChange={(e) => setSceneCustom({ ...sceneCustom, user_language: e.target.value as SceneParams["user_language"] })} style={inputStyle}>
+                  <option value="zh">中文</option><option value="en">英语</option>
+                </select>
+              </label>
+              <label style={labelBlock}>
                 <input type="checkbox" checked={sceneCustom.client_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, client_enabled: e.target.checked })} /> 启用客户流（双流：系统回环 + 客户引擎）
               </label>
               <label style={labelBlock}>
                 客户引擎：
                 <select value={sceneCustom.client_engine} onChange={(e) => setSceneCustom({ ...sceneCustom, client_engine: e.target.value })} style={inputStyle}>
                   {modelOptions(sceneCustom.client_engine)}
+                </select>
+              </label>
+              <label style={labelBlock}>
+                对方语言：
+                <select value={sceneCustom.client_language} onChange={(e) => setSceneCustom({ ...sceneCustom, client_language: e.target.value as SceneParams["client_language"] })} style={inputStyle}>
+                  <option value="zh">中文</option><option value="en">英语</option>
+                </select>
+              </label>
+              <label style={labelBlock}>
+                翻译策略：
+                <select value={sceneCustom.translation_mode} onChange={(e) => setSceneCustom({ ...sceneCustom, translation_mode: e.target.value as SceneParams["translation_mode"] })} style={inputStyle}>
+                  <option value="off">关闭</option>
+                  <option value="client_to_user">仅对方 → 我的语言</option>
+                  <option value="bidirectional">双向翻译</option>
                 </select>
               </label>
               <div style={hint}>「离线段级」模型在 VAD 段结束后对整段识别——准确率更高（尤其中英夹杂），但没有逐字增量（partial）；「流式」模型实时增量、延迟低。</div>
@@ -539,7 +571,12 @@ export default function SettingsSection({
                   ))}
               </label>
               <label style={labelBlock}>
-                <input type="checkbox" checked={sceneCustom.speaker_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, speaker_enabled: e.target.checked })} /> 多人讲话者区分
+                角色识别：
+                <select value={sceneCustom.speaker_mode} onChange={(e) => setSceneCustom({ ...sceneCustom, speaker_mode: e.target.value as SceneParams["speaker_mode"] })} style={inputStyle}>
+                  <option value="off">关闭</option>
+                  <option value="channel">按输入通道（低资源）</option>
+                  <option value="voiceprint">声纹多人识别（较高资源）</option>
+                </select>
                 <span style={{ marginLeft: 12 }}>
                   <input type="checkbox" checked={sceneCustom.noise_auto_detect} onChange={(e) => setSceneCustom({ ...sceneCustom, noise_auto_detect: e.target.checked })} /> 质量评估自动检测背景噪音
                 </span>

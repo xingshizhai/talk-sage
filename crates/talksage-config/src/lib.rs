@@ -45,20 +45,50 @@ fn dirs_home() -> PathBuf {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SceneMode {
-    /// 生活：日常对话/家庭闲聊——灵敏 VAD 抓短句弱语音，单流，关闭分析插件。
-    Life,
-    /// 会议：正式会议（默认）——双流（我 + 客户英文），分析插件全开。
+    /// 单人听写：低资源、灵敏 VAD、单流。
+    Dictation,
+    /// 一对一会话：默认按输入通道区分双方，不运行声纹模型。
+    Conversation,
+    /// 双语对话：双方通道使用不同语言模型，双向翻译。
+    Translation,
+    /// 多人会议：启用在线声纹聚类和段内换人检测。
     Meeting,
-    /// 会谈：商务洽谈/一对一谈判——双流，术语/翻译/简报全开。
-    Talk,
+    /// 演讲/课堂：长段单流，开启术语与简报，不运行声纹模型。
+    Lecture,
     /// 自定义：使用 `SceneConfig.custom` 全部参数。
     Custom,
 }
 
 impl Default for SceneMode {
     fn default() -> Self {
-        Self::Meeting
+        Self::Conversation
     }
+}
+
+/// 角色归属策略。Channel 只使用输入通道，Voiceprint 才加载 WeSpeaker。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeakerMode {
+    Off,
+    Channel,
+    Voiceprint,
+}
+
+impl Default for SpeakerMode {
+    fn default() -> Self { Self::Channel }
+}
+
+/// 实时翻译策略。一对一单向翻译固定为“对方语言 → 我的语言”。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationMode {
+    Off,
+    ClientToUser,
+    Bidirectional,
+}
+
+impl Default for TranslationMode {
+    fn default() -> Self { Self::Off }
 }
 
 /// 场景参数集（一个场景的完整有效参数）。
@@ -87,6 +117,10 @@ pub struct SceneParams {
     pub client_enabled: bool,
     /// 客户流引擎。
     pub client_engine: String,
+    /// 用户流和对方流的 BCP-47 风格语言代码（当前实时翻译支持 zh/en）。
+    pub user_language: String,
+    pub client_language: String,
+    pub translation_mode: TranslationMode,
     /// 该场景允许启用的分析类插件 id。不在列表里的一律关闭。
     ///
     /// 用 allowlist 而非 denylist —— 新增插件不会因为某个场景忘了更新而意外开启。
@@ -96,18 +130,18 @@ pub struct SceneParams {
     pub plugin_allowlist: Vec<String>,
     /// 多人说话人区分（wespeaker 在线聚类）。主人声纹是可选增强：存在时把
     /// 匹配身份标为“我”，不存在时仍可区分“讲话者/客户 1/客户 2”。
-    pub speaker_enabled: bool,
+    pub speaker_mode: SpeakerMode,
     /// 质量评估自动检测背景噪音（auto_detect）。
     pub noise_auto_detect: bool,
 }
 
 impl Default for SceneParams {
     fn default() -> Self {
-        scene_params(SceneMode::Meeting)
+        scene_params(SceneMode::Conversation)
     }
 }
 
-/// 分析类插件全开的 allowlist（会议 / 会谈 / 自定义共用）。
+/// 分析类插件全开的 allowlist（双语 / 会议 / 自定义共用）。
 ///
 /// 这里的 id 必须与 `talksage_plugins::ANALYSIS_PLUGIN_IDS` 对齐 —— 配置层
 /// 刻意不依赖插件层（依赖方向是「pipeline 实现、plugins 定义」），所以两处
@@ -122,7 +156,7 @@ fn all_analysis_plugins() -> Vec<String> {
 /// 内置场景参数模板。
 pub fn scene_params(mode: SceneMode) -> SceneParams {
     match mode {
-        SceneMode::Life => SceneParams {
+        SceneMode::Dictation => SceneParams {
             vad_preset: VadPreset::Sensitive, // 灵敏：抓短句/弱语音（日常对话碎句多）
             vad_threshold: None,
             vad_min_speech_ms: None,
@@ -134,13 +168,53 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             user_engine: "paraformer-zh".into(),
             client_enabled: false, // 日常单方说话，不开双流
             client_engine: "zipformer-en".into(),
-            // 省资源/安静：生活模式不允许任何分析类插件
+            user_language: "zh".into(),
+            client_language: "en".into(),
+            translation_mode: TranslationMode::Off,
+            // 省资源/安静：单人听写不允许任何分析类插件
             plugin_allowlist: Vec::new(),
-            speaker_enabled: false, // 生活模式优先低资源；需要面对面多人时使用会谈/自定义
+            speaker_mode: SpeakerMode::Off,
+            noise_auto_detect: true,
+        },
+        SceneMode::Conversation => SceneParams {
+            vad_preset: VadPreset::Standard,
+            vad_threshold: None,
+            vad_min_speech_ms: None,
+            vad_min_silence_ms: None,
+            vad_max_speech_ms: None,
+            denoise_enabled: false,
+            denoise_gate: 0.008,
+            min_segment_ms: 300,
+            user_engine: "paraformer-zh".into(),
+            client_enabled: true,
+            client_engine: "paraformer-zh".into(),
+            user_language: "zh".into(),
+            client_language: "zh".into(),
+            translation_mode: TranslationMode::Off,
+            plugin_allowlist: ["term_explainer", "brief_retriever"].iter().map(|s| s.to_string()).collect(),
+            speaker_mode: SpeakerMode::Channel,
+            noise_auto_detect: true,
+        },
+        SceneMode::Translation => SceneParams {
+            vad_preset: VadPreset::Standard,
+            vad_threshold: None,
+            vad_min_speech_ms: None,
+            vad_min_silence_ms: None,
+            vad_max_speech_ms: None,
+            denoise_enabled: false,
+            denoise_gate: 0.008,
+            min_segment_ms: 300,
+            user_engine: "paraformer-zh".into(),
+            client_enabled: true,
+            client_engine: "zipformer-en".into(),
+            plugin_allowlist: all_analysis_plugins(),
+            user_language: "zh".into(),
+            client_language: "en".into(),
+            translation_mode: TranslationMode::Bidirectional,
+            speaker_mode: SpeakerMode::Channel,
             noise_auto_detect: true,
         },
         SceneMode::Meeting => SceneParams {
-            // 与历史默认行为一致（VAD standard / 降噪关 / 双流 / 插件全开）
             vad_preset: VadPreset::Standard,
             vad_threshold: None,
             vad_min_speech_ms: None,
@@ -148,28 +222,34 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             vad_max_speech_ms: None,
             denoise_enabled: false,
             denoise_gate: 0.008,
-            min_segment_ms: 0, // 保持默认不限制（可在自定义中调整）
+            min_segment_ms: 0,
             user_engine: "paraformer-zh".into(),
             client_enabled: true,
-            client_engine: "zipformer-en".into(),
+            client_engine: "paraformer-zh".into(),
+            user_language: "zh".into(),
+            client_language: "zh".into(),
+            translation_mode: TranslationMode::Off,
             plugin_allowlist: all_analysis_plugins(),
-            speaker_enabled: true, // 客户流默认在线聚类；主人声纹可选
+            speaker_mode: SpeakerMode::Voiceprint,
             noise_auto_detect: true,
         },
-        SceneMode::Talk => SceneParams {
-            vad_preset: VadPreset::Standard,
+        SceneMode::Lecture => SceneParams {
+            vad_preset: VadPreset::Strict,
             vad_threshold: None,
             vad_min_speech_ms: None,
-            vad_min_silence_ms: None,
-            vad_max_speech_ms: None,
+            vad_min_silence_ms: Some(700),
+            vad_max_speech_ms: Some(60_000),
             denoise_enabled: false,
             denoise_gate: 0.008,
-            min_segment_ms: 300, // 谈判短促确认句较多，300ms 起才提交
+            min_segment_ms: 300,
             user_engine: "paraformer-zh".into(),
-            client_enabled: true,
+            client_enabled: false,
             client_engine: "zipformer-en".into(),
-            plugin_allowlist: all_analysis_plugins(),
-            speaker_enabled: true, // 面对面/会议优先区分讲话者
+            user_language: "zh".into(),
+            client_language: "en".into(),
+            translation_mode: TranslationMode::Off,
+            plugin_allowlist: ["term_explainer", "brief_retriever"].iter().map(|s| s.to_string()).collect(),
+            speaker_mode: SpeakerMode::Off,
             noise_auto_detect: true,
         },
         SceneMode::Custom => SceneParams {
@@ -184,8 +264,11 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             user_engine: "paraformer-zh".into(),
             client_enabled: true,
             client_engine: "zipformer-en".into(),
+            user_language: "zh".into(),
+            client_language: "en".into(),
+            translation_mode: TranslationMode::Off,
             plugin_allowlist: all_analysis_plugins(),
-            speaker_enabled: true,
+            speaker_mode: SpeakerMode::Channel,
             noise_auto_detect: true,
         },
     }
@@ -204,8 +287,8 @@ pub struct SceneConfig {
 impl Default for SceneConfig {
     fn default() -> Self {
         Self {
-            mode: SceneMode::Meeting,
-            custom: scene_params(SceneMode::Meeting),
+            mode: SceneMode::Conversation,
+            custom: scene_params(SceneMode::Custom),
         }
     }
 }
@@ -222,9 +305,11 @@ impl SceneConfig {
     /// 当前模式的名称（中文，前端展示）。
     pub fn mode_label(&self) -> &'static str {
         match self.mode {
-            SceneMode::Life => "生活",
+            SceneMode::Dictation => "单人听写",
+            SceneMode::Conversation => "一对一会话",
+            SceneMode::Translation => "双语对话",
             SceneMode::Meeting => "会议",
-            SceneMode::Talk => "会谈",
+            SceneMode::Lecture => "演讲/课堂",
             SceneMode::Custom => "自定义",
         }
     }
@@ -300,8 +385,25 @@ pub fn apply_scene_params(p: &mut SceneParams, u: &serde_json::Value) {
             .filter_map(|x| x.as_str().map(|s| s.to_string()))
             .collect();
     }
-    if let Some(v) = u.get("speaker_enabled").and_then(|v| v.as_bool()) {
-        p.speaker_enabled = v;
+    if let Some(v) = u.get("user_language").and_then(|v| v.as_str()) {
+        p.user_language = v.to_string();
+    }
+    if let Some(v) = u.get("client_language").and_then(|v| v.as_str()) {
+        p.client_language = v.to_string();
+    }
+    if let Some(v) = u.get("translation_mode").and_then(|v| v.as_str()) {
+        p.translation_mode = match v {
+            "client_to_user" => TranslationMode::ClientToUser,
+            "bidirectional" => TranslationMode::Bidirectional,
+            _ => TranslationMode::Off,
+        };
+    }
+    if let Some(v) = u.get("speaker_mode").and_then(|v| v.as_str()) {
+        p.speaker_mode = match v {
+            "off" => SpeakerMode::Off,
+            "voiceprint" => SpeakerMode::Voiceprint,
+            _ => SpeakerMode::Channel,
+        };
     }
     if let Some(v) = u.get("noise_auto_detect").and_then(|v| v.as_bool()) {
         p.noise_auto_detect = v;
@@ -1009,8 +1111,11 @@ fn merge_config(default: Config, user: Config) -> Config {
                 user_engine: user.scene.custom.user_engine,
                 client_enabled: user.scene.custom.client_enabled,
                 client_engine: user.scene.custom.client_engine,
+                user_language: user.scene.custom.user_language,
+                client_language: user.scene.custom.client_language,
+                translation_mode: user.scene.custom.translation_mode,
                 plugin_allowlist: user.scene.custom.plugin_allowlist,
-                speaker_enabled: user.scene.custom.speaker_enabled,
+                speaker_mode: user.scene.custom.speaker_mode,
                 noise_auto_detect: user.scene.custom.noise_auto_detect,
             },
         },
@@ -1163,41 +1268,42 @@ min_segment_ms = 600
     }
 
     #[test]
-    fn scene_meeting_template_matches_legacy_defaults() {
-        // 默认场景=会议，有效参数应与历史默认一致（VAD standard / 降噪关 / 双流 / 插件全开）
+    fn scene_conversation_is_the_default() {
         let cfg = Config::default();
         let p = cfg.scene.effective();
-        assert_eq!(cfg.scene.mode, SceneMode::Meeting);
+        assert_eq!(cfg.scene.mode, SceneMode::Conversation);
         assert_eq!(p.vad_preset, VadPreset::Standard);
         assert!(!p.denoise_enabled);
-        assert_eq!(p.min_segment_ms, 0);
+        assert_eq!(p.min_segment_ms, 300);
         assert_eq!(p.user_engine, "paraformer-zh");
         assert!(p.client_enabled);
         assert_eq!(
             p.plugin_allowlist,
-            vec!["term_explainer", "translator", "brief_retriever"]
+            vec!["term_explainer", "brief_retriever"]
         );
-        // 会议默认区分客户侧多人；主人声纹注册是可选增强。
-        assert!(p.speaker_enabled);
+        assert_eq!(p.speaker_mode, SpeakerMode::Channel);
+        assert_eq!(p.translation_mode, TranslationMode::Off);
         // 与场景 to_* 转换一致
         assert_eq!(p.to_vad_config().effective(), (0.50, 0.25, 0.50, 512, 30.0));
     }
 
     #[test]
-    fn scene_life_and_talk_templates_differ() {
-        let life = scene_params(SceneMode::Life);
-        let talk = scene_params(SceneMode::Talk);
+    fn scene_templates_express_distinct_workloads() {
+        let dictation = scene_params(SceneMode::Dictation);
+        let translation = scene_params(SceneMode::Translation);
         let meeting = scene_params(SceneMode::Meeting);
-        assert_eq!(life.vad_preset, VadPreset::Sensitive);
-        assert!(!life.client_enabled, "生活场景应单流");
-        assert!(life.plugin_allowlist.is_empty(), "生活场景应关闭分析插件");
-        assert_eq!(talk.min_segment_ms, 300);
-        assert!(talk.client_enabled);
+        let lecture = scene_params(SceneMode::Lecture);
+        assert_eq!(dictation.vad_preset, VadPreset::Sensitive);
+        assert!(!dictation.client_enabled, "听写场景应单流");
+        assert!(dictation.plugin_allowlist.is_empty(), "听写场景应关闭分析插件");
+        assert_eq!(translation.translation_mode, TranslationMode::Bidirectional);
+        assert_eq!(meeting.speaker_mode, SpeakerMode::Voiceprint);
+        assert_eq!(lecture.vad_max_speech_ms, Some(60_000));
         // 默认（会议）→ effective 用模板而非 custom
         let cfg = SceneConfig { mode: SceneMode::Meeting, custom: scene_params(SceneMode::Custom) };
         assert_eq!(cfg.effective().vad_preset, meeting.vad_preset);
         // 自定义 → 用 custom
-        let cfg_custom = SceneConfig { mode: SceneMode::Custom, custom: life.clone() };
+        let cfg_custom = SceneConfig { mode: SceneMode::Custom, custom: dictation.clone() };
         assert_eq!(cfg_custom.effective().vad_preset, VadPreset::Sensitive);
     }
 
@@ -1211,14 +1317,13 @@ min_segment_ms = 600
             &file,
             r#"
 [scene]
-mode = "life"
+mode = "dictation"
 "#,
         )
         .unwrap();
         let mgr = ConfigManager::load(None, Some(&file)).unwrap();
         let cfg = mgr.snapshot();
-        assert_eq!(cfg.scene.mode, SceneMode::Life);
-        // 生活模板生效（未写 custom）
+        assert_eq!(cfg.scene.mode, SceneMode::Dictation);
         assert_eq!(cfg.scene.effective().vad_preset, VadPreset::Sensitive);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1264,10 +1369,10 @@ knob = 42
     /// 场景用 allowlist：不在列表里的插件一律关闭。
     /// 用 allowlist 而非 denylist —— 新增插件不会因为某个场景忘了更新而意外开启。
     #[test]
-    fn life_scene_allows_no_analysis_plugins() {
-        let allow = scene_params(SceneMode::Life).plugin_allowlist;
+    fn dictation_scene_allows_no_analysis_plugins() {
+        let allow = scene_params(SceneMode::Dictation).plugin_allowlist;
         for id in ["term_explainer", "translator", "brief_retriever"] {
-            assert!(!allow.contains(&id.to_string()), "生活模式不应允许 {id}");
+            assert!(!allow.contains(&id.to_string()), "听写模式不应允许 {id}");
         }
     }
 
@@ -1279,13 +1384,12 @@ knob = 42
         }
     }
 
-    /// 会谈与会议一致 —— 阶段 5 之前两者的三个 *_enabled 都是 true。
     #[test]
-    fn talk_scene_allows_all_analysis_plugins() {
-        assert_eq!(
-            scene_params(SceneMode::Talk).plugin_allowlist,
-            scene_params(SceneMode::Meeting).plugin_allowlist
-        );
+    fn translation_scene_enables_translator() {
+        let p = scene_params(SceneMode::Translation);
+        assert!(p.plugin_allowlist.contains(&"translator".to_string()));
+        assert_eq!(p.user_language, "zh");
+        assert_eq!(p.client_language, "en");
     }
 
     #[test]
@@ -1296,6 +1400,24 @@ knob = 42
         // 未提交时保留原值
         apply_scene_params(&mut p, &serde_json::json!({ "denoise_enabled": true }));
         assert_eq!(p.plugin_allowlist, vec!["translator"]);
+    }
+
+    #[test]
+    fn apply_scene_params_updates_language_translation_and_speaker_policy() {
+        let mut p = scene_params(SceneMode::Custom);
+        apply_scene_params(
+            &mut p,
+            &serde_json::json!({
+                "user_language": "en",
+                "client_language": "zh",
+                "translation_mode": "client_to_user",
+                "speaker_mode": "voiceprint"
+            }),
+        );
+        assert_eq!(p.user_language, "en");
+        assert_eq!(p.client_language, "zh");
+        assert_eq!(p.translation_mode, TranslationMode::ClientToUser);
+        assert_eq!(p.speaker_mode, SpeakerMode::Voiceprint);
     }
 
     #[test]

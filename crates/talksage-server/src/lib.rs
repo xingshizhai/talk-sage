@@ -326,10 +326,13 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
     if let Some(scene) = updates.get("scene") {
         if let Some(m) = scene.get("mode").and_then(|v| v.as_str()) {
             c.scene.mode = match m {
-                "life" => talksage_config::SceneMode::Life,
-                "talk" => talksage_config::SceneMode::Talk,
+                "dictation" => talksage_config::SceneMode::Dictation,
+                "conversation" => talksage_config::SceneMode::Conversation,
+                "translation" => talksage_config::SceneMode::Translation,
+                "meeting" => talksage_config::SceneMode::Meeting,
+                "lecture" => talksage_config::SceneMode::Lecture,
                 "custom" => talksage_config::SceneMode::Custom,
-                _ => talksage_config::SceneMode::Meeting,
+                _ => talksage_config::SceneMode::Conversation,
             };
         }
         if let Some(cu) = scene.get("custom") {

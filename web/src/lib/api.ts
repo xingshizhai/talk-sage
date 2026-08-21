@@ -60,13 +60,15 @@ export interface AppConfig {
     enabled: boolean;
     urls: string[];
   };
-  /** 场景模式：不同场景使用不同参数组合（生活/会议/会谈/自定义）。 */
+  /** 场景模式是一组完整运行预设。 */
   scene: {
-    mode: "life" | "meeting" | "talk" | "custom";
+    mode: SceneMode;
     custom: SceneParams;
   };
   [key: string]: unknown;
 }
+
+export type SceneMode = "dictation" | "conversation" | "translation" | "meeting" | "lecture" | "custom";
 
 /**
  * 插件元数据（与 Rust 侧 `plugin_metadata()` 对应）。设置页据此**生成**表单。
@@ -103,10 +105,13 @@ export interface SceneParams {
   user_engine: string;
   client_enabled: boolean;
   client_engine: string;
+  user_language: "zh" | "en";
+  client_language: "zh" | "en";
+  translation_mode: "off" | "client_to_user" | "bidirectional";
   /** 该场景允许启用的分析类插件 id；不在列表里的一律关闭（allowlist，非 denylist）。 */
   plugin_allowlist: string[];
-  /** WeSpeaker 多人在线聚类；主人声纹可选，不是启用前置条件。 */
-  speaker_enabled: boolean;
+  /** off=无角色；channel=按输入通道；voiceprint=WeSpeaker 多人聚类。 */
+  speaker_mode: "off" | "channel" | "voiceprint";
   noise_auto_detect: boolean;
 }
 

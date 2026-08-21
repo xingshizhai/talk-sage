@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use talksage_asr::{EngineKind, EnginePool};
-use talksage_config::{ConfigManager, SceneMode};
+use talksage_config::{ConfigManager, SpeakerMode, TranslationMode};
 use talksage_core::DomainEvent;
 use talksage_llm::{LLMProvider, OpenAICompatProvider};
 use talksage_plugins::{
@@ -292,18 +292,10 @@ impl TalkSageService {
             hotword_score: terminology.hotword_score.clamp(0.0, 10.0),
         };
         let scene = snapshot.scene.effective();
-        // 内置场景只决定 VAD/插件组合；ASR 页的全局模型选择仍应生效。
-        // 自定义场景则使用场景自身的模型设置。
-        let configured_user_engine = if snapshot.scene.mode == SceneMode::Custom {
-            &scene.user_engine
-        } else {
-            &snapshot.asr.user_engine
-        };
-        let configured_client_engine = if snapshot.scene.mode == SceneMode::Custom {
-            &scene.client_engine
-        } else {
-            &snapshot.asr.client_engine
-        };
+        // 场景是完整的运行预设（包括每条流的语言模型），不再让全局 ASR 设置
+        // 暗中覆盖双语场景。调用方的显式 StartListen override 仍具有最高优先级。
+        let configured_user_engine = &scene.user_engine;
+        let configured_client_engine = &scene.client_engine;
         let user_engine = req
             .user_engine
             .or_else(|| EngineKind::from_name(configured_user_engine))
@@ -342,7 +334,7 @@ impl TalkSageService {
                 model_dir: client_model.clone(),
                 input,
                 speaker_id: 1,
-                speaker_label: "客户".into(),
+                speaker_label: if scene.speaker_mode == SpeakerMode::Off { "讲话者".into() } else { "对方".into() },
                 engine_options: engine_options.clone(),
                 terminology: terminology.clone(),
             })
@@ -366,7 +358,7 @@ impl TalkSageService {
             }
         });
 
-        let speaker = if scene.speaker_enabled {
+        let speaker = if scene.speaker_mode == SpeakerMode::Voiceprint {
             let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
             let owner = speaker::load_owner_embedding(self.config.data_dir());
             if spk_model.is_file() {
@@ -392,6 +384,15 @@ impl TalkSageService {
             llm: Self::build_llm(&self.config),
             quality,
             webhook,
+            translation: Some(talksage_plugins::LiveTranslationPolicy {
+                mode: match scene.translation_mode {
+                    TranslationMode::Off => talksage_plugins::LiveTranslationMode::Off,
+                    TranslationMode::ClientToUser => talksage_plugins::LiveTranslationMode::ClientToUser,
+                    TranslationMode::Bidirectional => talksage_plugins::LiveTranslationMode::Bidirectional,
+                },
+                user_language: scene.user_language.clone(),
+                client_language: scene.client_language.clone(),
+            }),
         };
         // webhook 默认关闭（会把会话内容发到外部）。这里只在「本次会话确实会落库、
         // 有东西可推」时把 finalizer 装上；装上不等于会发 —— 真正发不发由
@@ -420,7 +421,9 @@ impl TalkSageService {
                 model_dir: user_model,
                 input: req.user_input.clone(),
                 speaker_id: 0,
-                speaker_label: req.user_label.clone().unwrap_or_else(|| "我".into()),
+                speaker_label: req.user_label.clone().unwrap_or_else(|| {
+                    if scene.speaker_mode == SpeakerMode::Off { "讲话者".into() } else { "我".into() }
+                }),
                 engine_options,
                 terminology,
             },
@@ -776,24 +779,25 @@ mod tests {
         o.get(id).and_then(|v| v.get("enabled")).and_then(|v| v.as_bool())
     }
 
-    /// 阶段 5 之前的判定是 `scene.X_enabled && snapshot.plugins.X.enabled`，
-    /// 三个场景的 X_enabled 分别是 生活=false / 会议=true / 会谈=true。
-    /// allowlist 必须复现这一表现。
+    /// 每种内置场景必须严格按自己的 allowlist 裁决分析插件。
     #[test]
-    fn scene_allowlist_reproduces_the_old_scene_gating() {
+    fn scene_allowlist_controls_each_preset() {
         let plugins = talksage_config::PluginsConfig::default();
-        for (mode, want_off) in [
-            (SceneMode::Life, true),
-            (SceneMode::Meeting, false),
-            (SceneMode::Talk, false),
-            (SceneMode::Custom, false),
+        for mode in [
+            SceneMode::Dictation,
+            SceneMode::Conversation,
+            SceneMode::Translation,
+            SceneMode::Meeting,
+            SceneMode::Lecture,
+            SceneMode::Custom,
         ] {
+            let params = talksage_config::scene_params(mode);
             let o = plugin_overrides_for(&plugins, &talksage_config::scene_params(mode));
             for id in talksage_plugins::ANALYSIS_PLUGIN_IDS {
-                if want_off {
-                    assert_eq!(enabled_in(&o, id), Some(false), "{mode:?} 应关掉 {id}");
+                if params.plugin_allowlist.iter().any(|allowed| allowed == id) {
+                    assert_ne!(enabled_in(&o, id), Some(false), "{mode:?} 应允许 {id}");
                 } else {
-                    assert_ne!(enabled_in(&o, id), Some(false), "{mode:?} 不应关掉 {id}");
+                    assert_eq!(enabled_in(&o, id), Some(false), "{mode:?} 应关掉 {id}");
                 }
             }
         }
@@ -805,7 +809,7 @@ mod tests {
     fn infrastructure_plugins_survive_the_life_scene() {
         let o = plugin_overrides_for(
             &talksage_config::PluginsConfig::default(),
-            &talksage_config::scene_params(SceneMode::Life),
+            &talksage_config::scene_params(SceneMode::Dictation),
         );
         for id in ["conversation_metrics", "session_quality"] {
             assert_eq!(enabled_in(&o, id), None, "{id} 不该被场景裁决");
@@ -836,10 +840,10 @@ mod tests {
         );
 
         // 生活：allowlist 不允许，enabled 被压成 false，但其他键不动
-        let life = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Life));
-        assert_eq!(enabled_in(&life, on), Some(false));
+        let dictation = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Dictation));
+        assert_eq!(enabled_in(&dictation, on), Some(false));
         assert_eq!(
-            life[on]["knob"],
+            dictation[on]["knob"],
             serde_json::json!(99.0),
             "场景只裁决 enabled，不该抹掉用户其他配置"
         );
@@ -851,7 +855,7 @@ mod tests {
     fn scene_min_segment_ms_wins_over_user_config() {
         let mut plugins = talksage_config::PluginsConfig::default();
         plugins.merge_entry("short_segment", &serde_json::json!({ "min_ms": 7 }));
-        let o = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Talk));
+        let o = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Conversation));
         assert_eq!(o["short_segment"]["min_ms"], serde_json::json!(300));
     }
 
@@ -890,7 +894,7 @@ mod tests {
         let mut c = Config::default();
         c.scene.mode = SceneMode::Meeting;
         assert!(c.scene.effective().client_enabled);
-        c.scene.mode = SceneMode::Life;
+        c.scene.mode = SceneMode::Dictation;
         assert!(!c.scene.effective().client_enabled);
     }
 

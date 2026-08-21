@@ -25,7 +25,17 @@ fn skip(reason: &str) {
 }
 
 fn test_state() -> ServerState {
-    let config = Arc::new(talksage_config::ConfigManager::load(None, None).unwrap());
+    // API 转写会在 data_dir/tmp 落中间 WAV；测试不能依赖用户主目录可写。
+    let data_dir = std::env::temp_dir().join(format!(
+        "talksage-server-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let config = Arc::new(talksage_config::ConfigManager::from_config(
+        talksage_config::Config::default(),
+        data_dir,
+    ));
     let sessions = Arc::new(talksage_session::SessionStore::open(":memory:").unwrap());
     let (tx, _rx) = broadcast::channel::<DomainEvent>(16);
     let service = talksage_pipeline::TalkSageService::new(
@@ -324,9 +334,10 @@ async fn openai_transcribe_wav_returns_text() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let body_str = String::from_utf8_lossy(&bytes).to_string();
+    assert_eq!(status, StatusCode::OK, "转写请求失败: {body_str}");
     let v: serde_json::Value = serde_json::from_str(&body_str).expect("响应不是 JSON");
     let text = v["text"].as_str().unwrap_or("");
     assert!(!text.trim().is_empty(), "转写结果为空: {body_str}");

@@ -33,6 +33,20 @@ use std::sync::Arc;
 use talksage_knowledge::KnowledgeBase;
 use talksage_llm::LLMProvider;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveTranslationMode {
+    Off,
+    ClientToUser,
+    Bidirectional,
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveTranslationPolicy {
+    pub mode: LiveTranslationMode,
+    pub user_language: String,
+    pub client_language: String,
+}
+
 /// 插件执行上下文（Arc 共享，可跨线程）。
 ///
 /// 承载**宿主能力**：插件自己造不出、也不该自己持有的东西。observer 在
@@ -49,11 +63,13 @@ pub struct PluginContext {
     pub quality: Option<Arc<dyn QualityDeps>>,
     /// 会后 webhook 推送。None = 无宿主，finalizer 静默跳过。
     pub webhook: Option<Arc<dyn WebhookDeps>>,
+    /// 本次会话的显式语言/翻译策略；翻译插件不得再从 speaker id 猜语言。
+    pub translation: Option<LiveTranslationPolicy>,
 }
 
 impl PluginContext {
     pub fn new() -> Self {
-        Self { kb: None, llm: None, quality: None, webhook: None }
+        Self { kb: None, llm: None, quality: None, webhook: None, translation: None }
     }
 }
 

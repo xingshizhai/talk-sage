@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getApi } from "./lib/transport";
-import type { AppConfig, ConversationMetrics, DomainEvent, NotesTemplate, NudgeEvent, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./lib/api";
+import type { AppConfig, ConversationMetrics, DomainEvent, NotesTemplate, NudgeEvent, SceneMode, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./lib/api";
 import { TranscriptAccumulator } from "./lib/transcript";
 import { KeyPointAggregator, type KeyPoint } from "./lib/highlights";
 import { cssVars, type Theme } from "./lib/theme";
@@ -27,10 +27,20 @@ function fmtTime(ms: number): string {
 const SPEAKER_STYLE: Record<string, { color: string; engine: string }> = {
   我: { color: "var(--me)", engine: "paraformer-zh" },
   客户: { color: "var(--client)", engine: "zipformer-en" },
+  对方: { color: "var(--client)", engine: "zipformer-en" },
 };
 
 // 动态说话人（客户1/客户2…）循环配色
 const CLIENT_COLORS = ["var(--client)", "var(--term)", "var(--brief)", "var(--live)", "var(--danger)", "var(--me)"];
+
+const SCENE_LABELS: Record<SceneMode, string> = {
+  dictation: "单人听写",
+  conversation: "一对一会话",
+  translation: "双语对话",
+  meeting: "多人会议",
+  lecture: "演讲/课堂",
+  custom: "自定义",
+};
 
 function speakerStyle(label: string): { color: string; engine: string } {
   if (label === "我") return SPEAKER_STYLE["我"];
@@ -189,7 +199,10 @@ export default function App() {
         });
       }
       if (ev.type === "translation") {
-        lastTranslationRef.current[ev.direction === "en_zh" ? "客户" : "我"] = ev.content;
+        // 双语预设按输入通道标记“我/对方”；保留“客户”兼容历史事件显示。
+        const label = ev.direction === "en_zh" ? "对方" : "我";
+        lastTranslationRef.current[label] = ev.content;
+        if (label === "对方") lastTranslationRef.current["客户"] = ev.content;
       }
       if (ev.type === "brief") {
         setBriefs((prev) => [...prev.slice(-19), { source: ev.source, text: ev.text }]);
@@ -228,6 +241,12 @@ export default function App() {
     } catch (e) {
       console.error("历史加载失败:", e);
     }
+  }, []);
+
+  const handleSaveConfig = useCallback(async (updates: Record<string, unknown>) => {
+    await api.saveConfig(updates);
+    // 设置保存后刷新主配置，让页头的当前场景等运行信息立即同步。
+    setConfig(await api.getConfig());
   }, []);
 
   // 噪音电平阈值：监听中防抖同步到后端（0..100 → 0..0.1 RMS 门限），无需停止监听
@@ -487,6 +506,22 @@ export default function App() {
           <span style={{ fontSize: 11, color: "var(--muted)" }}>
             v{version} · {api.transport}
           </span>
+          <button
+            type="button"
+            onClick={() => setNavPage("settings")}
+            title="当前场景模式；点击打开设置"
+            style={{
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+              background: "var(--surface-2)",
+              color: "var(--text-2)",
+              padding: "3px 9px",
+              fontSize: 11,
+              cursor: "pointer",
+            }}
+          >
+            场景 · {config ? SCENE_LABELS[config.scene.mode] : "加载中…"}
+          </button>
           <span
             style={{
               marginLeft: "auto",
@@ -625,7 +660,7 @@ export default function App() {
               <b style={{ fontSize: 13 }}>设置</b>
             </div>
             <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--pad)" }}>
-              <SettingsSection config={config} onSave={api.saveConfig} />
+              <SettingsSection config={config} onSave={handleSaveConfig} />
             </div>
           </section>
         )}

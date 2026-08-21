@@ -547,6 +547,11 @@ fn plugins_emit_term_and_translation_events() {
     let ctx = talksage_plugins::PluginContext {
         kb: None,
         llm: Some(Arc::new(mock)),
+        translation: Some(talksage_plugins::LiveTranslationPolicy {
+            mode: talksage_plugins::LiveTranslationMode::Bidirectional,
+            user_language: "zh".into(),
+            client_language: "en".into(),
+        }),
         ..talksage_plugins::PluginContext::new()
     };
     // 阶段 5 之后 term/translator 由注册表装配（同一份 ctx 既喂 register 也喂
