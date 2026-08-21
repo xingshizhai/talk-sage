@@ -94,7 +94,8 @@ pub struct SceneParams {
     /// 跨流去重、质量评估是基础设施，不受此列表影响（见
     /// `talksage_plugins::ANALYSIS_PLUGIN_IDS`）。
     pub plugin_allowlist: Vec<String>,
-    /// 说话人识别（wespeaker + 主人声纹）。
+    /// 多人说话人区分（wespeaker 在线聚类）。主人声纹是可选增强：存在时把
+    /// 匹配身份标为“我”，不存在时仍可区分“讲话者/客户 1/客户 2”。
     pub speaker_enabled: bool,
     /// 质量评估自动检测背景噪音（auto_detect）。
     pub noise_auto_detect: bool,
@@ -135,7 +136,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             client_engine: "zipformer-en".into(),
             // 省资源/安静：生活模式不允许任何分析类插件
             plugin_allowlist: Vec::new(),
-            speaker_enabled: false, // 默认关闭说话人识别（回环双录时在线聚类会产生重复标签，先把实时转写做好）
+            speaker_enabled: false, // 生活模式优先低资源；需要面对面多人时使用会谈/自定义
             noise_auto_detect: true,
         },
         SceneMode::Meeting => SceneParams {
@@ -152,7 +153,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             client_enabled: true,
             client_engine: "zipformer-en".into(),
             plugin_allowlist: all_analysis_plugins(),
-            speaker_enabled: false, // 默认关闭说话人识别（先把实时转写做好）
+            speaker_enabled: true, // 客户流默认在线聚类；主人声纹可选
             noise_auto_detect: true,
         },
         SceneMode::Talk => SceneParams {
@@ -168,7 +169,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             client_enabled: true,
             client_engine: "zipformer-en".into(),
             plugin_allowlist: all_analysis_plugins(),
-            speaker_enabled: false, // 默认关闭说话人识别（先把实时转写做好）
+            speaker_enabled: true, // 面对面/会议优先区分讲话者
             noise_auto_detect: true,
         },
         SceneMode::Custom => SceneParams {
@@ -184,7 +185,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             client_enabled: true,
             client_engine: "zipformer-en".into(),
             plugin_allowlist: all_analysis_plugins(),
-            speaker_enabled: false, // 默认关闭说话人识别（先把实时转写做好）
+            speaker_enabled: true,
             noise_auto_detect: true,
         },
     }
@@ -1176,8 +1177,8 @@ min_segment_ms = 600
             p.plugin_allowlist,
             vec!["term_explainer", "translator", "brief_retriever"]
         );
-        // 说话人识别默认关闭（回环双录时在线聚类产生重复标签；先把实时转写做好）
-        assert!(!p.speaker_enabled);
+        // 会议默认区分客户侧多人；主人声纹注册是可选增强。
+        assert!(p.speaker_enabled);
         // 与场景 to_* 转换一致
         assert_eq!(p.to_vad_config().effective(), (0.50, 0.25, 0.50, 512, 30.0));
     }

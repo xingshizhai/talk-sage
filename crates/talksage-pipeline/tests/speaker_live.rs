@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use talksage_pipeline::speaker::{SpeakerDecision, SpeakerIdentifier};
 
 mod common;
-use common::{model_root, skip};
+use common::skip;
 
 /// 同一进程里并发创建 `SpeakerEmbeddingExtractor` 会让 onnxruntime 抛出
 /// `Ort::Exception` 并 abort（整个测试进程挂掉，SIGABRT）。用真实模型的测试
@@ -20,7 +20,6 @@ static ORT_MODEL: Mutex<()> = Mutex::new(());
 fn model_guard() -> std::sync::MutexGuard<'static, ()> {
     ORT_MODEL.lock().unwrap_or_else(|e| e.into_inner())
 }
-
 
 fn wespeaker_model() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
@@ -89,7 +88,9 @@ fn identifies_owner_and_new_speaker() {
     assert!(owner.similarity().is_some());
 
     // 双流的回环通道不能被主人声纹改写为“我”；业务角色由通道决定。
-    assert_eq!(spk.query_for_role(&zh, "客户", false).label(), "客户");
+    let client_side_owner_audio = spk.query_for_role(&zh, "客户", false);
+    assert_eq!(client_side_owner_audio.label(), "客户");
+    assert_ne!(client_side_owner_audio.decision(), SpeakerDecision::OwnerMatch);
 
     // 不同说话人第一次只建立候选，第二个相似片段才确认“客户1”。
     let first = spk.query(&en, "客户");
@@ -108,6 +109,39 @@ fn identifies_owner_and_new_speaker() {
 
     // 中英文都识别人数稳定
     assert_eq!(spk.identify(&zh, "我"), "我");
+}
+
+#[test]
+fn alternating_speakers_keep_independent_candidates() {
+    let Some(model) = wespeaker_model() else {
+        return skip("未找到 wespeaker 声纹模型（运行 scripts/download_models.py wespeaker）");
+    };
+    let Some(zh) = wav16k("sherpa-onnx-streaming-paraformer-zh/0.wav") else {
+        return skip("缺少中文测试音频");
+    };
+    let Some(en) = wav16k("sherpa-onnx-streaming-zipformer-en-2023-06-26/0.wav") else {
+        return skip("缺少英文测试音频");
+    };
+
+    let _serial = model_guard();
+    let spk = SpeakerIdentifier::new(&model, None, 0.5).expect("wespeaker 模型加载失败");
+
+    let a1 = spk.query_for_role(&zh, "客户", false);
+    assert_eq!(a1.decision(), SpeakerDecision::CandidateStarted);
+    spk.commit(&a1);
+    let b1 = spk.query_for_role(&en, "客户", false);
+    assert_eq!(b1.decision(), SpeakerDecision::CandidateStarted);
+    spk.commit(&b1);
+
+    let a2 = spk.query_for_role(&zh, "客户", false);
+    assert_eq!(a2.label(), "客户1");
+    assert_eq!(a2.decision(), SpeakerDecision::CandidateConfirmed);
+    spk.commit(&a2);
+    let b2 = spk.query_for_role(&en, "客户", false);
+    assert_eq!(b2.label(), "客户2");
+    assert_eq!(b2.decision(), SpeakerDecision::CandidateConfirmed);
+    spk.commit(&b2);
+    assert_eq!(spk.num_speakers(), 2);
 }
 
 /// 回归网：被 filter 吞掉的段绝不能注册出「幻影说话人」。

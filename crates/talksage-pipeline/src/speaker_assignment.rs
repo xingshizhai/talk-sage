@@ -5,6 +5,16 @@
 use crate::speaker::{SharedSpeaker, SpeakerDecision};
 use talksage_core::{AudioSource, SpeakerAttribution, VoiceIdentity};
 
+fn is_stable_voice_decision(decision: SpeakerDecision) -> bool {
+    matches!(
+        decision,
+        SpeakerDecision::OwnerMatch
+            | SpeakerDecision::ExistingMatch
+            | SpeakerDecision::GrayZoneReuse
+            | SpeakerDecision::CandidateConfirmed
+    )
+}
+
 pub(super) struct SpeakerAssignment {
     source_id: u32,
     label: String,
@@ -31,11 +41,18 @@ impl SpeakerAssignment {
                 commit: None,
             };
         };
-        let query = speaker.query_for_role(audio, fallback_label, recognize_owner);
+        // 单麦克风多人模式且未注册主人时，不能把未确认的新身份回退成“我”。
+        // 主人声纹只是把某个聚类命名为“我”的可选增强，不是多人聚类前置条件。
+        let fallback = if recognize_owner && !speaker.has_owner() && fallback_label == "我" {
+            "讲话者"
+        } else {
+            fallback_label
+        };
+        let query = speaker.query_for_role(audio, fallback, recognize_owner);
         let label = query.label().to_string();
         let diagnostic = Some((query.decision(), query.similarity()));
         let mut attribution = SpeakerAttribution::from_legacy(source, &label);
-        if query.decision() != SpeakerDecision::LowQualityFallback {
+        if is_stable_voice_decision(query.decision()) {
             attribution.voice = Some(VoiceIdentity {
                 id: if label == "我" {
                     "owner".into()
@@ -135,5 +152,18 @@ mod tests {
         };
         assignment.commit();
         assert_eq!(commits.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn provisional_or_fallback_decisions_are_not_exposed_as_stable_voice_ids() {
+        for decision in [
+            SpeakerDecision::LowQualityFallback,
+            SpeakerDecision::CandidateStarted,
+            SpeakerDecision::SpeakerLimitFallback,
+        ] {
+            assert!(!is_stable_voice_decision(decision));
+        }
+        assert!(is_stable_voice_decision(SpeakerDecision::OwnerMatch));
+        assert!(is_stable_voice_decision(SpeakerDecision::CandidateConfirmed));
     }
 }

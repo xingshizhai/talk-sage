@@ -38,7 +38,7 @@ macOS 首次构建、运行和依赖检查统一使用 `./scripts/talksage.sh do
 | 前端测试 | `web/src/**/*.test.ts` | partial/final 聚合、智能断句、设置持久化、插件元数据、重点标记 |
 | 评估基准 | `scripts/evaluate.py`、`talksage bench` | CER/WER、RTF、首字延迟、设备/场景元数据和模型横向比较 |
 
-当前测试规模会随代码变化；不要在 CI 中依赖固定总数。2026-08-21 的基线为：pipeline 47、plugins 63、session 17、frontend 60。新增架构能力应至少有对应的确定性测试。
+当前测试规模会随代码变化；不要在 CI 中依赖固定总数。2026-08-21 的基线为：pipeline 53、plugins 63、session 17、frontend 60。新增架构能力应至少有对应的确定性测试。
 
 ## 3. 新架构的关键不变量
 
@@ -47,6 +47,9 @@ macOS 首次构建、运行和依赖检查统一使用 `./scripts/talksage.sh do
 - 文件输入按 deadline 节拍推进；暂停恢复后不得快速追赶暂停期间的积压。
 - partial 只更新 hypothesis；只有 final 经过 `EventFilter` 并进入 committed、observer 与持久化。
 - 被短段过滤或跨流去重吞掉的段，不得提交说话人状态或污染统计。
+- 段内换人检测必须连续确认、满足最短轮次，并在同一讲话者窗口恢复时清除待切换状态；推理节拍不得追赶积压。
+- 声纹窗口推理必须离开 Pipeline 主线程，使用容量 1 队列；旧 generation 的迟到结果不得影响新段。
+- 多个未确认讲话者必须并存；真实模型测试覆盖 A/B 交替后分别确认，防止单候选互相覆盖回归。
 - 慢插件使用固定 worker 和有界队列；队列满、panic、取消、超时不得阻塞实时转写。
 - `SessionWriter` 按 FIFO 串行写 SQLite；`finish` 返回前必须排空已提交事件，finalizer 随后才能读取会话。
 - 新数据库保存结构化 `speaker_attribution`；旧数据库自动补列，旧行仍可读取。
@@ -91,6 +94,8 @@ talksage bench --dir corpus --engine zipformer-en
 | overrun / dropped plugin jobs | 设备或慢插件压力下的稳定性 |
 
 模型选择不要只看 CER：本应用优先满足实时性，再在可接受的 RTF 与内存范围内比较准确率、断句和术语表现。
+
+会后讲话者时间轴可独立验证：`talksage diarize audio.wav --speakers 4`。省略人数时自动聚类；输出的 `[start,end,speaker]` 可与人工 RTTM/标注计算 DER，并通过最大重叠映射到转写段。覆盖不足转写段时保留实时标签，不做激进覆盖。
 
 ## 6. CI 与本机差异
 

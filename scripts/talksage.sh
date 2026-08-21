@@ -68,7 +68,7 @@ deps() {
     fi
     # 只下运行必需的四组（约 340MB）。whisper-base/small、qwen3-asr 是可选引擎，
     # 体积大得多，需要时单独执行 download_models.py <group>。
-    for group in paraformer-zh zipformer-en silero-vad wespeaker; do
+    for group in paraformer-zh zipformer-en silero-vad wespeaker diarization; do
         python3 scripts/download_models.py "$group" --proxy "$proxy"
     done
     (cd web && npm install --ignore-scripts)

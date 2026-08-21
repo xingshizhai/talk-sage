@@ -30,6 +30,8 @@ mod segment;
 pub mod service;
 pub mod speaker;
 mod speaker_assignment;
+mod speaker_change;
+pub mod speaker_diarization;
 mod statistics;
 
 pub use runtime::SessionRuntime;
@@ -38,6 +40,7 @@ pub use service::{ClientCapture, RecoveryReport, RunningListen, StartListen, Tal
 use input_scheduler::{poll_audio, AudioPoll, FilePacer, RoundRobin};
 use segment::{PartialUpdate, SegmentLifecycle};
 use speaker_assignment::SpeakerAssignment;
+use speaker_change::SpeakerChangeWorker;
 use statistics::{StreamStatistics, StreamStatisticsSnapshot};
 
 /// 停止管道时等待工作线程收尾的时限。超时返回，不卡死 UI；后台仍可能继续 ASR `finish`。
@@ -378,6 +381,8 @@ struct StreamWorker {
     speaker_recognize_owner: bool,
     /// 当前语音段音频缓冲（说话人识别用，≤30s）。
     seg_audio: Vec<f32>,
+    /// 滑动声纹窗口的段内换人检测；没有声纹模型的流不创建。
+    speaker_change: Option<SpeakerChangeWorker>,
     /// 最近一块 RMS（f32 bits；Level 事件用）。
     level: Arc<AtomicU32>,
     /// ASR 引擎池（Some = 引擎常驻复用，shutdown 时归还）。
@@ -469,6 +474,7 @@ impl StreamWorker {
             .as_ref()
             .map(|_| FilePacer::new(Duration::from_millis(chunk_ms)));
 
+        let speaker_change = speaker.clone().and_then(SpeakerChangeWorker::start);
         Ok(Self {
             vad,
             preprocessor,
@@ -499,6 +505,7 @@ impl StreamWorker {
             speaker,
             speaker_recognize_owner,
             seg_audio: Vec::new(),
+            speaker_change,
             level,
             engine_pool,
             engine_dir: Some(cfg.model_dir.clone()),
@@ -682,6 +689,21 @@ impl StreamWorker {
                     }
                 }
             }
+
+            // partial 文字保持低延迟；声纹标签允许稍后确认。连续两个窗口偏离
+            // 当前讲话者时，复用 finish_speech 安全收尾；下一块音频开始新段。
+            if let Some(worker) = &mut self.speaker_change {
+                worker.submit_if_due(&self.seg_audio);
+            }
+            let speaker_changed = self.speaker_change.as_mut().is_some_and(SpeakerChangeWorker::poll_changed);
+            if speaker_changed {
+                log::info!("流[{}] 检测到稳定讲话者变化，主动切分当前段", self.speaker_label);
+                self.vad.reset();
+                self.pre_roll.clear();
+                self.pre_roll_samples = 0;
+                self.finish_speech(emit);
+                return Ok(true);
+            }
             endpoint_ready = self.engine.as_ref().is_some_and(|e| e.kind().is_streaming())
                 && self.segment.observe_endpoint(
                     partial_update,
@@ -805,6 +827,9 @@ impl StreamWorker {
             e.reset();
         }
         self.seg_audio.clear();
+        if let Some(detector) = &mut self.speaker_change {
+            detector.reset();
+        }
     }
 
     fn stop(&mut self) {

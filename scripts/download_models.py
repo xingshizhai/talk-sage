@@ -9,6 +9,7 @@
 import os
 import struct
 import sys
+import tarfile
 import urllib.request
 from pathlib import Path
 
@@ -58,6 +59,9 @@ TARGETS: dict[str, list[tuple[str | None, str, str]]] = {
     "wespeaker": [
         (None, "wespeaker_zh_cnceleb_resnet34.onnx", "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_zh_cnceleb_resnet34.onnx"),
     ],
+    # 会后离线说话人分离：pyannote segmentation + 上面的 WeSpeaker embedding。
+    # 官方归档约 7MB；只提取 int8 模型，避免保存重复的 fp32 模型和示例脚本。
+    "diarization": [],
     # OpenAI Whisper（离线，段级识别；比流式更准，多语言）。fp32 + int8 都下载，引擎优先 fp32。
     "whisper-base": [
         ("csukuangfj/sherpa-onnx-whisper-base", "base-encoder.onnx", ""),
@@ -77,6 +81,9 @@ TARGETS: dict[str, list[tuple[str | None, str, str]]] = {
     # models/sherpa-onnx-qwen3-asr-0.6b/（conv_frontend.onnx / encoder.onnx / decoder.onnx / tokenizer.json）。
     "qwen3-asr": [],
 }
+
+DIARIZATION_ARCHIVE_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
+DIARIZATION_DIR = "sherpa-onnx-pyannote-segmentation-3-0"
 
 
 def download(repo: str | None, filename: str, url: str, group: str) -> Path:
@@ -98,6 +105,28 @@ def download(repo: str | None, filename: str, url: str, group: str) -> Path:
             f.write(chunk)
     print(f"    -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
     return out
+
+
+def download_diarization_model() -> None:
+    out_dir = OUT_ROOT / DIARIZATION_DIR
+    model = out_dir / "model.int8.onnx"
+    if model.is_file() and model.stat().st_size > 0:
+        print("  skip (exists) model.int8.onnx")
+        return
+    archive = OUT_ROOT / f"{DIARIZATION_DIR}.tar.bz2"
+    download(None, archive.name, DIARIZATION_ARCHIVE_URL, ".")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    member_name = f"{DIARIZATION_DIR}/model.int8.onnx"
+    with tarfile.open(archive, "r:bz2") as bundle:
+        member = bundle.getmember(member_name)
+        source = bundle.extractfile(member)
+        if source is None:
+            raise RuntimeError(f"归档缺少 {member_name}")
+        with open(model, "wb") as target:
+            while chunk := source.read(262144):
+                target.write(chunk)
+    archive.unlink(missing_ok=True)
+    print(f"  extracted model.int8.onnx ({model.stat().st_size / 1e6:.1f} MB)")
 
 
 def _read_varint(data: bytes, pos: int) -> tuple[int, int]:
@@ -184,6 +213,8 @@ def main() -> None:
             print(f"== {name} ==")
             for repo, filename, url in files:
                 download(repo, filename, url, name)
+            if name == "diarization":
+                download_diarization_model()
             if name == "zipformer-en":
                 model_dir = OUT_ROOT / "sherpa-onnx-streaming-zipformer-en-2023-06-26"
                 bpe_model = model_dir / "bpe.model"

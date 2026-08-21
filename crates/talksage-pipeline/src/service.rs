@@ -369,7 +369,7 @@ impl TalkSageService {
         let speaker = if scene.speaker_enabled {
             let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
             let owner = speaker::load_owner_embedding(self.config.data_dir());
-            if spk_model.is_file() && owner.is_some() {
+            if spk_model.is_file() {
                 Some(SpeakerConfig {
                     model: spk_model,
                     owner_embedding: owner,
@@ -377,10 +377,7 @@ impl TalkSageService {
                     classify_user_stream: client.is_none(),
                 })
             } else {
-                log::warn!(
-                    "说话人识别已请求但未启用：{}",
-                    if !spk_model.is_file() { "缺少 WeSpeaker 模型" } else { "尚未注册主人声纹" }
-                );
+                log::warn!("多人说话者区分已请求但未启用：缺少 WeSpeaker 模型");
                 None
             }
         } else {

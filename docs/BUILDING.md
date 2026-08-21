@@ -171,10 +171,12 @@ python scripts\download_models.py all
 #   sherpa-onnx-streaming-zipformer-en-2023-06-26/ （英文 streaming zipformer，int8）
 #   silero-vad/silero_vad.onnx             （VAD）
 #   wespeaker/wespeaker_zh_cnceleb_resnet34.onnx （声纹模型，说话人识别，26MB）
-# 只下载声纹模型： python scripts\download_models.py wespeaker
+# 下载实时声纹与会后分离模型：
+# python scripts\download_models.py wespeaker
+# python scripts\download_models.py diarization
 ```
 
-> 声纹模型用于「说话人识别」：设置页「声音标识」注册主人声音后，监听时先识别主人（标记「我」），其他说话人自动区分为「客户1/客户2/…」。未下载/未注册时保持原双流标签。
+> 声纹模型用于「多人讲话者区分」：模型存在时即可在线聚类为「讲话者/客户1/客户2/…」；设置页注册主人声音是可选增强，用于把匹配身份标记为「我」。模型未下载时保持原双流标签。
 
 ### 3.4 前端依赖
 

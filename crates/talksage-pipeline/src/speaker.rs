@@ -82,7 +82,9 @@ fn normalized_average(embeddings: &[Vec<f32>]) -> Option<Vec<f32>> {
 
 /// 说话人识别器（多流共享；内部加锁）。
 pub struct SpeakerIdentifier {
-    extractor: SpeakerEmbeddingExtractor,
+    /// ONNX extractor 不保证并发调用安全；段内变化检测在后台线程运行，final
+    /// 归属可能同时查询，因此统一串行访问底层 extractor。
+    extractor: Mutex<SpeakerEmbeddingExtractor>,
     inner: Mutex<Inner>,
     threshold: f32,
 }
@@ -91,8 +93,9 @@ struct Inner {
     manager: SpeakerEmbeddingManager,
     /// 归一化聚类中心及累计片段数；manager 只作为 sherpa 兼容索引。
     prototypes: HashMap<String, (Vec<f32>, u32)>,
-    /// 尚未被第二个相似片段确认的新说话人。
-    candidate: Option<(u32, Vec<f32>)>,
+    /// 尚未被第二个相似片段确认的新说话人。必须允许多个候选并存，否则
+    /// A/B 交替发言会互相覆盖唯一候选，两个身份都永远无法确认。
+    candidates: HashMap<u32, Vec<f32>>,
     next_client_id: u32,
 }
 
@@ -162,11 +165,11 @@ impl SpeakerIdentifier {
         let inner = Inner {
             manager,
             prototypes: HashMap::new(),
-            candidate: None,
+            candidates: HashMap::new(),
             next_client_id: 1,
         };
         let si = Self {
-            extractor,
+            extractor: Mutex::new(extractor),
             inner: Mutex::new(inner),
             threshold,
         };
@@ -201,12 +204,13 @@ impl SpeakerIdentifier {
         let prepared = prepare_speaker_audio(audio)?;
         let start = prepared.len().saturating_sub(MAX_SAMPLES);
         let samples = &prepared[start..];
-        let stream = self.extractor.create_stream()?;
+        let extractor = self.extractor.lock().ok()?;
+        let stream = extractor.create_stream()?;
         stream.accept_waveform(16000, samples);
-        if !self.extractor.is_ready(&stream) {
+        if !extractor.is_ready(&stream) {
             return None;
         }
-        self.extractor.compute(&stream)
+        extractor.compute(&stream)
     }
 
     /// 注册使用多个独立窗口提取声纹再聚合，避免一次咳嗽、静音或某个词主导模板。
@@ -266,14 +270,16 @@ impl SpeakerIdentifier {
         let inner = self.inner.lock().unwrap();
 
         // 主人使用更严格阈值，宁可暂时回退通道标签，也不把客户误标为“我”。
-        if let Some((owner, _)) = inner.prototypes.get("我") {
-            if cosine_similarity(owner, &emb) >= (self.threshold + 0.05).min(0.95) {
-                return SpeakerQuery {
-                    label: if recognize_owner { "我".into() } else { fallback.into() },
-                    decision: SpeakerDecision::OwnerMatch,
-                    similarity: Some(cosine_similarity(owner, &emb)),
-                    pending: None,
-                };
+        if recognize_owner {
+            if let Some((owner, _)) = inner.prototypes.get("我") {
+                if cosine_similarity(owner, &emb) >= (self.threshold + 0.05).min(0.95) {
+                    return SpeakerQuery {
+                        label: "我".into(),
+                        decision: SpeakerDecision::OwnerMatch,
+                        similarity: Some(cosine_similarity(owner, &emb)),
+                        pending: None,
+                    };
+                }
             }
         }
 
@@ -300,13 +306,16 @@ impl SpeakerIdentifier {
             }
         }
         let candidate_threshold = (self.threshold - 0.08).max(0.0);
-        if let Some((id, center)) = &inner.candidate {
-            if cosine_similarity(center, &emb) >= candidate_threshold {
+        let candidate = inner.candidates.iter()
+            .map(|(id, center)| (*id, cosine_similarity(center, &emb)))
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((id, similarity)) = candidate {
+            if similarity >= candidate_threshold {
                 return SpeakerQuery {
                     label: format!("客户{id}"),
                     decision: SpeakerDecision::CandidateConfirmed,
-                    similarity: Some(cosine_similarity(center, &emb)),
-                    pending: Some(PendingSpeaker::ConfirmCandidate { id: *id, embedding: emb }),
+                    similarity: Some(similarity),
+                    pending: Some(PendingSpeaker::ConfirmCandidate { id, embedding: emb }),
                 };
             }
         }
@@ -338,7 +347,8 @@ impl SpeakerIdentifier {
         let mut inner = self.inner.lock().unwrap();
         match pending {
             PendingSpeaker::StartCandidate { id, embedding } => {
-                inner.candidate = Some((*id, embedding.clone()));
+                inner.candidates.insert(*id, embedding.clone());
+                inner.next_client_id = inner.next_client_id.max(id + 1);
                 false
             }
             PendingSpeaker::ConfirmCandidate { id, embedding } => {
@@ -347,7 +357,7 @@ impl SpeakerIdentifier {
                     return false;
                 }
                 inner.prototypes.insert(label, (embedding.clone(), 1));
-                inner.candidate = None;
+                inner.candidates.remove(id);
                 inner.next_client_id = inner.next_client_id.max(id + 1);
                 true
             }

@@ -225,7 +225,7 @@ flowchart LR
   - 流式 paraformer-zh / zipformer-en：`accept` 出 hypothesis，`finish` 出 committed
   - 离线 Whisper base/small、Qwen3-ASR：`accept` 只攒音频，VAD 段结束 `finish()` 整段识别（无 partial）
 - **引擎池**：`EnginePool` 按 `(kind, model_dir)` 缓存 `Box<dyn SegmentEngine>`，监听会话间 `reset` 复用
-- **说话人**：实时以双流标签为主（麦=我 / 回环=客户）；wespeaker 声纹默认关闭（回环双采下在线聚类易刷「客户 N」）
+- **说话人**：实时先保留物理来源（麦克风 / 回环），再用 WeSpeaker 做在线聚类；会议/会谈默认开启客户侧多人区分。主人声纹不是聚类前置条件，只负责把匹配身份命名为“我”。段内使用 1.5s 滑动声纹窗口、500ms 步长和连续两次确认检测换人，确认后复用 `finish_speech` 安全切段。推理由每流容量 1 的后台 worker 执行，忙时跳过新窗口而不阻塞 ASR
 - **GPU**：配置里有 `backend = auto`；CUDA / CoreML 真正接线仍是产品项，不是本轮架构门
 
 ### 8.3 管道与插件（talksage-pipeline / talksage-plugins）
@@ -554,6 +554,10 @@ revision / processed_until_sample / committed_until_sample
 
 - `SpeakerAttribution` 将音频来源、角色、身份和置信度结构化，避免业务继续解析“我/客户 N”等展示文本。
 - 过滤器之后才提交 speaker assignment，防止被短段过滤或跨流去重吞掉的段污染声纹状态。
+- 未确认身份使用有界多候选集合，而不是单个候选槽；A/B 交替发言不会互相覆盖，任一候选再次出现即可稳定为“客户 N”。
+- 单个低相似度声纹窗口不会立即换人；连续两个窗口偏离稳定锚点且当前轮次至少 2s 才主动切段。检查节拍不会在设备卡顿恢复后追赶历史窗口。
+- 声纹窗口推理不在 Pipeline 主线程执行；任务队列容量为 1，结果携带 segment generation，旧段迟到结果不会切断新段。底层 WeSpeaker extractor 由互斥锁保护并发安全。
+- 会后精修使用 sherpa-onnx `OfflineSpeakerDiarization`（pyannote segmentation + WeSpeaker embedding + fast clustering）生成完整时间轴；转写段只在某 speaker 覆盖至少一半时才接受校正。CLI `talksage diarize` 已可独立评估，自动回写历史会话仍是下一接入点。
 - SQLite 的 `speaker_attribution` 为可选 JSON；旧数据库自动补列，旧行读取时降级推断并标记未知来源。
 
 ### 19.8 明确不做（现阶段）

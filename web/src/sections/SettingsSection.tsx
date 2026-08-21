@@ -539,7 +539,7 @@ export default function SettingsSection({
                   ))}
               </label>
               <label style={labelBlock}>
-                <input type="checkbox" checked={sceneCustom.speaker_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, speaker_enabled: e.target.checked })} /> 说话人识别
+                <input type="checkbox" checked={sceneCustom.speaker_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, speaker_enabled: e.target.checked })} /> 多人讲话者区分
                 <span style={{ marginLeft: 12 }}>
                   <input type="checkbox" checked={sceneCustom.noise_auto_detect} onChange={(e) => setSceneCustom({ ...sceneCustom, noise_auto_detect: e.target.checked })} /> 质量评估自动检测背景噪音
                 </span>
@@ -759,7 +759,7 @@ export default function SettingsSection({
       {/* ── 声音标识 ── */}
       {tab === "voice" && (
         <div>
-          <h3 style={groupTitle}>说话人识别（先识别主人，再区分其他人）</h3>
+          <h3 style={groupTitle}>说话人识别（多人区分 + 可选主人识别）</h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
             <div style={{ fontSize: 12 }}>
               声纹模型：
@@ -776,7 +776,7 @@ export default function SettingsSection({
               {voiceStatus === null ? (
                 <span style={{ color: "var(--muted)" }}> 检查中…</span>
               ) : voiceStatus.enrolled ? (
-                <span style={{ color: "var(--live)" }}> 已注册 ✓ 监听时您的发言将标记为「我」</span>
+                <span style={{ color: "var(--live)" }}> 已注册 ✓ 匹配的讲话者将标记为「我」</span>
               ) : (
                 <span style={{ color: "var(--brief)" }}> 未注册</span>
               )}
@@ -819,7 +819,7 @@ export default function SettingsSection({
               </button>
             )}
           </div>
-          <div style={hint}>固定文字用于覆盖更多发音特征；无需刻意模仿播音腔。未注册时保持原双流标签（我 / 客户）。</div>
+          <div style={hint}>主人声纹不是多人区分的前置条件：未注册时仍会聚类为「讲话者 / 客户1 / 客户2」；注册后可把匹配身份稳定标记为「我」。固定文字用于覆盖更多发音特征，无需刻意模仿播音腔。</div>
         </div>
       )}
 

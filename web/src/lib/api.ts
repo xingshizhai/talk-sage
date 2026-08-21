@@ -105,6 +105,7 @@ export interface SceneParams {
   client_engine: string;
   /** 该场景允许启用的分析类插件 id；不在列表里的一律关闭（allowlist，非 denylist）。 */
   plugin_allowlist: string[];
+  /** WeSpeaker 多人在线聚类；主人声纹可选，不是启用前置条件。 */
   speaker_enabled: boolean;
   noise_auto_detect: boolean;
 }

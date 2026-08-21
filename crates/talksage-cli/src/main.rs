@@ -129,6 +129,14 @@ enum Command {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// 对完整 wav 运行离线说话人分离，输出精确讲话者时间轴。
+    Diarize {
+        /// 输入 wav（任意采样率，自动转 16k mono）。
+        path: String,
+        /// 已知讲话者数量；省略时自动聚类。
+        #[arg(long)]
+        speakers: Option<u32>,
+    },
     /// 打印版本。
     Version,
 }
@@ -171,7 +179,45 @@ fn main() -> ExitCode {
         } => cmd_trim(&path, output.as_deref(), &preset, model.as_deref()),
         Command::Record { seconds, dir, input } => cmd_record(seconds, dir.as_deref(), &input),
         Command::Bench { dir, engine, limit } => cmd_bench(dir.as_deref(), &engine, limit),
+        Command::Diarize { path, speakers } => cmd_diarize(&path, speakers),
         Command::Doctor => cmd_doctor(),
+    }
+}
+
+fn cmd_diarize(path: &str, speakers: Option<u32>) -> ExitCode {
+    let Some(models) = resolve_models_dir() else {
+        eprintln!("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）");
+        return ExitCode::FAILURE;
+    };
+    let segmentation = models
+        .join("sherpa-onnx-pyannote-segmentation-3-0")
+        .join("model.int8.onnx");
+    let embedding = models
+        .join("wespeaker")
+        .join("wespeaker_zh_cnceleb_resnet34.onnx");
+    match talksage_pipeline::speaker_diarization::diarize_wav(
+        std::path::Path::new(path),
+        &segmentation,
+        &embedding,
+        speakers,
+    ) {
+        Ok(segments) => {
+            let count = segments.iter().map(|s| s.speaker_id).max().map(|n| n + 1).unwrap_or(0);
+            println!("说话人: {count} · 时间段: {}", segments.len());
+            for segment in segments {
+                println!(
+                    "  [{:>8.3}s - {:>8.3}s] 讲话者{}",
+                    segment.start_ms as f64 / 1000.0,
+                    segment.end_ms as f64 / 1000.0,
+                    segment.speaker_id + 1,
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("说话人分离失败: {err:#}");
+            ExitCode::FAILURE
+        }
     }
 }
 

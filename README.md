@@ -130,6 +130,7 @@ curl http://127.0.0.1:8080/v1/audio/transcriptions \
 | Import audio offline | `talksage import audio.wav` |
 | Doctor / diagnostics | `talksage doctor` |
 | Session analysis | `talksage session <id>` (dump raw segments: timestamps/duration/text + duplicate-segment detection to debug repeated recognition); `--dup-only` for duplicates only |
+| Offline speaker timeline | `talksage diarize audio.wav [--speakers N]` (pyannote segmentation + WeSpeaker clustering) |
 | Fixed-corpus benchmark | `talksage bench [--dir corpus] [--engine paraformer-zh\|zipformer-en] [--limit N]` (CER/WER, RTF, first-token latency) |
 | Short-segment suppression | Settings → ASR → 最短提交时长 (ms, 0 = off); or `[audio] min_segment_ms` in config |
 
@@ -161,6 +162,8 @@ stop → writer barrier → session finalizers (quality / webhook)
 ```
 
 `TalkSageService` is the single composition root used by the desktop app, headless server, CLI listen/import, and offline transcription. Each stream owns its VAD, ASR engine, sample clock, endpoint state, statistics, and speaker assignment. SQLite and LLM work stay off the audio path; queues are bounded so slow consumers cannot grow memory without limit.
+
+Meeting/talk scenes enable lightweight online speaker clustering when the WeSpeaker model is installed. Owner enrollment is optional; it names a matching cluster “我”. A sliding voiceprint window can also split a long VAD segment after a stable speaker change while keeping ASR partial text responsive.
 
 | Crate | Responsibility |
 |---|---|
