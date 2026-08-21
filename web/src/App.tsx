@@ -412,6 +412,8 @@ export default function App() {
         noiseLevel={noiseLevel}
         onNoiseLevel={setNoiseLevel}
         micRms={micRms}
+        version={version}
+        transport={api.transport}
       />
 
       {/* 主区：不滚动，滚动交给内部子区域（转写/要点/历史/设置各自 flex+overflow） */}
