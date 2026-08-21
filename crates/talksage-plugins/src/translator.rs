@@ -76,6 +76,10 @@ impl crate::registry::Plugin for TranslatorPluginDef {
         "translator"
     }
 
+    fn label(&self) -> &'static str {
+        "实时翻译"
+    }
+
     fn default_config(&self) -> crate::registry::PluginConfig {
         // `cooldown_seconds` 保留只为不让用户已有的 [plugins.translator] 配置
         // 突然消失 —— `TranslatorPlugin::new()` 不接受参数，这个值迁移前就

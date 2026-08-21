@@ -62,6 +62,15 @@ fn get_config(state: tauri::State<'_, AppState>) -> serde_json::Value {
     value
 }
 
+/// 插件元数据（id / 显示名 / 是否分析类 / 默认配置）。
+///
+/// 设置页据此**生成**插件表单，因此桌面端与 headless 的 `GET /api/plugins`
+/// 必须是同一份数据 —— 两边都直接吐 `plugin_metadata()`，不做各自的加工。
+#[tauri::command]
+fn list_plugins() -> Vec<serde_json::Value> {
+    talksage_plugins::plugin_metadata()
+}
+
 /// 把配置解析后的真实录音目录加入 asset 协议只读范围。
 /// 开发脚本会把数据放在仓库 `.tools/data`，它不属于 Tauri `$DATA_DIR`。
 fn allow_recording_assets(app: &tauri::AppHandle, config: &ConfigManager) -> Result<(), String> {
@@ -566,6 +575,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_version,
             get_config,
+            list_plugins,
             list_asr_models,
             save_config,
             ping,

@@ -80,6 +80,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/config", get(get_config_api).post(save_config_api))
+        .route("/plugins", get(list_plugins_api))
         .route("/asr/models", get(asr_models_api))
         .route("/sessions", get(list_sessions_api))
         .route("/search", get(search_api))
@@ -169,6 +170,17 @@ async fn get_config_api(State(state): State<ServerState>, headers: axum::http::H
         "server": { "host": cfg.server.host, "port": cfg.server.port },
     });
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// 插件元数据（设置页据此生成表单）。
+///
+/// 与 `/config` 一样走 `token_ok`：这里枚举的是「本机装了哪些插件、默认配置
+/// 长什么样」，属于配置面，不该匿名可读。
+async fn list_plugins_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    Json(talksage_plugins::plugin_metadata()).into_response()
 }
 
 async fn asr_models_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {

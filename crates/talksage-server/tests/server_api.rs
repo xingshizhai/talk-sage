@@ -126,6 +126,49 @@ async fn templates_list_builtin() {
     assert!(body.contains("negotiation"));
 }
 
+/// `/plugins` 是设置页生成表单的唯一来源：必须列出全部内置插件，
+/// 且每项带 id / label / schema.enabled。
+#[tokio::test]
+async fn plugins_endpoint_lists_every_builtin_plugin() {
+    let (status, body) = get("/api/plugins").await;
+    assert_eq!(status, StatusCode::OK);
+    let metas: Vec<serde_json::Value> = serde_json::from_str(&body).expect("应为 JSON 数组");
+    assert_eq!(metas.len(), talksage_plugins::builtin_plugins().len());
+    for m in &metas {
+        assert!(m["id"].as_str().is_some_and(|s| !s.is_empty()), "缺少 id: {m}");
+        assert!(m["label"].as_str().is_some_and(|s| !s.is_empty()), "缺少 label: {m}");
+        assert!(m["schema"]["enabled"].is_boolean(), "缺少 schema.enabled: {m}");
+    }
+}
+
+/// 端点枚举的是配置面信息，必须与 `/config` 同样受 token 保护 ——
+/// 匿名可读就是一次真实的信息泄露回归。
+#[tokio::test]
+async fn plugins_endpoint_requires_the_token() {
+    let mut state = test_state();
+    state.token = "plugins-token".to_string();
+    let router = build_router(state, &std::path::PathBuf::from("nonexistent-dist"));
+
+    let anonymous = router
+        .clone()
+        .oneshot(Request::builder().uri("/api/plugins").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+    let authorized = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/plugins")
+                .header("x-talksage-token", "plugins-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn unknown_api_returns_404() {
     let (status, _) = get("/api/definitely-not-exist").await;

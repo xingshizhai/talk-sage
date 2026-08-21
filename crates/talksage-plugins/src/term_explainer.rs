@@ -147,6 +147,10 @@ impl crate::registry::Plugin for TermExplainerPluginDef {
         "term_explainer"
     }
 
+    fn label(&self) -> &'static str {
+        "术语解释"
+    }
+
     fn default_config(&self) -> crate::registry::PluginConfig {
         crate::registry::PluginConfig::from_value(serde_json::json!({
             "enabled": true,

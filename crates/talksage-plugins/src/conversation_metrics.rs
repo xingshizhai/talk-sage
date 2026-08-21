@@ -73,6 +73,10 @@ impl Plugin for ConversationMetricsPlugin {
         "conversation_metrics"
     }
 
+    fn label(&self) -> &'static str {
+        "会话指标"
+    }
+
     fn default_config(&self) -> PluginConfig {
         PluginConfig::from_value(json!({ "enabled": true }))
     }

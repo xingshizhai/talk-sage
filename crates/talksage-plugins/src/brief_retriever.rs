@@ -87,6 +87,10 @@ impl crate::registry::Plugin for BriefRetrieverPluginDef {
         "brief_retriever"
     }
 
+    fn label(&self) -> &'static str {
+        "简报检索"
+    }
+
     fn default_config(&self) -> crate::registry::PluginConfig {
         // `min_score` 迁移前硬编码在 service.rs 的调用点（0.05），不在配置里；
         // 这里给出同一个值，行为不变。

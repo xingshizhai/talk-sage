@@ -92,6 +92,31 @@ pub fn effective_plugin_configs(
     out
 }
 
+/// 插件元数据：设置 UI 用它**生成**表单，而不是硬编码控件。
+///
+/// 每项：
+/// - `id`       —— 提交时 `plugins.<id>` 的键
+/// - `label`    —— 显示名，插件自己给（见 `Plugin::label`）
+/// - `analysis` —— 是否受场景 allowlist 约束（「会议辅助功能」那一类）
+/// - `schema`   —— 默认配置整体。**刻意没有独立的 schema 语言**：默认值的
+///                 JSON 类型就是控件类型（bool → 开关，number → 数字框，
+///                 string → 文本框）。多一套 DSL 就多一处会与插件实现漂移的真相。
+///
+/// 顺序与 `builtin_plugins()` 一致 —— 设置页按这个顺序排。
+pub fn plugin_metadata() -> Vec<Value> {
+    builtin_plugins()
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id(),
+                "label": p.label(),
+                "analysis": ANALYSIS_PLUGIN_IDS.contains(&p.id()),
+                "schema": p.default_config().as_value(),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +245,55 @@ mod tests {
             "webhook",
         ] {
             assert!(!ANALYSIS_PLUGIN_IDS.contains(&id), "{id} 是基础设施，不该受场景裁决");
+        }
+    }
+
+    /// 元数据必须覆盖每个插件，且每项都带设置页依赖的四个键。
+    /// 少一个 `schema.enabled`，设置页就会渲染出一个没有开关的插件卡片。
+    #[test]
+    fn metadata_covers_every_plugin_with_the_keys_the_ui_needs() {
+        let meta = plugin_metadata();
+        assert_eq!(meta.len(), builtin_plugins().len(), "每个插件都该有一项元数据");
+        for m in &meta {
+            let id = m["id"].as_str().expect("id 必须是字符串");
+            assert!(!id.is_empty(), "id 不能为空");
+            let label = m["label"].as_str().unwrap_or_else(|| panic!("插件 {id} 缺少 label"));
+            assert!(!label.is_empty(), "插件 {id} 的 label 不能为空");
+            assert!(m["analysis"].is_boolean(), "插件 {id} 的 analysis 必须是布尔");
+            assert!(
+                m["schema"]["enabled"].is_boolean(),
+                "插件 {id} 的 schema 缺少布尔 enabled —— 设置页会渲染不出开关"
+            );
+        }
+    }
+
+    /// 元数据的 `analysis` 是前端场景 allowlist 勾选框的唯一来源，
+    /// 必须与 `ANALYSIS_PLUGIN_IDS` 完全一致（多一个少一个都是产品行为变更）。
+    #[test]
+    fn metadata_analysis_flag_matches_the_allowlist_constant() {
+        let flagged: Vec<String> = plugin_metadata()
+            .iter()
+            .filter(|m| m["analysis"] == serde_json::json!(true))
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(flagged, ANALYSIS_PLUGIN_IDS, "analysis 标记与 ANALYSIS_PLUGIN_IDS 不一致");
+    }
+
+    /// 元数据顺序即 `builtin_plugins()` 顺序 —— 设置页照单渲染。
+    #[test]
+    fn metadata_preserves_registry_order() {
+        let want: Vec<&str> = builtin_plugins().iter().map(|p| p.id()).collect();
+        let meta = plugin_metadata();
+        let got: Vec<&str> = meta.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(got, want);
+    }
+
+    /// 显示名必须唯一：两个插件同名，设置页上用户分不清在关哪个。
+    #[test]
+    fn plugin_labels_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for p in builtin_plugins() {
+            assert!(seen.insert(p.label()), "重复的插件显示名: {}", p.label());
         }
     }
 
