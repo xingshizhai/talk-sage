@@ -43,14 +43,14 @@ impl SegmentObserver for TranslatorPlugin {
         Vec::new()
     }
 
-    fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> Option<DomainEvent> {
-        let llm = ctx.llm.as_ref()?;
-        let policy = ctx.translation.as_ref()?;
+    fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> anyhow::Result<Option<DomainEvent>> {
+        let Some(llm) = ctx.llm.as_ref() else { return Ok(None) };
+        let Some(policy) = ctx.translation.as_ref() else { return Ok(None) };
         let is_client = seg.speaker_id != 0;
         if policy.mode == LiveTranslationMode::Off
             || (policy.mode == LiveTranslationMode::ClientToUser && !is_client)
         {
-            return None;
+            return Ok(None);
         }
         let (source, target_language) = if is_client {
             (policy.client_language.as_str(), policy.user_language.as_str())
@@ -60,24 +60,24 @@ impl SegmentObserver for TranslatorPlugin {
         let direction = match (source, target_language) {
             ("en", "zh") => TranslationDirection::EnZh,
             ("zh", "en") => TranslationDirection::ZhEn,
-            _ => return None,
+            _ => return Ok(None),
         };
         let target = match target_language {
             "zh" => "简体中文",
             "en" => "English",
-            _ => return None,
+            _ => return Ok(None),
         };
         let prompt = format!("目标语言：{target}\n\n{}", seg.text);
-        let content = llm.complete(&prompt, SYSTEM_PROMPT).ok()?;
+        let content = llm.complete(&prompt, SYSTEM_PROMPT)?;
         if content.trim().is_empty() {
-            return None;
+            return Ok(None);
         }
-        Some(DomainEvent::Translation {
+        Ok(Some(DomainEvent::Translation {
             result_id: format!("trans-{}", now_ms()),
             status: ResultStatus::Final,
             direction,
             content: content.trim().to_string(),
-        })
+        }))
     }
 }
 
@@ -85,12 +85,14 @@ impl SegmentObserver for TranslatorPlugin {
 pub struct TranslatorPluginDef;
 
 impl crate::registry::Plugin for TranslatorPluginDef {
-    fn id(&self) -> &'static str {
-        "translator"
-    }
-
-    fn label(&self) -> &'static str {
-        "实时翻译"
+    fn descriptor(&self) -> &'static crate::PluginDescriptor {
+        static D: crate::PluginDescriptor = crate::PluginDescriptor {
+            id: "translator", label: "实时翻译",
+            description: "按会话语言策略使用 LLM 生成实时翻译",
+            category: crate::PluginCategory::Analysis, phase: crate::PluginPhase::Observer,
+            capabilities: &[crate::PluginCapability::Llm, crate::PluginCapability::TranslationPolicy], host_managed: &[], after: &[],
+        };
+        &D
     }
 
     fn default_config(&self) -> crate::registry::PluginConfig {
@@ -118,6 +120,13 @@ mod tests {
     use super::*;
     use talksage_core::TranscriptSegment;
     use talksage_llm::MockProvider;
+
+    struct FailingProvider;
+    impl talksage_llm::LLMProvider for FailingProvider {
+        fn complete(&self, _prompt: &str, _system: &str) -> anyhow::Result<String> {
+            anyhow::bail!("upstream timeout")
+        }
+    }
 
     fn seg(speaker: u32, text: &str) -> TranscriptSegment {
         TranscriptSegment {
@@ -149,7 +158,7 @@ mod tests {
         let ctx = bilingual_ctx("我们需要 NPI 样品");
         let p = TranslatorPlugin::new();
         assert!(p.should_trigger(&seg(1, "We need NPI samples")));
-        match p.run(&seg(1, "We need NPI samples"), &ctx) {
+        match p.run(&seg(1, "We need NPI samples"), &ctx).unwrap() {
             Some(DomainEvent::Translation { direction: TranslationDirection::EnZh, content, .. }) => {
                 assert!(!content.is_empty());
             }
@@ -161,7 +170,7 @@ mod tests {
     fn zh_to_en_direction() {
         let ctx = bilingual_ctx("We need NPI samples");
         let p = TranslatorPlugin::new();
-        match p.run(&seg(0, "我们需要 NPI 样品"), &ctx) {
+        match p.run(&seg(0, "我们需要 NPI 样品"), &ctx).unwrap() {
             Some(DomainEvent::Translation { direction: TranslationDirection::ZhEn, .. }) => {}
             other => panic!("应有 ZhEn 翻译事件: {other:?}"),
         }
@@ -171,7 +180,17 @@ mod tests {
     fn no_llm_means_no_translation() {
         let p = TranslatorPlugin::new();
         let ctx = PluginContext { kb: None, llm: None, ..PluginContext::new() };
-        assert!(p.run(&seg(1, "We need NPI"), &ctx).is_none());
+        assert!(p.run(&seg(1, "We need NPI"), &ctx).unwrap().is_none());
+    }
+
+    #[test]
+    fn llm_failure_is_propagated_for_executor_diagnostics() {
+        let mut ctx = bilingual_ctx("unused");
+        ctx.llm = Some(std::sync::Arc::new(FailingProvider));
+        let err = TranslatorPlugin::new()
+            .run(&seg(1, "We need NPI"), &ctx)
+            .expect_err("LLM 错误不能静默变成无结果");
+        assert!(err.to_string().contains("upstream timeout"));
     }
 
     #[test]
@@ -179,7 +198,7 @@ mod tests {
         let mut ctx = bilingual_ctx("translated");
         ctx.translation.as_mut().unwrap().mode = LiveTranslationMode::ClientToUser;
         let p = TranslatorPlugin::new();
-        assert!(p.run(&seg(0, "中文"), &ctx).is_none());
-        assert!(p.run(&seg(1, "English"), &ctx).is_some());
+        assert!(p.run(&seg(0, "中文"), &ctx).unwrap().is_none());
+        assert!(p.run(&seg(1, "English"), &ctx).unwrap().is_some());
     }
 }

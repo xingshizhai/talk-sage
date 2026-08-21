@@ -46,14 +46,14 @@ impl SegmentObserver for BriefRetrieverPlugin {
         Vec::new()
     }
 
-    fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> Option<DomainEvent> {
-        let kb = ctx.kb.as_ref()?;
+    fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> anyhow::Result<Option<DomainEvent>> {
+        let Some(kb) = ctx.kb.as_ref() else { return Ok(None) };
         if kb.chunk_count() == 0 {
-            return None;
+            return Ok(None);
         }
         let hits = kb.search(&seg.text, 2, self.min_score);
         if hits.is_empty() {
-            return None;
+            return Ok(None);
         }
         *self.last_trigger_at.lock().unwrap() = now();
         let content = hits
@@ -64,10 +64,10 @@ impl SegmentObserver for BriefRetrieverPlugin {
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        Some(DomainEvent::Brief {
+        Ok(Some(DomainEvent::Brief {
             source: hits[0].source.clone(),
             text: content,
-        })
+        }))
     }
 }
 
@@ -83,12 +83,14 @@ fn truncate(s: &str, max: usize) -> String {
 pub struct BriefRetrieverPluginDef;
 
 impl crate::registry::Plugin for BriefRetrieverPluginDef {
-    fn id(&self) -> &'static str {
-        "brief_retriever"
-    }
-
-    fn label(&self) -> &'static str {
-        "简报检索"
+    fn descriptor(&self) -> &'static crate::PluginDescriptor {
+        static D: crate::PluginDescriptor = crate::PluginDescriptor {
+            id: "brief_retriever", label: "简报检索",
+            description: "从本地知识库检索与客户发言相关的简报",
+            category: crate::PluginCategory::Analysis, phase: crate::PluginPhase::Observer,
+            capabilities: &[crate::PluginCapability::KnowledgeBase], host_managed: &[], after: &[],
+        };
+        &D
     }
 
     fn default_config(&self) -> crate::registry::PluginConfig {
@@ -151,7 +153,7 @@ mod tests {
         let ctx = PluginContext { kb: Some(Arc::new(kb)), llm: None, ..PluginContext::new() };
         let p = BriefRetrieverPlugin::new(0.0, 0.05);
         assert!(p.should_trigger(&seg(1, "NPI samples MOQ")));
-        let ev = p.run(&seg(1, "NPI samples MOQ"), &ctx).expect("应有简报");
+        let ev = p.run(&seg(1, "NPI samples MOQ"), &ctx).unwrap().expect("应有简报");
         match ev {
             DomainEvent::Brief { text, .. } => assert!(text.contains("NPI")),
             other => panic!("unexpected: {other:?}"),
@@ -163,6 +165,6 @@ mod tests {
     fn no_hit_returns_none() {
         let ctx = PluginContext { kb: None, llm: None, ..PluginContext::new() };
         let p = BriefRetrieverPlugin::new(0.0, 0.05);
-        assert!(p.run(&seg(1, "hello world"), &ctx).is_none());
+        assert!(p.run(&seg(1, "hello world"), &ctx).unwrap().is_none());
     }
 }

@@ -73,23 +73,44 @@ export type SceneMode = "dictation" | "conversation" | "translation" | "meeting"
 /**
  * 插件元数据（与 Rust 侧 `plugin_metadata()` 对应）。设置页据此**生成**表单。
  *
- * `schema` 是插件的默认配置整体，没有单独的 schema 语言：默认值的 JSON 类型
- * 就是控件类型（boolean → 开关，number → 数字框，string → 文本框）。
+ * `schema` 是兼容现有表单的默认配置；`config_schema` 是后端校验与外部客户端
+ * 使用的结构化契约。
  */
 export interface PluginMeta {
   /** 提交时 `plugins.<id>` 的键。 */
   id: string;
   /** 显示名（插件自己给；缺省是 id）。 */
   label: string;
+  /** 插件用途说明。 */
+  description?: string;
+  /** descriptor 分类和执行阶段。 */
+  category?: "infrastructure" | "analysis";
+  phase?: "filter" | "observer" | "finalizer";
+  capabilities?: string[];
+  after?: string[];
   /** 是否受场景 allowlist 约束（「会议辅助功能」那一类）。 */
   analysis: boolean;
   /** 默认配置。键即配置键，值即默认值。 */
   schema: Record<string, unknown>;
+  /** 结构化配置契约；旧后端可能不返回，因此为可选。 */
+  config_schema?: {
+    type: "object";
+    additionalProperties: boolean;
+    properties: Record<string, { type: string; default: unknown }>;
+  };
   /**
    * 由宿主裁决的配置键：装配时被场景参数/运行期能力无条件覆盖，用户改不动。
    * 设置页把这些控件置灰 —— 能改却不生效的输入框比没有更糟。
    */
   host_managed: string[];
+}
+
+export interface PluginStatusInfo {
+  id: string;
+  label: string;
+  status: "active" | "disabled" | "unavailable" | "invalid_config";
+  missing_capabilities?: string[];
+  issues?: Array<{ path: string; message: string }>;
 }
 
 /** 场景参数集（自定义模式可全量编辑）。 */
@@ -295,6 +316,8 @@ export interface AppApi {
   listAsrModels(): Promise<AsrModelInfo[]>;
   /** 插件元数据（设置页据此生成插件表单）。 */
   listPlugins(): Promise<PluginMeta[]>;
+  /** 按当前配置和宿主能力预检插件注册状态。 */
+  listPluginStatus(): Promise<PluginStatusInfo[]>;
   /** 保存配置（写入 talksage.toml / 服务端配置）。 */
   saveConfig(updates: Record<string, unknown>): Promise<void>;
   ping(): Promise<void>;

@@ -2,9 +2,9 @@
 // 保存写入 talksage.toml。
 
 import { useEffect, useState } from "react";
-import type { AppConfig, AsrModelInfo, PluginMeta, SceneMode, SceneParams } from "../lib/api";
+import type { AppConfig, AsrModelInfo, PluginMeta, PluginStatusInfo, SceneMode, SceneParams } from "../lib/api";
 import type { PluginValues } from "../lib/plugins";
-import { analysisPluginIds, buildPluginUpdates, fieldLabel, initialPluginValues, pluginFields } from "../lib/plugins";
+import { analysisPluginIds, buildPluginUpdates, fieldLabel, initialPluginValues, pluginFields, pluginStatusLabel } from "../lib/plugins";
 import { getApi } from "../lib/transport";
 
 const api = getApi();
@@ -52,7 +52,7 @@ export default function SettingsSection({
     client_language: config?.scene?.custom?.client_language ?? "en",
     translation_mode: config?.scene?.custom?.translation_mode ?? "off",
     // 配置没给 allowlist 时，元数据到货后回填「全部分析类插件」（见下方 effect）——
-    // 这里不能写死 id 列表：哪些插件算分析类归 Rust 侧 ANALYSIS_PLUGIN_IDS。
+    // 这里不能写死 id 列表：哪些插件算分析类归 Rust descriptor。
     plugin_allowlist: config?.scene?.custom?.plugin_allowlist ?? [],
     speaker_mode: config?.scene?.custom?.speaker_mode ?? "channel",
     noise_auto_detect: config?.scene?.custom?.noise_auto_detect ?? true,
@@ -61,6 +61,7 @@ export default function SettingsSection({
   const [apiKey, setApiKey] = useState<string>("");
   // 插件表单由 /plugins 元数据生成：设置页不认识任何具体插件。
   const [pluginMeta, setPluginMeta] = useState<PluginMeta[]>([]);
+  const [pluginStatus, setPluginStatus] = useState<PluginStatusInfo[]>([]);
   const [pluginValues, setPluginValues] = useState<PluginValues>({});
   const [kbFolder, setKbFolder] = useState<string>("");
   const [kbEnabled, setKbEnabled] = useState(false);
@@ -110,13 +111,15 @@ export default function SettingsSection({
       return null;
     };
     (async () => {
-      const [voice, models, metas] = await Promise.all([
+      const [voice, models, metas, statuses] = await Promise.all([
         api.getVoiceprintStatus().catch(warn("声纹状态")),
         api.listAsrModels().catch(warn("ASR 模型列表")),
         api.listPlugins().catch(warn("插件元数据")),
+        api.listPluginStatus().catch(warn("插件状态")),
       ]);
       if (voice) setVoiceStatus(voice);
       if (models) setAsrModels(models);
+      if (statuses) setPluginStatus(statuses);
       if (!metas) return;
       setPluginMeta(metas);
       setPluginValues(initialPluginValues(metas, config?.plugins));
@@ -210,6 +213,10 @@ export default function SettingsSection({
     return metas.map((meta) => {
       const values = pluginValues[meta.id] ?? {};
       const on = values.enabled !== false;
+      const registration = pluginStatus.find((item) => item.id === meta.id);
+      const statusText = pluginStatusLabel(registration);
+      const statusColor = registration?.status === "active" ? "#2e7d32"
+        : registration?.status === "disabled" ? "#777" : "#b45309";
       return (
         <div key={meta.id} style={{ marginBottom: 4 }}>
           {pluginFields(meta).map((f) => {
@@ -226,6 +233,8 @@ export default function SettingsSection({
                   />{" "}
                   {meta.label}
                   {note}
+                  {meta.description ? <span style={{ ...hint, marginLeft: 8, display: "inline" }}>{meta.description}</span> : null}
+                  <span style={{ ...hint, marginLeft: 8, display: "inline", color: statusColor }}>［{statusText}］</span>
                 </label>
               );
             }
@@ -347,6 +356,7 @@ export default function SettingsSection({
         },
       };
       await onSave(updates);
+      setPluginStatus(await api.listPluginStatus());
       setMessage("已保存（部分设置重启后生效）");
     } catch (e) {
       setMessage(`保存失败: ${e}`);

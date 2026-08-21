@@ -147,8 +147,37 @@ async fn plugins_endpoint_lists_every_builtin_plugin() {
     for m in &metas {
         assert!(m["id"].as_str().is_some_and(|s| !s.is_empty()), "缺少 id: {m}");
         assert!(m["label"].as_str().is_some_and(|s| !s.is_empty()), "缺少 label: {m}");
+        assert!(m["description"].as_str().is_some_and(|s| !s.is_empty()), "缺少 description: {m}");
+        assert!(matches!(m["category"].as_str(), Some("analysis" | "infrastructure")));
+        assert!(matches!(m["phase"].as_str(), Some("filter" | "observer" | "finalizer")));
+        assert!(m["capabilities"].is_array());
+        assert!(m["after"].is_array());
         assert!(m["schema"]["enabled"].is_boolean(), "缺少 schema.enabled: {m}");
+        assert_eq!(m["config_schema"]["additionalProperties"], false);
+        assert_eq!(m["config_schema"]["properties"]["enabled"]["type"], "boolean");
     }
+}
+
+#[tokio::test]
+async fn save_config_rejects_invalid_plugin_config() {
+    let state = test_state();
+    let router = build_router(state, &std::path::PathBuf::from("nonexistent-dist"));
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/config")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"plugins":{"term_explainer":{"enabled":"yes"}}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "invalid plugin config");
+    assert_eq!(json["issues"][0]["path"], "term_explainer.enabled");
 }
 
 /// 端点枚举的是配置面信息，必须与 `/config` 同样受 token 保护 ——
@@ -177,6 +206,19 @@ async fn plugins_endpoint_requires_the_token() {
         .await
         .unwrap();
     assert_eq!(authorized.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn plugin_status_reports_current_capability_availability() {
+    let (status, body) = get("/api/plugins/status").await;
+    assert_eq!(status, StatusCode::OK);
+    let registrations: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(registrations.len(), talksage_plugins::builtin_plugins().len());
+    let term = registrations.iter().find(|item| item["id"] == "term_explainer").unwrap();
+    assert_eq!(term["status"], "unavailable");
+    assert!(term["missing_capabilities"].as_array().unwrap().contains(&serde_json::json!("llm")));
+    let quality = registrations.iter().find(|item| item["id"] == "session_quality").unwrap();
+    assert_eq!(quality["status"], "active", "server 有会话存储宿主");
 }
 
 #[tokio::test]

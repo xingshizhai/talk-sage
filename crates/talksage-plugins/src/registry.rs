@@ -1,6 +1,24 @@
 //! 插件注册表：Plugin trait、三类钩子、配置载体。
 
+use serde::Serialize;
 use serde_json::Value;
+use std::time::Duration;
+
+/// 单个会后插件的默认 deadline。调用方可用 `run_finalizers_with_timeout` 覆盖。
+pub const DEFAULT_FINALIZER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 插件配置校验问题。`path` 使用 `<plugin>.<key>`，可直接展示给用户或 doctor。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PluginConfigIssue {
+    pub path: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for PluginConfigIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.path, self.message)
+    }
+}
 
 /// 插件配置载体。用 serde_json::Value 与 ConfigManager 已有的
 /// apply_scene_params(p, u: &Value) 模式保持一致，不引入新的 schema 机制。
@@ -52,6 +70,67 @@ impl PluginConfig {
     pub fn enabled(&self) -> bool {
         self.get_bool("enabled", true)
     }
+
+    /// 按插件默认配置校验对象形状、字段集合和 JSON 类型。
+    ///
+    /// 默认配置是当前插件配置契约的唯一真相。数字允许整数/浮点互换；对象、
+    /// 数组等复杂字段要求 JSON 类型一致。范围与枚举等业务约束由插件覆写
+    /// `Plugin::validate_config` 补充。
+    pub fn validate_shape(&self, plugin_id: &str, defaults: &PluginConfig) -> Vec<PluginConfigIssue> {
+        let Some(actual) = self.0.as_object() else {
+            return vec![PluginConfigIssue {
+                path: plugin_id.to_string(),
+                message: "配置必须是对象".to_string(),
+            }];
+        };
+        let Some(expected) = defaults.0.as_object() else {
+            return vec![PluginConfigIssue {
+                path: plugin_id.to_string(),
+                message: "插件默认配置不是对象（插件实现错误）".to_string(),
+            }];
+        };
+
+        let mut issues = Vec::new();
+        for (key, value) in actual {
+            let path = format!("{plugin_id}.{key}");
+            let Some(default) = expected.get(key) else {
+                issues.push(PluginConfigIssue { path, message: "未知配置项".to_string() });
+                continue;
+            };
+            if !same_config_type(value, default) {
+                issues.push(PluginConfigIssue {
+                    path,
+                    message: format!(
+                        "类型错误：期望 {}，实际 {}",
+                        config_type_name(default),
+                        config_type_name(value),
+                    ),
+                });
+            }
+        }
+        issues
+    }
+}
+
+fn same_config_type(actual: &Value, expected: &Value) -> bool {
+    matches!((actual, expected),
+        (Value::Null, Value::Null)
+            | (Value::Bool(_), Value::Bool(_))
+            | (Value::Number(_), Value::Number(_))
+            | (Value::String(_), Value::String(_))
+            | (Value::Array(_), Value::Array(_))
+            | (Value::Object(_), Value::Object(_)))
+}
+
+pub(crate) fn config_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 use std::sync::Arc;
@@ -94,7 +173,13 @@ pub trait SegmentObserver: Send + Sync {
     /// 本地即时骨架（同步、无 HTTP）。返回多个事件：一段上可能同时产出
     /// 指标与提示。空向量 = 不发。
     fn skeleton(&self, seg: &TranscriptSegment) -> Vec<DomainEvent>;
-    fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> Option<DomainEvent>;
+    /// 后台工作。`Ok(None)` 表示正常但没有产物；`Err` 表示可诊断失败，执行器
+    /// 会记录插件名、耗时和错误，并继续处理其他任务。
+    fn run(
+        &self,
+        seg: &TranscriptSegment,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<Option<DomainEvent>>;
 }
 
 /// finalizer 的输入。会话已停、已落库，此处只读。
@@ -120,8 +205,129 @@ pub trait SessionFinalizer: Send + Sync {
 /// `run_finalizers` 的结果汇总。
 #[derive(Debug, Default)]
 pub struct FinalizeReport {
+    /// 正常完成的 finalizer 名字。
+    pub completed: Vec<&'static str>,
     /// 执行失败的 finalizer 名字。
     pub failed: Vec<&'static str>,
+    /// `failed` 中由 deadline 触发的子集。
+    pub timed_out: Vec<&'static str>,
+    /// `failed` 中发生 panic 的子集。
+    pub panicked: Vec<&'static str>,
+}
+
+enum FinalizerOutcome {
+    Completed,
+    Failed(String),
+    Panicked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginCategory {
+    Infrastructure,
+    Analysis,
+}
+
+impl PluginCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Infrastructure => "infrastructure",
+            Self::Analysis => "analysis",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginPhase {
+    Filter,
+    Observer,
+    Finalizer,
+}
+
+impl PluginPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Filter => "filter",
+            Self::Observer => "observer",
+            Self::Finalizer => "finalizer",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginCapability {
+    Llm,
+    KnowledgeBase,
+    TranslationPolicy,
+    QualityStore,
+    Webhook,
+}
+
+impl PluginCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Llm => "llm",
+            Self::KnowledgeBase => "knowledge_base",
+            Self::TranslationPolicy => "translation_policy",
+            Self::QualityStore => "quality_store",
+            Self::Webhook => "webhook",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationStatus {
+    Active,
+    Disabled,
+    Unavailable,
+    InvalidConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PluginRegistration {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub status: RegistrationStatus,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_capabilities: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<PluginConfigIssue>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CapabilityAvailability {
+    pub llm: bool,
+    pub knowledge_base: bool,
+    pub translation_policy: bool,
+    pub quality_store: bool,
+    pub webhook: bool,
+}
+
+impl CapabilityAvailability {
+    pub fn has(self, capability: PluginCapability) -> bool {
+        match capability {
+            PluginCapability::Llm => self.llm,
+            PluginCapability::KnowledgeBase => self.knowledge_base,
+            PluginCapability::TranslationPolicy => self.translation_policy,
+            PluginCapability::QualityStore => self.quality_store,
+            PluginCapability::Webhook => self.webhook,
+        }
+    }
+}
+
+/// 插件的声明式静态信息。配置默认值仍由 `default_config()` 生成；其余会被
+/// 注册、场景、元数据、顺序契约和诊断共同消费，避免维护平行清单。
+#[derive(Debug)]
+pub struct PluginDescriptor {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub category: PluginCategory,
+    pub phase: PluginPhase,
+    pub capabilities: &'static [PluginCapability],
+    pub host_managed: &'static [&'static str],
+    /// 必须出现在本插件之前的插件 id。当前用于验证清单顺序。
+    pub after: &'static [&'static str],
 }
 
 /// 插件：拥有身份与默认配置，在 register() 里把自己挂进钩子。
@@ -131,16 +337,27 @@ pub struct FinalizeReport {
 /// `Arc<dyn ...>` —— 既不可变也不能 downcast，事后无法再注入。所以需要
 /// 宿主依赖的插件（finalizer 尤其）必须在 register 时就把它装进自己。
 pub trait Plugin: Send + Sync {
-    fn id(&self) -> &'static str;
+    fn descriptor(&self) -> &'static PluginDescriptor;
+
+    fn id(&self) -> &'static str {
+        self.descriptor().id
+    }
+
     fn default_config(&self) -> PluginConfig;
     fn register(&self, cfg: &PluginConfig, ctx: &PluginContext, hooks: &mut HookRegistry);
+
+    /// 校验合并后的完整配置。默认实现检查未知字段与 JSON 类型；插件可追加
+    /// 数值范围、枚举、字段关系等业务约束。
+    fn validate_config(&self, cfg: &PluginConfig) -> Vec<PluginConfigIssue> {
+        cfg.validate_shape(self.id(), &self.default_config())
+    }
 
     /// 设置页显示用的人话名字。**归插件自己**：宿主既不认识插件的配置结构，
     /// 也就不该替它写标签表 —— 否则每加一个插件都要改一次前端常量。
     ///
     /// 默认返回 id：忘了写只是设置页里显示 `foo_bar` 而不是「某某」，不会崩。
     fn label(&self) -> &'static str {
-        self.id()
+        self.descriptor().label
     }
 }
 
@@ -184,11 +401,61 @@ impl HookRegistry {
 
     /// 依次执行，逐个独立：任一失败只记录并继续，不中断链条。
     pub fn run_finalizers(&self, ctx: &FinalizeContext) -> FinalizeReport {
+        self.run_finalizers_with_timeout(ctx, DEFAULT_FINALIZER_TIMEOUT)
+    }
+
+    /// 依次执行并为每项设置 deadline。每项在独立命名线程中运行，因此 panic
+    /// 不会越过插件边界，卡住的插件也不会永久阻塞会话停止。Rust 无法强杀
+    /// 线程：超时线程会在后台自行结束，其迟到结果被丢弃。
+    pub fn run_finalizers_with_timeout(
+        &self,
+        ctx: &FinalizeContext,
+        timeout: Duration,
+    ) -> FinalizeReport {
         let mut report = FinalizeReport::default();
         for f in &self.finalizers {
-            if let Err(e) = f.finalize(ctx) {
-                log::warn!("finalizer[{}] 失败: {e}", f.name());
-                report.failed.push(f.name());
+            let name = f.name();
+            let finalizer = f.clone();
+            let session_id = ctx.session_id;
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let spawn = std::thread::Builder::new()
+                .name(format!("finalizer-{name}"))
+                .spawn(move || {
+                    let context = FinalizeContext { session_id };
+                    let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        finalizer.finalize(&context)
+                    })) {
+                        Ok(Ok(())) => FinalizerOutcome::Completed,
+                        Ok(Err(err)) => FinalizerOutcome::Failed(format!("{err:#}")),
+                        Err(_) => FinalizerOutcome::Panicked,
+                    };
+                    let _ = tx.send(outcome);
+                });
+            if let Err(err) = spawn {
+                log::warn!("finalizer[{name}] 线程启动失败: {err}");
+                report.failed.push(name);
+                continue;
+            }
+            match rx.recv_timeout(timeout) {
+                Ok(FinalizerOutcome::Completed) => report.completed.push(name),
+                Ok(FinalizerOutcome::Failed(err)) => {
+                    log::warn!("finalizer[{name}] 失败: {err}");
+                    report.failed.push(name);
+                }
+                Ok(FinalizerOutcome::Panicked) => {
+                    log::warn!("finalizer[{name}] 执行 panic，已隔离");
+                    report.failed.push(name);
+                    report.panicked.push(name);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    log::warn!("finalizer[{name}] 超过 deadline {timeout:?}，停止等待");
+                    report.failed.push(name);
+                    report.timed_out.push(name);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    log::warn!("finalizer[{name}] 线程异常断开");
+                    report.failed.push(name);
+                }
             }
         }
         report
@@ -330,6 +597,23 @@ mod finalizer_tests {
         }
     }
 
+    struct Panicking;
+    impl SessionFinalizer for Panicking {
+        fn name(&self) -> &'static str { "panicking" }
+        fn finalize(&self, _ctx: &FinalizeContext) -> anyhow::Result<()> {
+            panic!("synthetic panic")
+        }
+    }
+
+    struct Slow(Duration);
+    impl SessionFinalizer for Slow {
+        fn name(&self) -> &'static str { "slow" }
+        fn finalize(&self, _ctx: &FinalizeContext) -> anyhow::Result<()> {
+            std::thread::sleep(self.0);
+            Ok(())
+        }
+    }
+
     fn ctx() -> FinalizeContext {
         FinalizeContext { session_id: 1 }
     }
@@ -363,6 +647,34 @@ mod finalizer_tests {
     fn empty_registry_reports_no_failures() {
         let hooks = HookRegistry::default();
         assert!(hooks.run_finalizers(&ctx()).failed.is_empty());
+    }
+
+    #[test]
+    fn a_panicking_finalizer_is_isolated_and_reported() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = HookRegistry::default();
+        hooks.add_finalizer(Arc::new(Panicking));
+        hooks.add_finalizer(Arc::new(Recording("after-panic", log.clone())));
+        let report = hooks.run_finalizers_with_timeout(&ctx(), Duration::from_secs(1));
+        assert_eq!(report.panicked, vec!["panicking"]);
+        assert_eq!(report.failed, vec!["panicking"]);
+        assert_eq!(report.completed, vec!["after-panic"]);
+        assert_eq!(*log.lock().unwrap(), vec!["after-panic"]);
+    }
+
+    #[test]
+    fn a_slow_finalizer_times_out_without_blocking_the_rest() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = HookRegistry::default();
+        hooks.add_finalizer(Arc::new(Slow(Duration::from_millis(150))));
+        hooks.add_finalizer(Arc::new(Recording("after-timeout", log.clone())));
+        let started = std::time::Instant::now();
+        let report = hooks.run_finalizers_with_timeout(&ctx(), Duration::from_millis(20));
+        assert!(started.elapsed() < Duration::from_millis(120));
+        assert_eq!(report.timed_out, vec!["slow"]);
+        assert_eq!(report.failed, vec!["slow"]);
+        assert_eq!(report.completed, vec!["after-timeout"]);
+        assert_eq!(*log.lock().unwrap(), vec!["after-timeout"]);
     }
 }
 

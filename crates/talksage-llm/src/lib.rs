@@ -5,6 +5,12 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
 
+/// 必须短于 pipeline 的 15s 插件 deadline，为结果处理和线程调度留出余量。
+const LLM_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const LLM_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const LLM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const LLM_OVERALL_TIMEOUT: Duration = Duration::from_secs(12);
+
 /// LLM Provider 抽象。
 pub trait LLMProvider: Send + Sync {
     /// 一次完整补全。
@@ -55,8 +61,14 @@ impl LLMProvider for OpenAICompatProvider {
             "temperature": 0.3,
         });
 
-        let mut req = ureq::post(&url)
-            .timeout(Duration::from_secs(15))
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(LLM_CONNECT_TIMEOUT)
+            .timeout_read(LLM_READ_TIMEOUT)
+            .timeout_write(LLM_WRITE_TIMEOUT)
+            .build();
+        let mut req = agent
+            .post(&url)
+            .timeout(LLM_OVERALL_TIMEOUT)
             .set("Content-Type", "application/json");
         if !self.api_key.is_empty() && self.api_key != "ollama" {
             req = req.set("Authorization", &format!("Bearer {}", self.api_key));

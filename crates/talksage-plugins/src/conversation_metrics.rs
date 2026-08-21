@@ -61,20 +61,22 @@ impl SegmentObserver for ConversationMetricsObserver {
     }
 
     /// 纯本地计算，没有慢路径工作。
-    fn run(&self, _seg: &TranscriptSegment, _ctx: &crate::PluginContext) -> Option<DomainEvent> {
-        None
+    fn run(&self, _seg: &TranscriptSegment, _ctx: &crate::PluginContext) -> anyhow::Result<Option<DomainEvent>> {
+        Ok(None)
     }
 }
 
 pub struct ConversationMetricsPlugin;
 
 impl Plugin for ConversationMetricsPlugin {
-    fn id(&self) -> &'static str {
-        "conversation_metrics"
-    }
-
-    fn label(&self) -> &'static str {
-        "会话指标"
+    fn descriptor(&self) -> &'static crate::PluginDescriptor {
+        static D: crate::PluginDescriptor = crate::PluginDescriptor {
+            id: "conversation_metrics", label: "会话指标",
+            description: "实时计算讲话比例、问题和会中提示",
+            category: crate::PluginCategory::Infrastructure, phase: crate::PluginPhase::Observer,
+            capabilities: &[], host_managed: &[], after: &[],
+        };
+        &D
     }
 
     fn default_config(&self) -> PluginConfig {

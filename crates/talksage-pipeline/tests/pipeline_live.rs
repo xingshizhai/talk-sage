@@ -322,8 +322,8 @@ impl talksage_plugins::SegmentObserver for CountingObserver {
         &self,
         _seg: &talksage_core::TranscriptSegment,
         _ctx: &talksage_plugins::PluginContext,
-    ) -> Option<DomainEvent> {
-        None
+    ) -> anyhow::Result<Option<DomainEvent>> {
+        Ok(None)
     }
 }
 
@@ -463,8 +463,8 @@ impl talksage_plugins::SegmentObserver for RecordingObserver {
         &self,
         _seg: &talksage_core::TranscriptSegment,
         _ctx: &talksage_plugins::PluginContext,
-    ) -> Option<DomainEvent> {
-        None
+    ) -> anyhow::Result<Option<DomainEvent>> {
+        Ok(None)
     }
 }
 

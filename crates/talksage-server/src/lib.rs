@@ -81,6 +81,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/health", get(health))
         .route("/config", get(get_config_api).post(save_config_api))
         .route("/plugins", get(list_plugins_api))
+        .route("/plugins/status", get(plugin_status_api))
         .route("/asr/models", get(asr_models_api))
         .route("/sessions", get(list_sessions_api))
         .route("/search", get(search_api))
@@ -183,6 +184,13 @@ async fn list_plugins_api(State(state): State<ServerState>, headers: axum::http:
     Json(talksage_plugins::plugin_metadata()).into_response()
 }
 
+async fn plugin_status_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    Json(state.service.plugin_registrations()).into_response()
+}
+
 async fn asr_models_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
@@ -207,6 +215,16 @@ async fn save_config_api(
 ) -> impl IntoResponse {
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    if let Some(plugins) = updates.get("plugins") {
+        let issues = talksage_plugins::validate_plugin_updates(plugins);
+        if !issues.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid plugin config", "issues": issues })),
+            )
+                .into_response();
+        }
     }
     match state
         .config

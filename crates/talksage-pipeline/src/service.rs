@@ -146,6 +146,40 @@ impl TalkSageService {
         }
     }
 
+    /// 无需启动音频/ASR 的插件状态预检，供设置页、REST 和 doctor 使用。
+    pub fn plugin_registrations(&self) -> Vec<talksage_plugins::PluginRegistration> {
+        let snapshot = self.config.snapshot();
+        let scene = snapshot.scene.effective();
+        let mut overrides = plugin_overrides_for(&snapshot.plugins, &scene);
+        let has_session_host = self.sessions.is_some();
+        merge_override(
+            &mut overrides,
+            "webhook",
+            serde_json::json!({ "enabled": has_session_host }),
+        );
+        let knowledge_base = if snapshot.knowledge_base.enabled
+            && !snapshot.knowledge_base.folder.is_empty()
+        {
+            let mut kb = talksage_knowledge::KnowledgeBase::new();
+            kb.index_folder(std::path::Path::new(&snapshot.knowledge_base.folder));
+            kb.chunk_count() > 0
+        } else {
+            false
+        };
+        let availability = talksage_plugins::CapabilityAvailability {
+            llm: Self::build_llm(&self.config).is_some(),
+            knowledge_base,
+            translation_policy: true,
+            quality_store: has_session_host,
+            webhook: has_session_host,
+        };
+        talksage_plugins::evaluate_plugin_registrations(
+            &talksage_plugins::builtin_plugins(),
+            &overrides,
+            availability,
+        )
+    }
+
     /// 启动恢复：处理上次异常退出留下的两类残留 —— 未完成录音与未结束会话。
     ///
     /// 适配器应在对外服务/开窗之前调用一次。
@@ -404,11 +438,25 @@ impl TalkSageService {
             "webhook",
             serde_json::json!({ "enabled": plugin_ctx.webhook.is_some() }),
         );
-        let hooks = talksage_plugins::build_registry(
+        let registry_build = talksage_plugins::build_registry_with_report(
             &talksage_plugins::builtin_plugins(),
             &plugin_overrides,
             &plugin_ctx,
         );
+        for registration in &registry_build.registrations {
+            if registration.status != talksage_plugins::RegistrationStatus::Active
+                && registration.status != talksage_plugins::RegistrationStatus::Disabled
+            {
+                log::warn!(
+                    "插件注册状态: id={} status={:?} missing={:?} issues={:?}",
+                    registration.id,
+                    registration.status,
+                    registration.missing_capabilities,
+                    registration.issues,
+                );
+            }
+        }
+        let hooks = registry_build.hooks;
 
         Ok(LivePipelineConfig {
             vad_model,
@@ -543,7 +591,15 @@ impl TalkSageService {
             .hooks
             .run_finalizers(&talksage_plugins::FinalizeContext { session_id: sid });
         if !report.failed.is_empty() {
-            log::warn!("会话 #{sid} 收尾有 {} 项失败: {:?}", report.failed.len(), report.failed);
+            log::warn!(
+                "会话 #{sid} 收尾有 {} 项失败: {:?}（timeout={:?}, panic={:?}）",
+                report.failed.len(),
+                report.failed,
+                report.timed_out,
+                report.panicked,
+            );
+        } else {
+            log::info!("会话 #{sid} finalizer 完成: {:?}", report.completed);
         }
         Ok(Some(sid))
     }
@@ -585,7 +641,7 @@ fn build_master_recording(sid: i64, stats: &[talksage_session::StreamMeta]) -> O
 /// 这里刻意不认识任何具体插件的配置结构：通用表原样透传，插件 id 只在
 /// 「宿主必须裁决」的三处出现（场景 VAD 参数、跨流去重、webhook 宿主可用性），
 /// 以及场景 allowlist 的循环里 —— 而那个循环遍历的是
-/// `ANALYSIS_PLUGIN_IDS`，不是写死的三个名字。
+/// descriptor 派生的分析插件列表，不是写死的三个名字。
 ///
 /// webhook 不在这里裁决：它要看 `PluginContext.webhook` 是否有宿主，
 /// 而那个 ctx 在调用点之后才构造。
@@ -610,7 +666,7 @@ fn plugin_overrides_for(
 
     // 场景 allowlist 最后裁决：分析类插件不在列表里就关掉。只有分析类受此
     // 约束 —— filter/finalizer 是基础设施，不该被场景关掉（见
-    // ANALYSIS_PLUGIN_IDS 的文档）。用 allowlist 而非 denylist：新增插件不会
+    // descriptor 分类）。用 allowlist 而非 denylist：新增插件不会
     // 因为某个场景忘了更新而在该场景意外开启。
     //
     // 注意这是**单向**的：allowlist 只能关，不能开。列表里有某个插件而用户在
@@ -619,7 +675,7 @@ fn plugin_overrides_for(
     //
     // 有的插件还有第三道门（简报检索要求「知识库有内容」）—— 那类判断在插件
     // 自己的 register() 里靠 PluginContext 做，宿主这里不重复。
-    for id in talksage_plugins::ANALYSIS_PLUGIN_IDS {
+    for id in talksage_plugins::analysis_plugin_ids() {
         if !scene.plugin_allowlist.iter().any(|a| a == id) {
             merge_override(&mut overrides, id, serde_json::json!({ "enabled": false }));
         }
@@ -851,7 +907,7 @@ mod tests {
         ] {
             let params = talksage_config::scene_params(mode);
             let o = plugin_overrides_for(&plugins, &talksage_config::scene_params(mode));
-            for id in talksage_plugins::ANALYSIS_PLUGIN_IDS {
+            for id in talksage_plugins::analysis_plugin_ids() {
                 if params.plugin_allowlist.iter().any(|allowed| allowed == id) {
                     assert_ne!(enabled_in(&o, id), Some(false), "{mode:?} 应允许 {id}");
                 } else {
@@ -880,8 +936,9 @@ mod tests {
     /// 取 id 而不写死名字：本文件不该认识任何具体插件，测试也一样。
     #[test]
     fn user_entries_pass_through_and_allowlist_only_turns_off() {
-        let on = talksage_plugins::ANALYSIS_PLUGIN_IDS[0];
-        let off = talksage_plugins::ANALYSIS_PLUGIN_IDS[1];
+        let analysis = talksage_plugins::analysis_plugin_ids();
+        let on = analysis[0];
+        let off = analysis[1];
         let mut plugins = talksage_config::PluginsConfig::default();
         plugins.merge_entry(on, &serde_json::json!({ "enabled": true, "knob": 99.0 }));
         plugins.merge_entry(off, &serde_json::json!({ "enabled": false }));
@@ -917,30 +974,30 @@ mod tests {
         assert_eq!(o["short_segment"]["min_ms"], serde_json::json!(300));
     }
 
-    /// `HOST_MANAGED_KEYS` 是设置页「这个控件置灰」的依据，必须与本文件
+    /// descriptor 的 host_managed 是设置页「这个控件置灰」的依据，必须与本文件
     /// `plugin_overrides_for` 的实际行为一致：声明为宿主裁决的键，用户写什么
     /// 都得被压掉。漂移的表现是设置页上出现一个能改却不生效的输入框。
     #[test]
     fn declared_host_managed_keys_really_override_user_config() {
-        for (id, key) in talksage_plugins::HOST_MANAGED_KEYS {
+        for (id, key) in talksage_plugins::host_managed_keys() {
             let mut plugins = talksage_config::PluginsConfig::default();
             // 用一个不可能与宿主值相同的哨兵：压过了就看不到它
             plugins.merge_entry(id, &serde_json::json!({ *key: "SENTINEL" }));
             let o = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Meeting));
             assert_ne!(
-                o[*id][*key],
+                o[id][key],
                 serde_json::json!("SENTINEL"),
                 "{id}.{key} 声明为宿主裁决，却没被 plugin_overrides_for 覆盖"
             );
         }
     }
 
-    /// 配置层的 allowlist 与插件层的 ANALYSIS_PLUGIN_IDS 各存一份
+    /// 配置层的 allowlist 与插件 descriptor 派生 id 各存一份
     /// （talksage-config 刻意不依赖 talksage-plugins）。这里锁住两者不漂移。
     #[test]
     fn meeting_allowlist_matches_the_plugin_layers_analysis_ids() {
         let allow = talksage_config::scene_params(SceneMode::Meeting).plugin_allowlist;
-        let ids: Vec<String> = talksage_plugins::ANALYSIS_PLUGIN_IDS
+        let ids: Vec<String> = talksage_plugins::analysis_plugin_ids()
             .iter()
             .map(|s| s.to_string())
             .collect();

@@ -49,12 +49,14 @@ impl SessionFinalizer for WebhookFinalizer {
 pub struct WebhookPlugin;
 
 impl Plugin for WebhookPlugin {
-    fn id(&self) -> &'static str {
-        "webhook"
-    }
-
-    fn label(&self) -> &'static str {
-        "会议结束推送"
+    fn descriptor(&self) -> &'static crate::PluginDescriptor {
+        static D: crate::PluginDescriptor = crate::PluginDescriptor {
+            id: "webhook", label: "会议结束推送",
+            description: "会话完成后向已配置的外部端点推送结果",
+            category: crate::PluginCategory::Infrastructure, phase: crate::PluginPhase::Finalizer,
+            capabilities: &[crate::PluginCapability::Webhook], host_managed: &[], after: &["session_quality"],
+        };
+        &D
     }
 
     fn default_config(&self) -> PluginConfig {

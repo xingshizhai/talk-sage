@@ -126,7 +126,7 @@ pub struct SceneParams {
     /// 用 allowlist 而非 denylist —— 新增插件不会因为某个场景忘了更新而意外开启。
     /// 只约束**分析类**插件（术语/翻译/简报这类「会议辅助功能」）；短段抑制、
     /// 跨流去重、质量评估是基础设施，不受此列表影响（见
-    /// `talksage_plugins::ANALYSIS_PLUGIN_IDS`）。
+    /// `talksage_plugins` 的 analysis descriptor）。
     pub plugin_allowlist: Vec<String>,
     /// 多人说话人区分（wespeaker 在线聚类）。主人声纹是可选增强：存在时把
     /// 匹配身份标为“我”，不存在时仍可区分“讲话者/客户 1/客户 2”。
@@ -143,7 +143,7 @@ impl Default for SceneParams {
 
 /// 分析类插件全开的 allowlist（双语 / 会议 / 自定义共用）。
 ///
-/// 这里的 id 必须与 `talksage_plugins::ANALYSIS_PLUGIN_IDS` 对齐 —— 配置层
+/// 这里的 id 必须与 `talksage_plugins` 的 analysis descriptor 对齐 —— 配置层
 /// 刻意不依赖插件层（依赖方向是「pipeline 实现、plugins 定义」），所以两处
 /// 各存一份；一致性由 talksage-pipeline 的 `scene_allowlist` 测试锁住。
 fn all_analysis_plugins() -> Vec<String> {

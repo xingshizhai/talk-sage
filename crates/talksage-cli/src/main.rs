@@ -971,7 +971,7 @@ fn print_plugin_status(c: &talksage_config::Config) {
         if let Some(user) = c.plugins.entries.get(id) {
             cfg.merge(user);
         }
-        let gated = talksage_plugins::ANALYSIS_PLUGIN_IDS.contains(&id)
+        let gated = talksage_plugins::analysis_plugin_ids().contains(&id)
             && !scene.plugin_allowlist.iter().any(|a| a == id);
         let note = if gated {
             "（本场景不允许）"
@@ -980,7 +980,19 @@ fn print_plugin_status(c: &talksage_config::Config) {
         } else {
             ""
         };
-        println!("  {id:<21}enabled={}{note}", cfg.enabled() && !gated);
+        let capabilities = p
+            .descriptor()
+            .capabilities
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let requires = if capabilities.is_empty() {
+            String::new()
+        } else {
+            format!(" requires=[{capabilities}]")
+        };
+        println!("  {id:<21}enabled={}{note}{requires}", cfg.enabled() && !gated);
     }
 }
 

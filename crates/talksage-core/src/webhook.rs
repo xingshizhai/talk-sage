@@ -81,7 +81,12 @@ fn is_private_ip(ip: &IpAddr) -> bool {
 
 /// POST JSON payload 到 webhook（不校验 URL；超时 10s；显式禁用环境代理，走直连）。
 pub fn post_webhook(url: &str, payload: &serde_json::Value) -> Result<(), String> {
-    let agent: ureq::Agent = ureq::AgentBuilder::new().try_proxy_from_env(false).build();
+    let agent: ureq::Agent = ureq::AgentBuilder::new()
+        .try_proxy_from_env(false)
+        .timeout_connect(Duration::from_secs(3))
+        .timeout_read(Duration::from_secs(8))
+        .timeout_write(Duration::from_secs(5))
+        .build();
     let resp = agent
         .post(url)
         .timeout(Duration::from_secs(10))

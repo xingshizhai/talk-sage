@@ -6,6 +6,7 @@ import {
   fieldKind,
   initialPluginValues,
   pluginFields,
+  pluginStatusLabel,
 } from "./plugins";
 
 /** 三个插件覆盖三种控件类型 + 一个渲染不了的键。 */
@@ -33,6 +34,18 @@ const METAS: PluginMeta[] = [
     host_managed: [],
   },
 ];
+
+describe("pluginStatusLabel", () => {
+  it("把注册状态转换成可展示的诊断文字", () => {
+    expect(pluginStatusLabel(undefined)).toBe("状态未知");
+    expect(pluginStatusLabel({ id: "x", label: "X", status: "active" })).toBe("可用");
+    expect(pluginStatusLabel({ id: "x", label: "X", status: "disabled" })).toBe("已关闭");
+    expect(pluginStatusLabel({ id: "x", label: "X", status: "unavailable", missing_capabilities: ["llm", "knowledge_base"] }))
+      .toBe("不可用：缺少 llm、knowledge_base");
+    expect(pluginStatusLabel({ id: "x", label: "X", status: "invalid_config", issues: [{ path: "x.enabled", message: "bad" }] }))
+      .toBe("配置错误：x.enabled");
+  });
+});
 
 describe("fieldKind", () => {
   it("按默认值的 JSON 类型判定控件", () => {

@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -33,6 +33,49 @@ struct Shared {
     capacity: usize,
     active: AtomicBool,
     cancel: Arc<AtomicBool>,
+    stats: PluginExecutorStats,
+}
+
+#[derive(Default)]
+struct PluginExecutorStats {
+    submitted: AtomicU64,
+    dropped: AtomicU64,
+    succeeded: AtomicU64,
+    no_result: AtomicU64,
+    failed: AtomicU64,
+    timed_out: AtomicU64,
+    panicked: AtomicU64,
+    canceled: AtomicU64,
+    elapsed_micros: AtomicU64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PluginExecutorSnapshot {
+    submitted: u64,
+    dropped: u64,
+    succeeded: u64,
+    no_result: u64,
+    failed: u64,
+    timed_out: u64,
+    panicked: u64,
+    canceled: u64,
+    elapsed_micros: u64,
+}
+
+impl PluginExecutorStats {
+    fn snapshot(&self) -> PluginExecutorSnapshot {
+        PluginExecutorSnapshot {
+            submitted: self.submitted.load(Ordering::Relaxed),
+            dropped: self.dropped.load(Ordering::Relaxed),
+            succeeded: self.succeeded.load(Ordering::Relaxed),
+            no_result: self.no_result.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+            timed_out: self.timed_out.load(Ordering::Relaxed),
+            panicked: self.panicked.load(Ordering::Relaxed),
+            canceled: self.canceled.load(Ordering::Relaxed),
+            elapsed_micros: self.elapsed_micros.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// 可克隆的提交端。`submit` 只持有一次很短的内存锁，不执行插件代码。
@@ -51,10 +94,12 @@ impl PluginExecutorHandle {
         segment: TranscriptSegment,
     ) -> bool {
         let Ok(mut state) = self.shared.state.lock() else {
+            self.shared.stats.dropped.fetch_add(1, Ordering::Relaxed);
             log::warn!("插件执行器队列锁已损坏，丢弃插件任务");
             return false;
         };
         if !state.accepting || state.jobs.len() >= self.shared.capacity {
+            self.shared.stats.dropped.fetch_add(1, Ordering::Relaxed);
             log::warn!(
                 "插件[{}] 队列已满或会话已停止，丢弃慢任务（capacity={}）",
                 plugin.name(),
@@ -68,6 +113,7 @@ impl PluginExecutorHandle {
             emit,
             segment,
         });
+        self.shared.stats.submitted.fetch_add(1, Ordering::Relaxed);
         self.shared.ready.notify_one();
         true
     }
@@ -89,6 +135,7 @@ impl PluginExecutor {
             capacity: capacity.max(1),
             active: AtomicBool::new(true),
             cancel,
+            stats: PluginExecutorStats::default(),
         });
         let mut workers = Vec::with_capacity(worker_count.max(1));
         for index in 0..worker_count.max(1) {
@@ -108,6 +155,10 @@ impl PluginExecutor {
         PluginExecutorHandle {
             shared: self.shared.clone(),
         }
+    }
+
+    fn stats(&self) -> PluginExecutorSnapshot {
+        self.shared.stats.snapshot()
     }
 
     /// 停止接收。正常完成时允许队列在限定时间内 drain；取消时立即清队列。
@@ -133,6 +184,29 @@ impl PluginExecutor {
         if !all_joined || !graceful {
             self.shared.active.store(false, Ordering::Release);
         }
+        let stats = self.stats();
+        let finished = stats.succeeded
+            + stats.no_result
+            + stats.failed
+            + stats.timed_out
+            + stats.panicked
+            + stats.canceled;
+        let avg_ms = if finished == 0 {
+            0.0
+        } else {
+            stats.elapsed_micros as f64 / finished as f64 / 1000.0
+        };
+        log::info!(
+            "插件执行器统计: submitted={} dropped={} succeeded={} no_result={} failed={} timeout={} panic={} canceled={} avg_ms={avg_ms:.1}",
+            stats.submitted,
+            stats.dropped,
+            stats.succeeded,
+            stats.no_result,
+            stats.failed,
+            stats.timed_out,
+            stats.panicked,
+            stats.canceled,
+        );
     }
 }
 
@@ -168,21 +242,38 @@ fn worker_loop(shared: Arc<Shared>) {
         let started = Instant::now();
         let result = catch_unwind(AssertUnwindSafe(|| job.plugin.run(&job.segment, &job.ctx)));
         let elapsed = started.elapsed();
+        shared
+            .stats
+            .elapsed_micros
+            .fetch_add(elapsed.as_micros().min(u64::MAX as u128) as u64, Ordering::Relaxed);
         if shared.cancel.load(Ordering::Relaxed) || !shared.active.load(Ordering::Acquire) {
+            shared.stats.canceled.fetch_add(1, Ordering::Relaxed);
             log::info!("插件[{name}] 会话已停止，丢弃结果");
             continue;
         }
         if elapsed > PLUGIN_RUN_TIMEOUT {
+            shared.stats.timed_out.fetch_add(1, Ordering::Relaxed);
             log::warn!("插件[{name}] 超时 {elapsed:?}，丢弃结果");
             continue;
         }
         match result {
-            Ok(Some(event)) => {
+            Ok(Ok(Some(event))) => {
+                shared.stats.succeeded.fetch_add(1, Ordering::Relaxed);
                 log::info!("插件[{name}] 完成: 耗时={elapsed:?} 有结果=true");
                 (job.emit)(event);
             }
-            Ok(None) => log::info!("插件[{name}] 完成: 耗时={elapsed:?} 有结果=false"),
-            Err(_) => log::warn!("插件[{name}] 执行 panic，任务已隔离"),
+            Ok(Ok(None)) => {
+                shared.stats.no_result.fetch_add(1, Ordering::Relaxed);
+                log::info!("插件[{name}] 完成: 耗时={elapsed:?} 有结果=false");
+            }
+            Ok(Err(err)) => {
+                shared.stats.failed.fetch_add(1, Ordering::Relaxed);
+                log::warn!("插件[{name}] 执行失败: 耗时={elapsed:?} 错误={err:#}");
+            }
+            Err(_) => {
+                shared.stats.panicked.fetch_add(1, Ordering::Relaxed);
+                log::warn!("插件[{name}] 执行 panic，任务已隔离");
+            }
         }
     }
 }
@@ -211,14 +302,14 @@ mod tests {
             Vec::new()
         }
 
-        fn run(&self, _seg: &TranscriptSegment, _ctx: &PluginContext) -> Option<DomainEvent> {
+        fn run(&self, _seg: &TranscriptSegment, _ctx: &PluginContext) -> anyhow::Result<Option<DomainEvent>> {
             let _ = self.started.send(());
             let (lock, ready) = &*self.release;
             let mut released = lock.lock().unwrap();
             while !*released {
                 released = ready.wait(released).unwrap();
             }
-            None
+            Ok(None)
         }
     }
 
@@ -267,5 +358,38 @@ mod tests {
         *lock.lock().unwrap() = true;
         ready.notify_all();
         executor.shutdown(true, Duration::from_secs(1));
+        let stats = executor.stats();
+        assert_eq!(stats.submitted, 2);
+        assert_eq!(stats.dropped, 1);
+        assert_eq!(stats.no_result, 2);
+    }
+
+    struct FailingObserver;
+
+    impl SegmentObserver for FailingObserver {
+        fn name(&self) -> &'static str { "failing" }
+        fn should_trigger(&self, _seg: &TranscriptSegment) -> bool { true }
+        fn skeleton(&self, _seg: &TranscriptSegment) -> Vec<DomainEvent> { Vec::new() }
+        fn run(&self, _seg: &TranscriptSegment, _ctx: &PluginContext) -> anyhow::Result<Option<DomainEvent>> {
+            anyhow::bail!("synthetic failure")
+        }
+    }
+
+    #[test]
+    fn observer_errors_are_counted_without_stopping_workers() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut executor = PluginExecutor::new(1, 4, cancel);
+        let handle = executor.handle();
+        let emit: EventSink = Arc::new(|_| {});
+        assert!(handle.submit(
+            Arc::new(FailingObserver),
+            PluginContext::default(),
+            emit,
+            segment("失败")
+        ));
+        executor.shutdown(true, Duration::from_secs(1));
+        let stats = executor.stats();
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.submitted, 1);
     }
 }

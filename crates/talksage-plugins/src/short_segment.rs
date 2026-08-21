@@ -41,12 +41,14 @@ impl EventFilter for ShortSegmentFilter {
 pub struct ShortSegmentPlugin;
 
 impl Plugin for ShortSegmentPlugin {
-    fn id(&self) -> &'static str {
-        "short_segment"
-    }
-
-    fn label(&self) -> &'static str {
-        "短段抑制"
+    fn descriptor(&self) -> &'static crate::PluginDescriptor {
+        static D: crate::PluginDescriptor = crate::PluginDescriptor {
+            id: "short_segment", label: "短段抑制",
+            description: "丢弃短于场景阈值的 final 转写段",
+            category: crate::PluginCategory::Infrastructure, phase: crate::PluginPhase::Filter,
+            capabilities: &[], host_managed: &["min_ms"], after: &[],
+        };
+        &D
     }
 
     fn default_config(&self) -> PluginConfig {

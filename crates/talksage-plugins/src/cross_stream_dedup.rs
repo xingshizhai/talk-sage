@@ -61,12 +61,14 @@ impl EventFilter for CrossStreamDedupFilter {
 pub struct CrossStreamDedupPlugin;
 
 impl Plugin for CrossStreamDedupPlugin {
-    fn id(&self) -> &'static str {
-        "cross_stream_dedup"
-    }
-
-    fn label(&self) -> &'static str {
-        "双流去重"
+    fn descriptor(&self) -> &'static crate::PluginDescriptor {
+        static D: crate::PluginDescriptor = crate::PluginDescriptor {
+            id: "cross_stream_dedup", label: "双流去重",
+            description: "消除麦克风与系统回环中的重复转写",
+            category: crate::PluginCategory::Infrastructure, phase: crate::PluginPhase::Filter,
+            capabilities: &[], host_managed: &["enabled"], after: &["short_segment"],
+        };
+        &D
     }
 
     fn default_config(&self) -> PluginConfig {

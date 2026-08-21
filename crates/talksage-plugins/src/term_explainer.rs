@@ -116,25 +116,25 @@ impl SegmentObserver for TermExplainerPlugin {
         }]
     }
 
-    fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> Option<DomainEvent> {
+    fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> anyhow::Result<Option<DomainEvent>> {
         let acronyms = find_acronyms(&seg.text);
         if acronyms.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let llm = ctx.llm.as_ref()?;
+        let Some(llm) = ctx.llm.as_ref() else { return Ok(None) };
         let prompt = format!("客户说：\"{}\"\n\n请解释其中出现的术语/缩写：{}", seg.text, acronyms.join(", "));
-        let content = llm.complete(&prompt, SYSTEM_PROMPT).ok()?;
+        let content = llm.complete(&prompt, SYSTEM_PROMPT)?;
         if content.trim().is_empty() {
-            return None;
+            return Ok(None);
         }
         self.reserve(&acronyms);
         // 复用骨架 result_id，前端按 id 原地更新
         let result_id = self.pending_result_id.lock().unwrap().take().unwrap_or_else(|| format!("term-{}", now() as u64));
-        Some(DomainEvent::Term {
+        Ok(Some(DomainEvent::Term {
             result_id,
             status: ResultStatus::Final,
             content: content.trim().to_string(),
-        })
+        }))
     }
 }
 
@@ -143,12 +143,14 @@ impl SegmentObserver for TermExplainerPlugin {
 pub struct TermExplainerPluginDef;
 
 impl crate::registry::Plugin for TermExplainerPluginDef {
-    fn id(&self) -> &'static str {
-        "term_explainer"
-    }
-
-    fn label(&self) -> &'static str {
-        "术语解释"
+    fn descriptor(&self) -> &'static crate::PluginDescriptor {
+        static D: crate::PluginDescriptor = crate::PluginDescriptor {
+            id: "term_explainer", label: "术语解释",
+            description: "使用 LLM 解释会话中的专业术语和缩写",
+            category: crate::PluginCategory::Analysis, phase: crate::PluginPhase::Observer,
+            capabilities: &[crate::PluginCapability::Llm], host_managed: &[], after: &[],
+        };
+        &D
     }
 
     fn default_config(&self) -> crate::registry::PluginConfig {
@@ -246,7 +248,7 @@ mod tests {
             ..PluginContext::new()
         };
         let p = TermExplainerPlugin::new(0.0);
-        match p.run(&seg(1, "NPI status?"), &ctx) {
+        match p.run(&seg(1, "NPI status?"), &ctx).unwrap() {
             Some(DomainEvent::Term { status: ResultStatus::Final, content, .. }) => {
                 assert!(content.contains("NPI"));
             }

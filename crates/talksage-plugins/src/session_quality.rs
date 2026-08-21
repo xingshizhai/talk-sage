@@ -46,12 +46,14 @@ impl SessionFinalizer for SessionQualityFinalizer {
 pub struct SessionQualityPlugin;
 
 impl Plugin for SessionQualityPlugin {
-    fn id(&self) -> &'static str {
-        "session_quality"
-    }
-
-    fn label(&self) -> &'static str {
-        "会话质量评估"
+    fn descriptor(&self) -> &'static crate::PluginDescriptor {
+        static D: crate::PluginDescriptor = crate::PluginDescriptor {
+            id: "session_quality", label: "会话质量评估",
+            description: "会后评估录音与转写质量并写入会话元数据",
+            category: crate::PluginCategory::Infrastructure, phase: crate::PluginPhase::Finalizer,
+            capabilities: &[crate::PluginCapability::QualityStore], host_managed: &[], after: &[],
+        };
+        &D
     }
 
     fn default_config(&self) -> PluginConfig {

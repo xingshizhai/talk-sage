@@ -71,6 +71,11 @@ fn list_plugins() -> Vec<serde_json::Value> {
     talksage_plugins::plugin_metadata()
 }
 
+#[tauri::command]
+fn list_plugin_status(state: tauri::State<'_, AppState>) -> Vec<talksage_plugins::PluginRegistration> {
+    state.service.plugin_registrations()
+}
+
 /// 把配置解析后的真实录音目录加入 asset 协议只读范围。
 /// 开发脚本会把数据放在仓库 `.tools/data`，它不属于 Tauri `$DATA_DIR`。
 fn allow_recording_assets(app: &tauri::AppHandle, config: &ConfigManager) -> Result<(), String> {
@@ -111,6 +116,13 @@ fn save_config(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    if let Some(plugins) = updates.get("plugins") {
+        let issues = talksage_plugins::validate_plugin_updates(plugins);
+        if !issues.is_empty() {
+            let details = issues.iter().map(ToString::to_string).collect::<Vec<_>>().join("；");
+            return Err(format!("插件配置无效：{details}"));
+        }
+    }
     state
         .config
         .update(|c| {
@@ -579,6 +591,7 @@ pub fn run() {
             get_version,
             get_config,
             list_plugins,
+            list_plugin_status,
             list_asr_models,
             save_config,
             ping,

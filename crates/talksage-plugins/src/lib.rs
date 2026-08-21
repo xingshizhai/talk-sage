@@ -16,12 +16,16 @@ pub mod session_quality;
 pub mod webhook;
 
 pub use builtin::{
-    build_registry, builtin_plugins, effective_plugin_configs, plugin_metadata,
-    ANALYSIS_PLUGIN_IDS, HOST_MANAGED_KEYS,
+    analysis_plugin_ids, build_registry, build_registry_with_report, builtin_plugins,
+    effective_plugin_configs, evaluate_plugin_registrations, host_managed_keys,
+    plugin_metadata, validate_plugin_updates, RegistryBuild,
 };
 
 pub use registry::{
     EventFilter, FinalizeContext, FinalizeReport, HookRegistry, Plugin, PluginConfig,
+    CapabilityAvailability, PluginCapability, PluginCategory, PluginConfigIssue,
+    PluginDescriptor, PluginPhase, PluginRegistration, RegistrationStatus,
+    DEFAULT_FINALIZER_TIMEOUT,
     SegmentObserver, SessionFinalizer,
 };
 pub use session_quality::QualityDeps;
@@ -70,6 +74,20 @@ pub struct PluginContext {
 impl PluginContext {
     pub fn new() -> Self {
         Self { kb: None, llm: None, quality: None, webhook: None, translation: None }
+    }
+
+    pub fn has_capability(&self, capability: PluginCapability) -> bool {
+        self.capability_availability().has(capability)
+    }
+
+    pub fn capability_availability(&self) -> CapabilityAvailability {
+        CapabilityAvailability {
+            llm: self.llm.is_some(),
+            knowledge_base: self.kb.is_some(),
+            translation_policy: self.translation.is_some(),
+            quality_store: self.quality.is_some(),
+            webhook: self.webhook.is_some(),
+        }
     }
 }
 

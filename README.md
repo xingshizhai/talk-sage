@@ -193,6 +193,7 @@ Real-model integration tests cover Chinese/English ASR, dual-stream fairness and
 ## Documentation
 
 - [architecture-v2.md](docs/architecture-v2.md) — current architecture: shared service, bounded workers, plugins, persistence, and sample clock
+- [plugin-development.md](docs/plugin-development.md) — plugin lifecycle, implementation guide, testing checklist, and mechanism assessment
 - [BUILDING.md](docs/BUILDING.md) — build & packaging guide
 - [RECORDING.md](docs/RECORDING.md) — recording / trim / regression loop
 - [LOGGING.md](docs/LOGGING.md) — structured logging & debugging

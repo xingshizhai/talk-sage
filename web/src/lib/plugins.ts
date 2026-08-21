@@ -4,7 +4,17 @@
 // 都来自 Rust 侧 `plugin_metadata()`。本文件只做数据变换，不碰 React ——
 // 前端测试只覆盖 lib 层纯函数，把逻辑放在这里才测得到（组件渲染不测）。
 
-import type { PluginMeta } from "./api";
+import type { PluginMeta, PluginStatusInfo } from "./api";
+
+export function pluginStatusLabel(registration: PluginStatusInfo | undefined): string {
+  if (!registration) return "状态未知";
+  if (registration.status === "active") return "可用";
+  if (registration.status === "disabled") return "已关闭";
+  if (registration.status === "unavailable") {
+    return `不可用：缺少 ${(registration.missing_capabilities ?? []).join("、")}`;
+  }
+  return `配置错误：${(registration.issues ?? []).map((item) => item.path).join("、")}`;
+}
 
 /** 一个可编辑字段。`kind` 决定设置页渲染什么控件。 */
 export interface PluginField {
@@ -108,7 +118,7 @@ export function buildPluginUpdates(metas: PluginMeta[], values: PluginValues): P
 }
 
 /**
- * 受场景 allowlist 约束的插件 id（Rust 侧 `ANALYSIS_PLUGIN_IDS` 的投影）。
+ * 受场景 allowlist 约束的插件 id（Rust 侧 descriptor category 的投影）。
  * 场景自定义面板据此渲染勾选框，前端因此不必自己维护一份 id 列表。
  */
 export function analysisPluginIds(metas: PluginMeta[]): string[] {
