@@ -97,6 +97,31 @@ pub trait SegmentObserver: Send + Sync {
     fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> Option<DomainEvent>;
 }
 
+/// finalizer 的输入。会话已停、已落库，此处只读。
+///
+/// 刻意保持极简：finalizer 需要的持久数据都能用 `session_id` 从 SessionStore
+/// 查到，把整个 store 塞进 context 会让插件能改库，破坏「会后只读」的约束。
+pub struct FinalizeContext<'a> {
+    pub session_id: i64,
+    /// 由 `session_quality` 写入，供后续 finalizer 读取（如 webhook 载荷）。
+    /// 因此 `session_quality` 必须排在链首。
+    pub quality: Option<&'a str>,
+}
+
+/// 会后钩子：`stop → flush → 落库` 之后执行，不占实时路径。
+pub trait SessionFinalizer: Send + Sync {
+    fn name(&self) -> &'static str;
+    /// 返回 Err 只记录并继续下一个 —— 逐个独立，互不阻塞。
+    fn finalize(&self, ctx: &FinalizeContext) -> anyhow::Result<()>;
+}
+
+/// `run_finalizers` 的结果汇总。
+#[derive(Debug, Default)]
+pub struct FinalizeReport {
+    /// 执行失败的 finalizer 名字。
+    pub failed: Vec<&'static str>,
+}
+
 /// 插件：拥有身份与默认配置，在 register() 里把自己挂进钩子。
 /// 插件不拥有注册表，只能注册进去（对应 Cordis 的 seam 模型）。
 pub trait Plugin: Send + Sync {
@@ -110,6 +135,7 @@ pub trait Plugin: Send + Sync {
 pub struct HookRegistry {
     filters: Vec<Arc<dyn EventFilter>>,
     observers: Vec<Arc<dyn SegmentObserver>>,
+    finalizers: Vec<Arc<dyn SessionFinalizer>>,
 }
 
 impl HookRegistry {
@@ -121,6 +147,10 @@ impl HookRegistry {
         self.observers.push(o);
     }
 
+    pub fn add_finalizer(&mut self, f: Arc<dyn SessionFinalizer>) {
+        self.finalizers.push(f);
+    }
+
     pub fn observers(&self) -> &[Arc<dyn SegmentObserver>] {
         &self.observers
     }
@@ -129,9 +159,25 @@ impl HookRegistry {
         self.filters.len()
     }
 
+    pub fn finalizer_count(&self) -> usize {
+        self.finalizers.len()
+    }
+
     /// 依次施加 filter；任一返回 None 即吞掉并中断链条。
     pub fn apply_filters(&self, ev: DomainEvent) -> Option<DomainEvent> {
         self.filters.iter().try_fold(ev, |e, f| f.filter(e))
+    }
+
+    /// 依次执行，逐个独立：任一失败只记录并继续，不中断链条。
+    pub fn run_finalizers(&self, ctx: &FinalizeContext) -> FinalizeReport {
+        let mut report = FinalizeReport::default();
+        for f in &self.finalizers {
+            if let Err(e) = f.finalize(ctx) {
+                log::warn!("finalizer[{}] 失败: {e}", f.name());
+                report.failed.push(f.name());
+            }
+        }
+        report
     }
 }
 
@@ -242,6 +288,66 @@ mod config_tests {
     fn enabled_defaults_to_true_and_can_be_switched_off() {
         assert!(PluginConfig::from_value(json!({})).enabled());
         assert!(!PluginConfig::from_value(json!({"enabled": false})).enabled());
+    }
+}
+
+#[cfg(test)]
+mod finalizer_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    struct Recording(&'static str, Arc<Mutex<Vec<&'static str>>>);
+    impl SessionFinalizer for Recording {
+        fn name(&self) -> &'static str { self.0 }
+        fn finalize(&self, _ctx: &FinalizeContext) -> anyhow::Result<()> {
+            self.1.lock().unwrap().push(self.0);
+            Ok(())
+        }
+    }
+
+    struct Failing(Arc<AtomicUsize>);
+    impl SessionFinalizer for Failing {
+        fn name(&self) -> &'static str { "failing" }
+        fn finalize(&self, _ctx: &FinalizeContext) -> anyhow::Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            anyhow::bail!("故意失败")
+        }
+    }
+
+    fn ctx() -> FinalizeContext<'static> {
+        FinalizeContext { session_id: 1, quality: None }
+    }
+
+    #[test]
+    fn finalizers_run_in_registration_order() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = HookRegistry::default();
+        hooks.add_finalizer(Arc::new(Recording("first", log.clone())));
+        hooks.add_finalizer(Arc::new(Recording("second", log.clone())));
+        hooks.run_finalizers(&ctx());
+        assert_eq!(*log.lock().unwrap(), vec!["first", "second"]);
+    }
+
+    /// 关键契约：一个 finalizer 失败不得阻塞后续的。
+    /// webhook 打不通，不能因此丢掉质量评估的写库。
+    #[test]
+    fn a_failing_finalizer_does_not_block_the_rest() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut hooks = HookRegistry::default();
+        hooks.add_finalizer(Arc::new(Failing(calls.clone())));
+        hooks.add_finalizer(Arc::new(Recording("after", log.clone())));
+        let report = hooks.run_finalizers(&ctx());
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "失败的那个应被调用过");
+        assert_eq!(*log.lock().unwrap(), vec!["after"], "后续 finalizer 必须照常执行");
+        assert_eq!(report.failed, vec!["failing"], "失败项应汇总上报");
+    }
+
+    #[test]
+    fn empty_registry_reports_no_failures() {
+        let hooks = HookRegistry::default();
+        assert!(hooks.run_finalizers(&ctx()).failed.is_empty());
     }
 }
 
