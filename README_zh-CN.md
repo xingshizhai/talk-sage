@@ -198,6 +198,7 @@ cd web && npx vitest run       # 前端 27 用例
 - [comparison/whisper-flow.md](docs/comparison/whisper-flow.md) — 对比分析：Whisper Flow（流式协议/分段启发式/质量门禁）
 - [comparison/meetily.md](docs/comparison/meetily.md) — 对比分析：Meetily（VAD 调参/事件负载/崩溃恢复/设备阶梯）
 - [comparison/vibevoice.md](docs/comparison/vibevoice.md) — 对比分析：VibeVoice（上下文注入/JSON 容错/流式缓存）
+- [comparison/noscribe.md](docs/comparison/noscribe.md) — 对比分析：noScribe（增量持久化/说话人对齐/子进程协议/加权进度）
 
 ## 仓库结构
 

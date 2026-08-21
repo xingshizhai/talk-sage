@@ -193,6 +193,7 @@ Real-model integration tests cover: Chinese/English ASR recognition, dual-stream
 - [comparison/whisper-flow.md](docs/comparison/whisper-flow.md) — comparison: Whisper Flow (streaming protocol / segmentation heuristic / quality gates)
 - [comparison/meetily.md](docs/comparison/meetily.md) — comparison: Meetily (VAD tuning / event payload / crash recovery / device fallbacks)
 - [comparison/vibevoice.md](docs/comparison/vibevoice.md) — comparison: VibeVoice (context injection / JSON fault tolerance / streaming cache)
+- [comparison/noscribe.md](docs/comparison/noscribe.md) — comparison: noScribe (incremental persistence / speaker alignment / worker protocol / weighted progress)
 
 ## Repository layout
 
