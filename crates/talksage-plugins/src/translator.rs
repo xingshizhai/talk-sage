@@ -68,6 +68,34 @@ impl SegmentObserver for TranslatorPlugin {
     }
 }
 
+/// 注册表条目。
+pub struct TranslatorPluginDef;
+
+impl crate::registry::Plugin for TranslatorPluginDef {
+    fn id(&self) -> &'static str {
+        "translator"
+    }
+
+    fn default_config(&self) -> crate::registry::PluginConfig {
+        // `cooldown_seconds` 保留只为不让用户已有的 [plugins.translator] 配置
+        // 突然消失 —— `TranslatorPlugin::new()` 不接受参数，这个值迁移前就
+        // 没被读过。register() 刻意不读它：读了就是行为变更（翻译触发频率）。
+        crate::registry::PluginConfig::from_value(serde_json::json!({
+            "enabled": true,
+            "cooldown_seconds": 3.0,
+        }))
+    }
+
+    fn register(
+        &self,
+        _cfg: &crate::registry::PluginConfig,
+        _ctx: &PluginContext,
+        hooks: &mut crate::registry::HookRegistry,
+    ) {
+        hooks.add_observer(std::sync::Arc::new(TranslatorPlugin::new()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

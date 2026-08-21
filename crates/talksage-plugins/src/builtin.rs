@@ -4,9 +4,12 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+use crate::brief_retriever::BriefRetrieverPluginDef;
 use crate::conversation_metrics::ConversationMetricsPlugin;
 use crate::cross_stream_dedup::CrossStreamDedupPlugin;
 use crate::registry::{HookRegistry, Plugin};
+use crate::term_explainer::TermExplainerPluginDef;
+use crate::translator::TranslatorPluginDef;
 use crate::session_quality::SessionQualityPlugin;
 use crate::short_segment::ShortSegmentPlugin;
 use crate::webhook::WebhookPlugin;
@@ -23,6 +26,10 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
         Box::new(CrossStreamDedupPlugin),
         // observer：彼此无顺序依赖，排在 filter 之后仅为便于阅读
         Box::new(ConversationMetricsPlugin),
+        // 分析类 observer：阶段 5 之前由 service.rs 手工装配
+        Box::new(TermExplainerPluginDef),
+        Box::new(TranslatorPluginDef),
+        Box::new(BriefRetrieverPluginDef),
         // finalizer：session_quality 必须在 webhook 之前 —— 它把质量 meta 写进
         // 会话行，webhook 要重新读这一行来拼载荷
         Box::new(SessionQualityPlugin),
@@ -121,6 +128,33 @@ mod tests {
         let hooks = build_registry(&builtin_plugins(), &overrides, &ctx);
         let all = build_registry(&builtin_plugins(), &HashMap::new(), &ctx);
         assert_eq!(hooks.filter_count() + 1, all.filter_count(), "关掉一个插件应少一个 filter");
+    }
+
+    /// 阶段 5：三个分析插件必须进注册表，service.rs 不再手工装配。
+    #[test]
+    fn analysis_plugins_are_in_the_registry() {
+        let ids: Vec<&str> = builtin_plugins().iter().map(|p| p.id()).collect();
+        for want in ["term_explainer", "translator", "brief_retriever"] {
+            assert!(ids.contains(&want), "缺少插件 {want}，实际: {ids:?}");
+        }
+    }
+
+    /// brief_retriever 依赖知识库：ctx.kb 为 None 时不应注册 observer。
+    /// 这是它相对其他插件多出来的一道门（原 service.rs 的 `&& kb.is_some()`）。
+    #[test]
+    fn brief_retriever_needs_a_knowledge_base() {
+        use crate::registry::Plugin as _;
+        let p = crate::brief_retriever::BriefRetrieverPluginDef;
+        let mut without = HookRegistry::default();
+        p.register(&p.default_config(), &PluginContext::new(), &mut without);
+        assert_eq!(without.observers().len(), 0, "无知识库时不应注册");
+
+        let mut kb = talksage_knowledge::KnowledgeBase::new();
+        kb.index_folder(std::path::Path::new("."));
+        let ctx = PluginContext { kb: Some(std::sync::Arc::new(kb)), ..PluginContext::new() };
+        let mut with = HookRegistry::default();
+        p.register(&p.default_config(), &ctx, &mut with);
+        assert_eq!(with.observers().len(), 1, "有知识库时应注册");
     }
 
     #[test]
