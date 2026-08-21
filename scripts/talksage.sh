@@ -12,6 +12,9 @@
 #   ./scripts/talksage.sh serve     # headless 服务
 #   ./scripts/talksage.sh listen    # CLI 转写（麦克风）
 #   ./scripts/talksage.sh test      # 全量测试
+#   ./scripts/talksage.sh evaluate  # 准备固定语料并横评全部已安装 ASR 模型
+#   ./scripts/talksage.sh audio-test [秒] # 真实麦克风采集质量与设备链路测试
+#   ./scripts/talksage.sh speaker-report # 汇总声纹判定原因与相似度
 #   ./scripts/talksage.sh package   # 打包（dmg）
 #   ./scripts/talksage.sh logs      # 查看日志
 set -euo pipefail
@@ -123,6 +126,18 @@ case "$CMD" in
         # 固定测试日志级别，避免调用者的 RUST_LOG（例如 warn）使日志集成测试失真。
         RUST_LOG=debug TALKSAGE_LOG=debug cargo test --workspace
         (cd web && npm test)
+        python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+        ;;
+    evaluate)
+        require_file "$CARGO_TARGET_DIR/debug/talksage"
+        python3 scripts/evaluate.py all
+        ;;
+    audio-test)
+        require_file "$CARGO_TARGET_DIR/debug/talksage"
+        python3 scripts/evaluate.py hardware --seconds "${2:-5}"
+        ;;
+    speaker-report)
+        python3 scripts/speaker_report.py
         ;;
     package)
         (cd web && npm run tauri -- build)

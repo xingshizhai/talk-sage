@@ -6,6 +6,7 @@
 //!   否则与已见说话人比对（匹配 → 复用标签，如"客户1"），都不匹配 → 新建说话人
 //! - 模型/声纹缺失时优雅降级：返回流默认标签（保持原双流行为）
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -17,6 +18,68 @@ pub const DEFAULT_THRESHOLD: f32 = 0.5;
 /// 声纹注册文件名。
 pub const OWNER_FILE: &str = "owner.vec";
 
+const SAMPLE_RATE: usize = 16_000;
+const FRAME_SAMPLES: usize = 320; // 20ms
+const MIN_VOICED_SAMPLES: usize = SAMPLE_RATE; // 至少 1s 有效人声
+const MAX_CLIENT_SPEAKERS: u32 = 8;
+
+/// 裁掉声纹音频两端静音，并拒绝有效人声不足、过弱或静音占比过高的片段。
+/// 阈值相对当前片段峰值自适应，同时保留很低的绝对下限。
+pub fn prepare_speaker_audio(audio: &[f32]) -> Option<Vec<f32>> {
+    if audio.len() < MIN_VOICED_SAMPLES {
+        return None;
+    }
+    let frames = audio
+        .chunks(FRAME_SAMPLES)
+        .map(|frame| {
+            if frame.is_empty() {
+                0.0
+            } else {
+                (frame.iter().map(|x| x * x).sum::<f32>() / frame.len() as f32).sqrt()
+            }
+        })
+        .collect::<Vec<_>>();
+    let peak = frames.iter().copied().fold(0.0f32, f32::max);
+    if peak < 0.0005 {
+        return None;
+    }
+    let threshold = (peak * 0.08).max(0.0005);
+    let voiced = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(i, rms)| (*rms >= threshold).then_some(i))
+        .collect::<Vec<_>>();
+    if voiced.len() * FRAME_SAMPLES < MIN_VOICED_SAMPLES {
+        return None;
+    }
+    let first = voiced[0] * FRAME_SAMPLES;
+    let end = ((voiced[voiced.len() - 1] + 1) * FRAME_SAMPLES).min(audio.len());
+    let cropped = &audio[first..end];
+    if voiced.len() * 100 < cropped.len().div_ceil(FRAME_SAMPLES) * 35 {
+        return None;
+    }
+    Some(cropped.to_vec())
+}
+
+fn normalized_average(embeddings: &[Vec<f32>]) -> Option<Vec<f32>> {
+    let dim = embeddings.first()?.len();
+    if dim == 0 || embeddings.iter().any(|e| e.len() != dim) {
+        return None;
+    }
+    let mut avg = vec![0.0f32; dim];
+    for emb in embeddings {
+        let norm = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if !norm.is_finite() || norm <= f32::EPSILON {
+            return None;
+        }
+        for (out, value) in avg.iter_mut().zip(emb) {
+            *out += *value / norm;
+        }
+    }
+    let norm = avg.iter().map(|x| x * x).sum::<f32>().sqrt();
+    (norm > f32::EPSILON).then(|| avg.into_iter().map(|x| x / norm).collect())
+}
+
 /// 说话人识别器（多流共享；内部加锁）。
 pub struct SpeakerIdentifier {
     extractor: SpeakerEmbeddingExtractor,
@@ -26,7 +89,17 @@ pub struct SpeakerIdentifier {
 
 struct Inner {
     manager: SpeakerEmbeddingManager,
+    /// 归一化聚类中心及累计片段数；manager 只作为 sherpa 兼容索引。
+    prototypes: HashMap<String, (Vec<f32>, u32)>,
+    /// 尚未被第二个相似片段确认的新说话人。
+    candidate: Option<(u32, Vec<f32>)>,
     next_client_id: u32,
+}
+
+enum PendingSpeaker {
+    StartCandidate { id: u32, embedding: Vec<f32> },
+    ConfirmCandidate { id: u32, embedding: Vec<f32> },
+    Update { label: String, embedding: Vec<f32> },
 }
 
 /// 一次说话人查询的结果。持有标签；若是新说话人，还持有待注册的声纹。
@@ -35,8 +108,21 @@ struct Inner {
 /// 不留痕迹（被 filter 吞掉的段走的就是这条路）。
 pub struct SpeakerQuery {
     label: String,
+    decision: SpeakerDecision,
+    similarity: Option<f32>,
     /// 新说话人：(预分配编号, 待注册 embedding)。已知说话人/降级标签为 None。
-    pending: Option<(u32, Vec<f32>)>,
+    pending: Option<PendingSpeaker>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeakerDecision {
+    LowQualityFallback,
+    OwnerMatch,
+    ExistingMatch,
+    GrayZoneReuse,
+    CandidateStarted,
+    CandidateConfirmed,
+    SpeakerLimitFallback,
 }
 
 impl SpeakerQuery {
@@ -47,7 +133,18 @@ impl SpeakerQuery {
 
     /// 是否是尚未注册的新说话人。
     pub fn is_new(&self) -> bool {
-        self.pending.is_some()
+        matches!(
+            self.pending,
+            Some(PendingSpeaker::StartCandidate { .. } | PendingSpeaker::ConfirmCandidate { .. })
+        )
+    }
+
+    pub fn decision(&self) -> SpeakerDecision {
+        self.decision
+    }
+
+    pub fn similarity(&self) -> Option<f32> {
+        self.similarity
     }
 }
 
@@ -64,6 +161,8 @@ impl SpeakerIdentifier {
         let manager = SpeakerEmbeddingManager::create(dim)?;
         let inner = Inner {
             manager,
+            prototypes: HashMap::new(),
+            candidate: None,
             next_client_id: 1,
         };
         let si = Self {
@@ -84,26 +183,52 @@ impl SpeakerIdentifier {
 
     /// 注册/更新主人声纹（替换旧声纹）。
     pub fn add_owner(&self, embedding: &[f32]) -> bool {
-        let inner = self.inner.lock().unwrap();
+        let Some(normalized) = normalize_embedding(embedding) else {
+            return false;
+        };
+        let mut inner = self.inner.lock().unwrap();
         inner.manager.remove("我");
-        inner.manager.add("我", embedding)
+        if !inner.manager.add("我", &normalized) {
+            return false;
+        }
+        inner.prototypes.insert("我".into(), (normalized, 1));
+        true
     }
 
     /// 从一段音频计算声纹 embedding（至少 0.5s，最多 30s 取尾部）。
     pub fn compute_embedding(&self, audio: &[f32]) -> Option<Vec<f32>> {
-        const MIN_SAMPLES: usize = 8000; // 0.5s @16k
         const MAX_SAMPLES: usize = 480000; // 30s @16k
-        if audio.len() < MIN_SAMPLES {
-            return None;
-        }
-        let start = audio.len().saturating_sub(MAX_SAMPLES);
-        let samples = &audio[start..];
+        let prepared = prepare_speaker_audio(audio)?;
+        let start = prepared.len().saturating_sub(MAX_SAMPLES);
+        let samples = &prepared[start..];
         let stream = self.extractor.create_stream()?;
         stream.accept_waveform(16000, samples);
         if !self.extractor.is_ready(&stream) {
             return None;
         }
         self.extractor.compute(&stream)
+    }
+
+    /// 注册使用多个独立窗口提取声纹再聚合，避免一次咳嗽、静音或某个词主导模板。
+    pub fn enrollment_embedding(&self, audio: &[f32]) -> Option<Vec<f32>> {
+        self.enrollment_profile(audio).map(|(embedding, _, _)| embedding)
+    }
+
+    /// 返回聚合声纹、裁剪后的有效区间采样数、成功窗口数，供注册 UI 展示质量反馈。
+    pub fn enrollment_profile(&self, audio: &[f32]) -> Option<(Vec<f32>, usize, usize)> {
+        let prepared = prepare_speaker_audio(audio)?;
+        let voiced_samples = prepared.len();
+        let window = (prepared.len() / 3).max(MIN_VOICED_SAMPLES);
+        let embeddings = prepared
+            .chunks(window)
+            .take(3)
+            .filter_map(|chunk| self.compute_embedding(chunk))
+            .collect::<Vec<_>>();
+        if embeddings.len() < 2 {
+            return None;
+        }
+        let windows = embeddings.len();
+        normalized_average(&embeddings).map(|embedding| (embedding, voiced_samples, windows))
     }
 
     /// 判定说话人标签（**纯查询**，不改变识别器状态）：
@@ -116,29 +241,133 @@ impl SpeakerIdentifier {
     /// 若查询自带注册副作用，被丢弃的段会留下一个永久的幻影说话人，
     /// 之后真实的段可能匹配上它。所以只有 filter 放行的段才 `commit`。
     pub fn query(&self, audio: &[f32], fallback: &str) -> SpeakerQuery {
+        self.query_for_role(audio, fallback, true)
+    }
+
+    /// 按业务角色查询。回环/客户流设置 `recognize_owner=false`，即使扬声器回声
+    /// 与主人声纹相似，也保持客户通道角色，不把它改写成“我”。
+    pub fn query_for_role(&self, audio: &[f32], fallback: &str, recognize_owner: bool) -> SpeakerQuery {
         let Some(emb) = self.compute_embedding(audio) else {
-            return SpeakerQuery { label: fallback.to_string(), pending: None };
+            return SpeakerQuery {
+                label: fallback.to_string(),
+                decision: SpeakerDecision::LowQualityFallback,
+                similarity: None,
+                pending: None,
+            };
+        };
+        let Some(emb) = normalize_embedding(&emb) else {
+            return SpeakerQuery {
+                label: fallback.to_string(),
+                decision: SpeakerDecision::LowQualityFallback,
+                similarity: None,
+                pending: None,
+            };
         };
         let inner = self.inner.lock().unwrap();
-        if let Some(name) = inner.manager.search(&emb, self.threshold) {
-            return SpeakerQuery { label: name, pending: None };
+
+        // 主人使用更严格阈值，宁可暂时回退通道标签，也不把客户误标为“我”。
+        if let Some((owner, _)) = inner.prototypes.get("我") {
+            if cosine_similarity(owner, &emb) >= (self.threshold + 0.05).min(0.95) {
+                return SpeakerQuery {
+                    label: if recognize_owner { "我".into() } else { fallback.into() },
+                    decision: SpeakerDecision::OwnerMatch,
+                    similarity: Some(cosine_similarity(owner, &emb)),
+                    pending: None,
+                };
+            }
+        }
+
+        let nearest = inner
+            .prototypes
+            .iter()
+            .filter(|(name, _)| name.as_str() != "我")
+            .map(|(name, (center, _))| (name, cosine_similarity(center, &emb)))
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((name, similarity)) = nearest.as_ref() {
+            // 灰区仍复用最近客户，避免同一人在音色波动时刷出客户2/3；中心在
+            // filter 放行后才更新，低于灰区才认为是明确的新说话人。
+            if *similarity >= (self.threshold - 0.08).max(0.0) {
+                return SpeakerQuery {
+                    label: (*name).clone(),
+                    decision: if *similarity >= self.threshold {
+                        SpeakerDecision::ExistingMatch
+                    } else {
+                        SpeakerDecision::GrayZoneReuse
+                    },
+                    similarity: Some(*similarity),
+                    pending: Some(PendingSpeaker::Update { label: (*name).clone(), embedding: emb }),
+                };
+            }
+        }
+        let candidate_threshold = (self.threshold - 0.08).max(0.0);
+        if let Some((id, center)) = &inner.candidate {
+            if cosine_similarity(center, &emb) >= candidate_threshold {
+                return SpeakerQuery {
+                    label: format!("客户{id}"),
+                    decision: SpeakerDecision::CandidateConfirmed,
+                    similarity: Some(cosine_similarity(center, &emb)),
+                    pending: Some(PendingSpeaker::ConfirmCandidate { id: *id, embedding: emb }),
+                };
+            }
+        }
+        if inner.next_client_id > MAX_CLIENT_SPEAKERS {
+            // 防止异常环境持续制造无界聚类；保留通用角色，不污染已有中心。
+            return SpeakerQuery {
+                label: fallback.to_string(),
+                decision: SpeakerDecision::SpeakerLimitFallback,
+                similarity: nearest.as_ref().map(|(_, similarity)| *similarity),
+                pending: None,
+            };
         }
         let id = inner.next_client_id;
-        SpeakerQuery { label: format!("客户{id}"), pending: Some((id, emb)) }
+        SpeakerQuery {
+            // 第一次只显示稳定业务角色；第二个相似片段确认后才显示编号。
+            label: fallback.to_string(),
+            decision: SpeakerDecision::CandidateStarted,
+            similarity: nearest.as_ref().map(|(_, similarity)| *similarity),
+            pending: Some(PendingSpeaker::StartCandidate { id, embedding: emb }),
+        }
     }
 
     /// 落库查询结果：仅「新说话人」才真正注册（分配编号 + 写入声纹库）。
     /// 返回 true 表示本次确实注册了新说话人。
     pub fn commit(&self, q: &SpeakerQuery) -> bool {
-        let Some((id, emb)) = &q.pending else {
+        let Some(pending) = &q.pending else {
             return false; // 已知说话人或降级标签：无副作用
         };
         let mut inner = self.inner.lock().unwrap();
-        if !inner.manager.add(&q.label, emb) {
-            return false; // 同名已存在（查询与 commit 之间被别的段抢先）
+        match pending {
+            PendingSpeaker::StartCandidate { id, embedding } => {
+                inner.candidate = Some((*id, embedding.clone()));
+                false
+            }
+            PendingSpeaker::ConfirmCandidate { id, embedding } => {
+                let label = format!("客户{id}");
+                if inner.prototypes.contains_key(&label) || !inner.manager.add(&label, embedding) {
+                    return false;
+                }
+                inner.prototypes.insert(label, (embedding.clone(), 1));
+                inner.candidate = None;
+                inner.next_client_id = inner.next_client_id.max(id + 1);
+                true
+            }
+            PendingSpeaker::Update { label, embedding } => {
+                let Some((center, count)) = inner.prototypes.get_mut(label) else {
+                    return false;
+                };
+                // 最近最多 8 段的平滑权重，既能适应设备/距离变化，又不会被单段带跑。
+                let weight = 1.0 / ((*count + 1).min(8) as f32);
+                for (value, observed) in center.iter_mut().zip(embedding) {
+                    *value = *value * (1.0 - weight) + *observed * weight;
+                }
+                let updated = normalize_embedding(center).unwrap_or_else(|| center.clone());
+                *center = updated.clone();
+                *count = count.saturating_add(1);
+                inner.manager.remove(label);
+                let _ = inner.manager.add(label, &updated);
+                false
+            }
         }
-        inner.next_client_id = inner.next_client_id.max(id + 1);
-        true
     }
 
     /// 查询 + 立即注册。给「拿到标签就一定要用」的调用方（测试、离线工具）用。
@@ -153,8 +382,23 @@ impl SpeakerIdentifier {
 
     /// 已知说话人数量（含主人）。
     pub fn num_speakers(&self) -> u32 {
-        self.inner.lock().unwrap().manager.num_speakers() as u32
+        self.inner.lock().unwrap().prototypes.len() as u32
     }
+}
+
+fn normalize_embedding(embedding: &[f32]) -> Option<Vec<f32>> {
+    let norm = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if !norm.is_finite() || norm <= f32::EPSILON {
+        return None;
+    }
+    Some(embedding.iter().map(|x| x / norm).collect())
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return -1.0;
+    }
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// 保存主人声纹到 `<data_dir>/voiceprints/owner.vec`（JSON：{dim, values}）。
@@ -227,5 +471,28 @@ mod tests {
         // 无模型：SpeakerIdentifier::new 返回 None，identify 不可用 → 由调用方用 fallback
         let model = Path::new("nonexistent-model.onnx");
         assert!(SpeakerIdentifier::new(model, None, DEFAULT_THRESHOLD).is_none());
+    }
+
+    #[test]
+    fn speaker_audio_quality_gate_rejects_silence_and_short_clips() {
+        assert!(prepare_speaker_audio(&vec![0.0; SAMPLE_RATE * 3]).is_none());
+        assert!(prepare_speaker_audio(&vec![0.02; SAMPLE_RATE / 2]).is_none());
+    }
+
+    #[test]
+    fn speaker_audio_quality_gate_trims_outer_silence() {
+        let mut audio = vec![0.0; SAMPLE_RATE];
+        audio.extend((0..SAMPLE_RATE * 2).map(|i| ((i as f32 * 0.07).sin()) * 0.05));
+        audio.extend(vec![0.0; SAMPLE_RATE]);
+        let prepared = prepare_speaker_audio(&audio).expect("两秒有效语音应通过质量门");
+        assert!(prepared.len() >= SAMPLE_RATE * 19 / 10);
+        assert!(prepared.len() < audio.len());
+    }
+
+    #[test]
+    fn enrollment_average_is_normalized() {
+        let avg = normalized_average(&[vec![3.0, 0.0], vec![0.0, 4.0]]).unwrap();
+        let norm = avg.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5);
     }
 }

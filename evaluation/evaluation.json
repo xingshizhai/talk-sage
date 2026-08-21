@@ -1,0 +1,25 @@
+{
+  "corpus_dir": "evaluation/corpus",
+  "report_dir": "evaluation/reports",
+  "baseline_engine": "paraformer-zh",
+  "engines": [
+    "paraformer-zh",
+    "zipformer-en",
+    "whisper-base",
+    "whisper-small",
+    "qwen3-asr"
+  ],
+  "quality_gates": {
+    "max_error_rate": 0.35,
+    "max_rtf": 1.35,
+    "max_first_final_ms": 9000,
+    "max_capture_drift_ratio": 0.08,
+    "max_clipping_ratio": 0.01,
+    "max_silence_ratio": 0.95
+  },
+  "score_weights": {
+    "accuracy": 0.60,
+    "realtime": 0.25,
+    "latency": 0.15
+  }
+}

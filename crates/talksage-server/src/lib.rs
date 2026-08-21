@@ -80,6 +80,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/config", get(get_config_api).post(save_config_api))
+        .route("/asr/models", get(asr_models_api))
         .route("/sessions", get(list_sessions_api))
         .route("/search", get(search_api))
         .route("/session/{id}", get(get_session_api).delete(delete_session_api))
@@ -91,6 +92,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/logs", get(read_logs_api))
         .route("/listen/start", axum::routing::post(start_listen_api))
         .route("/listen/stop", axum::routing::post(stop_listen_api))
+        .route("/listen/pause", axum::routing::post(pause_listen_api))
         .route("/noise_level", axum::routing::post(set_noise_level_api))
         .route("/voiceprint/status", axum::routing::get(voiceprint_status_api))
         .route("/voiceprint/enroll", axum::routing::post(voiceprint_enroll_api))
@@ -154,7 +156,13 @@ async fn get_config_api(State(state): State<ServerState>, headers: axum::http::H
     }
     let cfg = state.config.snapshot();
     let body = serde_json::json!({
-        "asr": { "client_engine": cfg.asr.client_engine, "user_engine": cfg.asr.user_engine, "backend": cfg.asr.backend },
+        "asr": {
+            "client_engine": cfg.asr.client_engine,
+            "user_engine": cfg.asr.user_engine,
+            "backend": cfg.asr.backend,
+            "terminology": cfg.asr.terminology,
+        },
+        "audio": cfg.audio,
         "plugins": {
             "term_explainer": cfg.plugins.term_explainer,
             "translator": cfg.plugins.translator,
@@ -163,6 +171,22 @@ async fn get_config_api(State(state): State<ServerState>, headers: axum::http::H
         "server": { "host": cfg.server.host, "port": cfg.server.port },
     });
     (StatusCode::OK, Json(body)).into_response()
+}
+
+async fn asr_models_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let root = resolve_models_dir();
+    let models: Vec<_> = EngineKind::ALL.iter().map(|&kind| {
+        let p = kind.profile();
+        serde_json::json!({
+            "id": kind.display_name(), "label": p.label, "languages": p.languages,
+            "streaming": p.streaming, "speed": p.speed, "description": p.description,
+            "installed": root.as_ref().is_some_and(|r| kind.is_available(r)),
+        })
+    }).collect();
+    Json(models).into_response()
 }
 
 /// 保存配置（设置面板提交）。
@@ -240,8 +264,21 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
         if let Some(b) = asr.get("backend").and_then(|v| v.as_str()) {
             c.asr.backend = b.to_string();
         }
+        if let Some(t) = asr.get("terminology") {
+            if let Some(v) = t.get("enabled").and_then(|v| v.as_bool()) { c.asr.terminology.enabled = v; }
+            if let Some(v) = t.get("hotword_score").and_then(|v| v.as_f64()) { c.asr.terminology.hotword_score = (v as f32).clamp(0.0, 10.0); }
+            if let Some(v) = t.get("terms").and_then(|v| v.as_array()) {
+                c.asr.terminology.terms = v.iter().filter_map(|x| x.as_str()).map(str::to_string).collect();
+            }
+            if let Some(v) = t.get("corrections").and_then(|v| v.as_object()) {
+                c.asr.terminology.corrections = v.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect();
+            }
+        }
     }
     if let Some(audio) = updates.get("audio") {
+        if let Some(v) = audio.get("input_gain_db").and_then(|v| v.as_f64()) {
+            c.audio.input_gain_db = (v as f32).clamp(0.0, 24.0);
+        }
         if let Some(vad) = audio.get("vad") {
             if let Some(p) = vad.get("preset").and_then(|v| v.as_str()) {
                 c.audio.vad.preset = match p {
@@ -258,6 +295,14 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
             if let Some(h) = d.get("highpass").and_then(|v| v.as_bool()) {
                 c.audio.denoise.highpass = h;
             }
+        }
+        if let Some(e) = audio.get("endpoint") {
+            if let Some(v) = e.get("enabled").and_then(|v| v.as_bool()) { c.audio.endpoint.enabled = v; }
+            if let Some(v) = e.get("stable_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.stable_ms = v.max(100); }
+            if let Some(v) = e.get("quiet_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.quiet_ms = v.max(100); }
+            if let Some(v) = e.get("force_quiet_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.force_quiet_ms = v.max(200); }
+            if let Some(v) = e.get("quiet_rms").and_then(|v| v.as_f64()) { c.audio.endpoint.quiet_rms = (v as f32).clamp(0.0, 0.5); }
+            if let Some(v) = e.get("min_segment_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.min_segment_ms = v; }
         }
         // 最短提交时长（ms）：0/null = 不限制
         if let Some(m) = audio.get("min_segment_ms") {
@@ -534,6 +579,27 @@ async fn stop_listen_api(State(state): State<ServerState>, headers: axum::http::
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
+async fn pause_listen_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let paused = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("paused").and_then(|v| v.as_bool()))
+        .unwrap_or(true);
+    match state.running.lock().unwrap().as_ref() {
+        Some(running) => {
+            running.set_paused(paused);
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "paused": running.is_paused() }))).into_response()
+        }
+        None => (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "not listening" }))).into_response(),
+    }
+}
+
 /// 实时调节噪音电平阈值（headless 版）。
 async fn set_noise_level_api(
     State(state): State<ServerState>,
@@ -624,16 +690,15 @@ async fn voiceprint_enroll_api(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "missing speaker model" }))).into_response();
     };
     let data_dir = state.config.data_dir().to_path_buf();
+    let gain_db = state.config.snapshot().audio.input_gain_db;
     let result = tokio::task::spawn_blocking(move || {
-        use sherpa_onnx::{SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig};
-        let extractor = SpeakerEmbeddingExtractor::create(&SpeakerEmbeddingExtractorConfig {
-            model: Some(model.to_string_lossy().into()),
-            num_threads: 1,
-            debug: false,
-            provider: Some("cpu".into()),
-        })
+        let identifier = talksage_pipeline::speaker::SpeakerIdentifier::new(
+            &model,
+            None,
+            talksage_pipeline::speaker::DEFAULT_THRESHOLD,
+        )
         .ok_or_else(|| "声纹模型加载失败".to_string())?;
-        let (mut hub, rx) = talksage_audio::AudioHub::new(100);
+        let (mut hub, rx) = talksage_audio::AudioHub::new_with_gain(100, gain_db);
         hub.start(None).map_err(|e| format!("启动麦克风失败: {e}"))?;
         let mut audio: Vec<f32> = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds as u64);
@@ -644,20 +709,22 @@ async fn voiceprint_enroll_api(
             }
         }
         hub.stop();
-        let stream = extractor.create_stream().ok_or("创建声纹流失败")?;
-        stream.accept_waveform(16000, &audio);
-        if !extractor.is_ready(&stream) {
-            return Err("采集音频太短".to_string());
-        }
-        let emb = extractor.compute(&stream).ok_or("声纹提取失败")?;
+        let (emb, voiced_samples, windows) = identifier
+            .enrollment_profile(&audio)
+            .ok_or("有效人声不足或录音质量较差，请连续朗读并避免长时间停顿")?;
         talksage_pipeline::speaker::save_owner_embedding(&data_dir, &emb)
             .map_err(|e| format!("保存声纹失败: {e}"))?;
-        Ok::<Vec<f32>, String>(emb)
+        Ok::<(Vec<f32>, usize, usize), String>((emb, voiced_samples, windows))
     })
     .await
     .unwrap_or_else(|e| Err(format!("任务失败: {e}")));
     match result {
-        Ok(emb) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "dim": emb.len() }))).into_response(),
+        Ok((emb, voiced_samples, windows)) => (StatusCode::OK, Json(serde_json::json!({
+            "ok": true,
+            "dim": emb.len(),
+            "voiced_ms": voiced_samples * 1000 / 16000,
+            "windows": windows,
+        }))).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
     }
 }
@@ -676,12 +743,21 @@ async fn voiceprint_remove_api(
 
 /// 提供录音文件（历史会话回放）：`GET /api/recordings/<文件名>`。
 /// 仅允许录音目录内的文件（文件名白名单，防目录穿越）。
+#[derive(Deserialize)]
+struct RecordingQuery {
+    token: Option<String>,
+}
+
 async fn get_recording_api(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
     AxumPath(filename): AxumPath<String>,
+    Query(query): Query<RecordingQuery>,
 ) -> impl IntoResponse {
-    if !token_ok(&state, &headers) {
+    // HTMLAudioElement 不能附加 X-Talksage-Token，因此该只读媒体端点额外接受
+    // URL 查询令牌。文件目标仍受下面的录音目录白名单约束。
+    let query_token_ok = !state.token.is_empty() && query.token.as_deref() == Some(state.token.as_str());
+    if !token_ok(&state, &headers) && !query_token_ok {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
     // 解析录音目录（与监听时一致）
@@ -765,8 +841,10 @@ async fn models_api(State(state): State<ServerState>, headers: axum::http::Heade
     if !token_ok_v1(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
-    let data: Vec<serde_json::Value> = [EngineKind::ParaformerZh, EngineKind::ZipformerEn]
+    let root = resolve_models_dir();
+    let data: Vec<serde_json::Value> = EngineKind::ALL
         .iter()
+        .filter(|&&k| root.as_ref().is_some_and(|r| k.is_available(r)))
         .map(|k| serde_json::json!({ "id": k.display_name(), "object": "model", "owned_by": "talksage" }))
         .collect();
     Json(serde_json::json!({ "object": "list", "data": data })).into_response()

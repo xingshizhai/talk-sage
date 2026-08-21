@@ -6,6 +6,7 @@
 //!
 //! 每条流独立 VAD 分段 + 流式 ASR（增量 partial → 段结束 final）。
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
@@ -13,9 +14,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
-use talksage_asr::{EngineKind, EnginePool, SherpaStreamingEngine};
+use talksage_asr::{EngineKind, EngineOptions, EnginePool};
 use talksage_audio::{AudioHub, Preprocessor};
-use talksage_config::{DenoiseConfig, VadConfig};
+use talksage_config::{DenoiseConfig, EndpointConfig, VadConfig};
 use talksage_core::{AudioClock, DomainEvent, StatusStage, TranscriptSegment};
 use talksage_plugins::SegmentObserver;
 
@@ -56,12 +57,15 @@ fn join_with_timeout(handle: std::thread::JoinHandle<()>, timeout: Duration) -> 
 pub struct RuntimeParams {
     /// 噪音电平阈值（f32 bits；0 = 关闭）：块 RMS 低于该值的音频静音。
     pub noise_level: Arc<AtomicU32>,
+    /// 暂停时继续排空实时设备队列，但不录音、不识别、不推进音频时钟。
+    pub paused: Arc<AtomicBool>,
 }
 
 impl RuntimeParams {
     pub fn with_noise_level(level: f32) -> Self {
         Self {
             noise_level: Arc::new(AtomicU32::new(level.clamp(0.0, 0.5).to_bits())),
+            paused: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -75,6 +79,8 @@ pub struct SpeakerConfig {
     pub owner_embedding: Option<Vec<f32>>,
     /// 判定阈值（余弦相似度）。
     pub threshold: f32,
+    /// 双流时麦克风角色已经确定，不再用声纹覆盖；单流会议才识别麦克风内多人。
+    pub classify_user_stream: bool,
 }
 
 /// 事件发射器（Tauri 侧桥接 app.emit；headless 侧桥接 WS）。Arc 共享，可跨线程。
@@ -104,6 +110,10 @@ pub struct StreamConfig {
     pub speaker_id: u32,
     /// 说话人标签（事件用）。
     pub speaker_label: String,
+    /// 该会话的热词上下文；不同上下文使用不同引擎池键。
+    pub engine_options: EngineOptions,
+    /// 低延迟确定性术语纠错（误识别 → 标准术语）。
+    pub terminology: talksage_config::TerminologyConfig,
 }
 
 /// 实时管道配置。
@@ -117,8 +127,12 @@ pub struct LivePipelineConfig {
     pub vad: VadConfig,
     /// 音频预处理（背景噪音处理）。
     pub denoise: DenoiseConfig,
+    /// 流式 partial 稳定性端点参数。
+    pub endpoint: EndpointConfig,
     /// ASR 推理线程数。
     pub asr_threads: usize,
+    /// 麦克风输入增益；只作用于 AudioInput::Mic。
+    pub input_gain_db: f32,
     /// 用户流（中文）。
     pub user: StreamConfig,
     /// 客户流（英文，可选）。
@@ -179,6 +193,14 @@ impl LivePipeline {
     /// 当前噪音电平阈值。
     pub fn noise_level(&self) -> f32 {
         f32::from_bits(self.runtime.noise_level.load(Ordering::Relaxed))
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        self.runtime.paused.store(paused, Ordering::Release);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.runtime.paused.load(Ordering::Acquire)
     }
 
     /// 在专用线程中启动管道；返回后可用 `stop()` 停止。
@@ -292,6 +314,55 @@ enum InputKind {
     Loopback,
 }
 
+/// Whisper Flow 文本稳定思想的低开销版本：不重跑音频窗口，只观察原生流式
+/// hypothesis，并要求同时出现短暂停顿后才提交。
+struct StableEndpoint {
+    config: EndpointConfig,
+    stable_samples: u64,
+    quiet_samples: u64,
+}
+
+impl StableEndpoint {
+    fn new(config: EndpointConfig) -> Self {
+        Self { config, stable_samples: 0, quiet_samples: 0 }
+    }
+
+    fn reset(&mut self) {
+        self.stable_samples = 0;
+        self.quiet_samples = 0;
+    }
+
+    fn enabled(&self) -> bool {
+        self.config.enabled
+    }
+
+    fn max_wait_ms(&self) -> u64 {
+        self.config.stable_ms
+    }
+
+    fn observe(&mut self, unchanged_nonempty: bool, rms: f32, chunk_samples: u64, segment_samples: u64) -> bool {
+        if !self.config.enabled {
+            return false;
+        }
+        if unchanged_nonempty {
+            self.stable_samples += chunk_samples;
+        } else {
+            self.stable_samples = 0;
+        }
+        if rms <= self.config.quiet_rms {
+            self.quiet_samples += chunk_samples;
+        } else {
+            self.quiet_samples = 0;
+        }
+        let ms = |samples: u64| AudioClock::samples_to_ms(talksage_audio::TARGET_SAMPLE_RATE, samples);
+        let long_enough = ms(segment_samples) >= self.config.min_segment_ms;
+        let stable_pause = ms(self.stable_samples) >= self.config.stable_ms
+            && ms(self.quiet_samples) >= self.config.quiet_ms;
+        let forced_pause = ms(self.quiet_samples) >= self.config.force_quiet_ms;
+        long_enough && (stable_pause || forced_pause)
+    }
+}
+
 /// 单条流的运行时状态。
 struct StreamWorker {
     vad: VoiceActivityDetector,
@@ -301,13 +372,23 @@ struct StreamWorker {
     preprocessor: Preprocessor,
     mic_device: Option<String>,
     input_kind: InputKind,
+    input_gain_db: f32,
     hub: Option<AudioHub>,
     rx_audio: Option<mpsc::Receiver<Vec<f32>>>,
     file_chunks: Option<std::vec::IntoIter<Vec<f32>>>,
     in_speech: bool,
+    /// VAD 确认语音前的音频。确认后回放给 ASR，避免截掉中文句首。
+    pre_roll: VecDeque<Vec<f32>>,
+    pre_roll_samples: usize,
+    pre_roll_limit_samples: usize,
+    endpoint: StableEndpoint,
+    /// Silero 已检测到段尾；等待流式文本稳定后再提交。
+    pending_vad_endpoint: bool,
+    pending_endpoint_samples: u64,
     last_partial: String,
     speaker_id: u32,
     speaker_label: String,
+    terminology: talksage_config::TerminologyConfig,
     done: bool,
     chunk_interval: Duration,
     #[cfg(windows)]
@@ -343,6 +424,8 @@ struct StreamWorker {
     runtime: Arc<RuntimeParams>,
     /// 说话人识别器（共享；None = 未启用）。
     speaker: Option<speaker::SharedSpeaker>,
+    /// 是否允许把当前流识别为已注册主人；客户/回环流始终为 false。
+    speaker_recognize_owner: bool,
     /// 当前语音段音频缓冲（说话人识别用，≤30s）。
     seg_audio: Vec<f32>,
     /// 最近一块 RMS（f32 bits；Level 事件用）。
@@ -351,6 +434,7 @@ struct StreamWorker {
     engine_pool: Option<Arc<EnginePool>>,
     /// 引擎模型目录（归还引擎池用）。
     engine_dir: Option<PathBuf>,
+    engine_options: EngineOptions,
     /// 插件钩子（filter 链）。与其它流共享同一批 filter 实例。
     hooks: talksage_plugins::HookRegistry,
     /// final 段累计词数（会话指标用；借鉴 Call.md）。
@@ -368,12 +452,15 @@ impl StreamWorker {
         cfg: &StreamConfig,
         vad_cfg: &VadConfig,
         denoise: &DenoiseConfig,
+        endpoint: &EndpointConfig,
         asr_threads: usize,
+        input_gain_db: f32,
         vad_model: &PathBuf,
         chunk_ms: u64,
         recording_path: Option<PathBuf>,
         runtime: Arc<RuntimeParams>,
         speaker: Option<speaker::SharedSpeaker>,
+        speaker_recognize_owner: bool,
         level: Arc<AtomicU32>,
         engine_pool: Option<Arc<EnginePool>>,
         hooks: talksage_plugins::HookRegistry,
@@ -386,16 +473,11 @@ impl StreamWorker {
             vad_cfg.preset,
         );
         let vad = create_vad(vad_model, threshold, min_speech, min_silence, window, max_speech)?;
-        // ASR 引擎：流式走引擎池（热启动，参考 WhisperLiveKit 引擎单例）或新建；
-        // 离线段级（whisper/qwen3）每次新建（不进池，段结束时整段识别）。
+        // 所有模型均走引擎池以降低重复监听的启动延迟；离线大模型每种只缓存一个。
         let threads = asr_threads.max(1) as i32;
-        let engine: Box<dyn talksage_asr::SegmentEngine> = if cfg.engine_kind.is_streaming() {
-            match &engine_pool {
-                Some(pool) => pool.acquire(cfg.engine_kind, &cfg.model_dir, threads)?,
-                None => Box::new(SherpaStreamingEngine::new(cfg.engine_kind, &cfg.model_dir, threads)?),
-            }
-        } else {
-            Box::new(talksage_asr::OfflineSegmentEngine::new(cfg.engine_kind, &cfg.model_dir, threads)?)
+        let engine: Box<dyn talksage_asr::SegmentEngine> = match &engine_pool {
+            Some(pool) => pool.acquire_with_options(cfg.engine_kind, &cfg.model_dir, threads, &cfg.engine_options)?,
+            None => talksage_asr::create_engine_with_options(cfg.engine_kind, &cfg.model_dir, threads, &cfg.engine_options)?,
         };
         let preprocessor = Preprocessor::new(
             denoise.enabled,
@@ -443,13 +525,21 @@ impl StreamWorker {
             preprocessor,
             mic_device,
             input_kind,
+            input_gain_db,
             hub: None,
             rx_audio: None,
             file_chunks,
             in_speech: false,
+            pre_roll: VecDeque::new(),
+            pre_roll_samples: 0,
+            pre_roll_limit_samples: talksage_audio::TARGET_SAMPLE_RATE as usize / 2,
+            endpoint: StableEndpoint::new(endpoint.clone()),
+            pending_vad_endpoint: false,
+            pending_endpoint_samples: 0,
             last_partial: String::new(),
             speaker_id: cfg.speaker_id,
             speaker_label: cfg.speaker_label.clone(),
+            terminology: cfg.terminology.clone(),
             done: false,
             chunk_interval: Duration::from_millis(chunk_ms),
             #[cfg(windows)]
@@ -469,10 +559,12 @@ impl StreamWorker {
             non_speech_blocks: 0,
             runtime,
             speaker,
+            speaker_recognize_owner,
             seg_audio: Vec::new(),
             level,
             engine_pool,
             engine_dir: Some(cfg.model_dir.clone()),
+            engine_options: cfg.engine_options.clone(),
             engine: Some(engine),
             hooks,
             words: 0,
@@ -487,7 +579,7 @@ impl StreamWorker {
         match &self.input_kind {
             // 麦克风模式
             InputKind::Mic => {
-                let (mut hub, rx) = AudioHub::new(chunk_ms);
+                let (mut hub, rx) = AudioHub::new_with_gain(chunk_ms, self.input_gain_db);
                 hub.start(self.mic_device.as_deref())?;
                 self.hub = Some(hub);
                 self.rx_audio = Some(rx);
@@ -579,11 +671,28 @@ impl StreamWorker {
         // 背景噪音预处理（高通/噪声门），再进 VAD/ASR
         self.preprocessor.process(&mut chunk);
 
+        // Silero 需要累计 min_speech 后才确认起音。保留最近 500ms，确认时连同
+        // 当前块一起回放给 ASR；否则普通话首字很容易被截断。
+        if !self.in_speech {
+            self.pre_roll_samples += chunk.len();
+            self.pre_roll.push_back(chunk.clone());
+            while self.pre_roll_samples > self.pre_roll_limit_samples {
+                if let Some(old) = self.pre_roll.pop_front() {
+                    self.pre_roll_samples = self.pre_roll_samples.saturating_sub(old.len());
+                }
+            }
+        }
+
         self.vad.accept_waveform(&chunk);
 
+        let mut just_started = false;
         if self.vad.detected() && !self.in_speech {
             self.in_speech = true;
+            just_started = true;
             self.last_partial.clear();
+            self.endpoint.reset();
+            self.pending_vad_endpoint = false;
+            self.pending_endpoint_samples = 0;
             if let Some(e) = &mut self.engine {
                 e.reset();
             }
@@ -591,9 +700,30 @@ impl StreamWorker {
             self.seg_samples = 0;
             self.seg_rms_acc = 0.0;
             self.seg_audio.clear();
+
+            let buffered_samples = self.pre_roll_samples as u64;
+            self.seg_start_sample = chunk_start.saturating_sub(buffered_samples.saturating_sub(chunk.len() as u64));
+            for buffered in self.pre_roll.drain(..) {
+                self.seg_samples += buffered.len() as u64;
+                self.speech_samples += buffered.len() as u64;
+                self.seg_rms_acc += buffered.iter().map(|&x| x * x).sum::<f32>() as f64;
+                if self.speaker.is_some() {
+                    const MAX_SEG_AUDIO: usize = 480000;
+                    let remain = MAX_SEG_AUDIO.saturating_sub(self.seg_audio.len());
+                    self.seg_audio.extend_from_slice(&buffered[..buffered.len().min(remain)]);
+                }
+                if let Some(engine) = &mut self.engine {
+                    let _ = engine.accept(&buffered);
+                }
+            }
+            self.pre_roll_samples = 0;
         }
 
-        if self.in_speech {
+        let mut endpoint_ready = false;
+        if self.in_speech && !just_started {
+            if self.pending_vad_endpoint {
+                self.pending_endpoint_samples += chunk.len() as u64;
+            }
             self.seg_samples += chunk.len() as u64;
             self.speech_samples += chunk.len() as u64;
             self.seg_rms_acc += chunk.iter().map(|&x| x * x).sum::<f32>() as f64;
@@ -605,9 +735,11 @@ impl StreamWorker {
                     self.seg_audio.extend_from_slice(&chunk[..chunk.len().min(remain)]);
                 }
             }
+            let mut unchanged_nonempty = false;
             if let Some(engine) = &mut self.engine {
                 if let Some(text) = engine.accept(&chunk) {
-                    let text = text.trim().to_string();
+                    let text = self.terminology.correct(text.trim());
+                    unchanged_nonempty = !text.is_empty() && text == self.last_partial;
                     if !text.is_empty() && text != self.last_partial {
                         self.last_partial = text.clone();
                         emit(DomainEvent::Segment {
@@ -625,10 +757,48 @@ impl StreamWorker {
                     }
                 }
             }
+            endpoint_ready = self.engine.as_ref().is_some_and(|e| e.kind().is_streaming())
+                && self.endpoint.observe(
+                    unchanged_nonempty,
+                    block_rms,
+                    chunk.len() as u64,
+                    self.seg_samples,
+                );
         }
 
+        let mut vad_endpoint = false;
         while !self.vad.is_empty() {
             self.vad.pop();
+            vad_endpoint = true;
+            self.pending_vad_endpoint = true;
+            self.pending_endpoint_samples = 0;
+        }
+
+        let is_streaming = self.engine.as_ref().is_some_and(|e| e.kind().is_streaming());
+        let realtime_input = self.input_kind != InputKind::File;
+        let natural_endpoint = realtime_input && is_streaming && endpoint_ready && !self.pending_vad_endpoint;
+        let commit = if !is_streaming || !self.endpoint.enabled() {
+            vad_endpoint
+        } else {
+            natural_endpoint
+                || (self.pending_vad_endpoint
+                && (endpoint_ready
+                    || AudioClock::samples_to_ms(
+                        talksage_audio::TARGET_SAMPLE_RATE,
+                        self.pending_endpoint_samples,
+                    ) >= self.endpoint.max_wait_ms()))
+        };
+        if commit {
+            if natural_endpoint {
+                // 主动端点发生时 Silero 仍认为处于同一语音段。清空其内部状态，
+                // 防止稍后产生的旧段尾立即切断下一句。
+                self.vad.reset();
+                self.pre_roll.clear();
+                self.pre_roll_samples = 0;
+                log::debug!("流[{}] 文本稳定/强停顿主动提交", self.speaker_label);
+            } else if is_streaming && self.endpoint.enabled() {
+                log::debug!("流[{}] VAD 段尾且文本已稳定，提交", self.speaker_label);
+            }
             self.finish_speech(emit);
         }
         Ok(true)
@@ -644,6 +814,7 @@ impl StreamWorker {
             Some(engine) => engine.finish().trim().to_string(),
             None => String::new(),
         };
+        let final_text = self.terminology.correct(&final_text);
         if !final_text.is_empty() {
             let end_sample = self.clock.accepted();
             let duration_ms = AudioClock::samples_to_ms(self.clock.sample_rate(), self.seg_samples);
@@ -660,28 +831,30 @@ impl StreamWorker {
             // filter 链放行之后 —— 否则被吞掉的段会留下一个幻影说话人，之后真实
             // 的段可能匹配上它。
             let mut label = self.speaker_label.clone();
-            let mut sid = self.speaker_id;
+            let sid = self.speaker_id;
             let mut pending_speaker: Option<speaker::SpeakerQuery> = None;
+            let mut speaker_diagnostic: Option<(speaker::SpeakerDecision, Option<f32>)> = None;
             if let Some(sp) = &self.speaker {
-                let query = sp.query(&self.seg_audio, &self.speaker_label);
+                let query = sp.query_for_role(
+                    &self.seg_audio,
+                    &self.speaker_label,
+                    self.speaker_recognize_owner,
+                );
                 let identified = query.label().to_string();
+                speaker_diagnostic = Some((query.decision(), query.similarity()));
                 pending_speaker = Some(query);
                 if identified == "我" {
                     label = "我".into();
-                    sid = 0;
-                } else if let Some(rest) = identified.strip_prefix("客户") {
-                    if let Ok(n) = rest.parse::<u32>() {
-                        label = identified.clone();
-                        sid = n;
-                    } else {
-                        label = identified.clone();
-                    }
+                } else if identified.starts_with("客户") {
+                    // speaker_id 表示稳定的业务角色/音频通道，不能被声纹聚类编号覆盖。
+                    // 客户编号只用于显示；翻译、指标与跨流去重仍按原通道判断。
+                    label = identified.clone();
                 } else {
                     label = identified.clone();
                 }
             }
             log::info!(
-                "段完成[{}] 说话人判定=[{label}] 时长={}ms rms={rms:.4} 字数={} 文本={}",
+                "段完成[{}] 说话人判定=[{label}] 声纹={speaker_diagnostic:?} 时长={}ms rms={rms:.4} 字数={} 文本={}",
                 self.speaker_label,
                 duration_ms,
                 final_text.chars().count(),
@@ -717,6 +890,9 @@ impl StreamWorker {
                 // （提前 return 导致）。改动收尾行为时两处必须一起改，
                 // 只改一处会让「被吞掉的段」和「正常段」的引擎状态发散。
                 self.last_partial.clear();
+                self.endpoint.reset();
+                self.pending_vad_endpoint = false;
+                self.pending_endpoint_samples = 0;
                 if let Some(e) = &mut self.engine {
                     e.reset();
                 }
@@ -742,6 +918,9 @@ impl StreamWorker {
             }
         }
         self.last_partial.clear();
+        self.endpoint.reset();
+        self.pending_vad_endpoint = false;
+        self.pending_endpoint_samples = 0;
         if let Some(e) = &mut self.engine {
             e.reset();
         }
@@ -802,7 +981,7 @@ impl StreamWorker {
         self.stop();
         // 归还 ASR 引擎到池（常驻复用；下次监听热启动）
         if let (Some(pool), Some(dir), Some(engine)) = (self.engine_pool.take(), self.engine_dir.take(), self.engine.take()) {
-            pool.release(engine.kind(), &dir, engine);
+            pool.release_with_options(engine.kind(), &dir, &self.engine_options, engine);
             log::debug!("流[{}] ASR 引擎已归还引擎池", self.speaker_label);
         }
         if let Some(rec) = self.recorder.take() {
@@ -820,6 +999,25 @@ impl StreamWorker {
                 Err(e) => log::warn!("流[{}] 录音收尾失败: {e}", self.speaker_label),
             }
         }
+    }
+
+    /// 暂停边界：提交已开始的句子并清空 VAD/预滚，恢复后从新句开始。
+    fn pause(&mut self, emit: &EventSink) {
+        self.finish_speech(emit);
+        self.vad.reset();
+        self.pre_roll.clear();
+        self.pre_roll_samples = 0;
+        self.pending_vad_endpoint = false;
+        self.pending_endpoint_samples = 0;
+        self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
+    }
+
+    /// 暂停时丢弃实时设备产生的数据，防止恢复后识别暂停期间的积压音频。
+    fn drain_paused(&mut self) {
+        if let Some(rx) = &self.rx_audio {
+            while rx.try_recv().is_ok() {}
+        }
+        self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -916,12 +1114,19 @@ fn run_loop(
             sc,
             &cfg.vad,
             &cfg.denoise,
+            &cfg.endpoint,
             cfg.asr_threads,
+            cfg.input_gain_db,
             &cfg.vad_model,
             cfg.chunk_ms,
             rec_path,
             cfg.runtime.clone(),
-            shared_speaker.clone(),
+            if sc.speaker_id == 0 && !cfg.speaker.as_ref().is_some_and(|s| s.classify_user_stream) {
+                None
+            } else {
+                shared_speaker.clone()
+            },
+            sc.speaker_id == 0,
             level,
             cfg.engine_pool.clone(),
             // clone 共享 Arc<dyn EventFilter>：两条流用同一批 filter 实例
@@ -978,6 +1183,7 @@ fn run_loop(
     // 事件循环：轮询各流（出错时先收尾再返回，保证录音完成）
     let mut tick_err: Option<anyhow::Error> = None;
     let mut last_level_at = std::time::Instant::now();
+    let mut was_paused = false;
     loop {
         if cancel.load(Ordering::Relaxed) {
             break;
@@ -985,6 +1191,32 @@ fn run_loop(
         match rx_stop.try_recv() {
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
             Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        let paused = cfg.runtime.paused.load(Ordering::Acquire);
+        if paused != was_paused {
+            if paused {
+                for w in workers.iter_mut() {
+                    w.pause(&emit);
+                }
+                fire(&emit, DomainEvent::Status {
+                    stage: StatusStage::Paused,
+                    message: "已暂停".into(),
+                });
+            } else {
+                fire(&emit, DomainEvent::Status {
+                    stage: StatusStage::Recording,
+                    message: "监听中…".into(),
+                });
+            }
+            was_paused = paused;
+        }
+        if paused {
+            for w in workers.iter_mut() {
+                w.drain_paused();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
         }
 
         // 电平指示：节流 100ms 推送（麦克风 / 回环 RMS）
@@ -1122,5 +1354,66 @@ mod stop_timeout_tests {
     fn join_with_timeout_returns_false_when_exceeded() {
         let h = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(400)));
         assert!(!join_with_timeout(h, Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn stable_endpoint_requires_both_text_stability_and_quiet_audio() {
+        let mut endpoint = StableEndpoint::new(EndpointConfig {
+            stable_ms: 300,
+            quiet_ms: 200,
+            min_segment_ms: 1000,
+            ..EndpointConfig::default()
+        });
+        let chunk = 1600; // 100ms
+        for _ in 0..3 {
+            assert!(!endpoint.observe(true, 0.03, chunk, 16000));
+        }
+        assert!(!endpoint.observe(true, 0.001, chunk, 17600));
+        assert!(endpoint.observe(true, 0.001, chunk, 19200));
+    }
+
+    #[test]
+    fn changed_hypothesis_resets_stability() {
+        let mut endpoint = StableEndpoint::new(EndpointConfig {
+            stable_ms: 200,
+            quiet_ms: 200,
+            min_segment_ms: 0,
+            ..EndpointConfig::default()
+        });
+        assert!(!endpoint.observe(true, 0.001, 1600, 1600));
+        assert!(!endpoint.observe(false, 0.001, 1600, 3200));
+        assert!(!endpoint.observe(true, 0.001, 1600, 4800));
+        assert!(endpoint.observe(true, 0.001, 1600, 6400));
+    }
+
+    #[test]
+    fn long_quiet_pause_commits_even_while_hypothesis_changes() {
+        let mut endpoint = StableEndpoint::new(EndpointConfig {
+            stable_ms: 400,
+            quiet_ms: 400,
+            force_quiet_ms: 700,
+            min_segment_ms: 1000,
+            ..EndpointConfig::default()
+        });
+        let chunk = 1600; // 100ms
+        for index in 0..6 {
+            assert!(!endpoint.observe(index % 2 == 0, 0.001, chunk, 16000 + index * chunk));
+        }
+        assert!(endpoint.observe(false, 0.001, chunk, 25600));
+    }
+
+    #[test]
+    fn natural_endpoint_respects_minimum_segment_duration() {
+        let mut endpoint = StableEndpoint::new(EndpointConfig {
+            stable_ms: 200,
+            quiet_ms: 200,
+            force_quiet_ms: 300,
+            min_segment_ms: 1000,
+            ..EndpointConfig::default()
+        });
+        for _ in 0..5 {
+            assert!(!endpoint.observe(true, 0.001, 1600, 8000));
+        }
+        assert!(endpoint.observe(true, 0.001, 1600, 16000));
     }
 }

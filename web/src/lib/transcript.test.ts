@@ -6,6 +6,15 @@ function seg(speaker: string, text: string, partial: boolean) {
 }
 
 describe("TranscriptAccumulator", () => {
+  it("uses stable speaker_id when voiceprint relabels final", () => {
+    const acc = new TranscriptAccumulator();
+    acc.push({ speaker_id: 1, speaker_label: "客户", text: "正在说", is_partial: true, ts_ms: 1 });
+    acc.push({ speaker_id: 1, speaker_label: "客户2", text: "完整句子", is_partial: false, ts_ms: 2 });
+
+    expect(acc.getLines()).toHaveLength(1);
+    expect(acc.getLines()[0]).toMatchObject({ speakerLabel: "客户2", text: "完整句子", isPartial: false });
+  });
+
   it("partial 事件增量更新同一行，不新增行", () => {
     const acc = new TranscriptAccumulator();
     acc.push(seg("我", "昨", true));

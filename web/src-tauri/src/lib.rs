@@ -11,9 +11,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use sherpa_onnx::{
-    SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig,
-};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
@@ -21,7 +18,7 @@ use talksage_audio::AudioHub;
 use talksage_config::ConfigManager;
 use talksage_core::{DomainEvent, StatusStage};
 use talksage_pipeline::{RunningListen, StartListen, TalkSageService};
-use talksage_asr::EnginePool;
+use talksage_asr::{EngineKind, EnginePool};
 use talksage_session::SessionStore;
 
 mod window_state;
@@ -49,15 +46,54 @@ fn get_config(state: tauri::State<'_, AppState>) -> serde_json::Value {
     serde_json::to_value(state.config.snapshot()).unwrap_or(serde_json::Value::Null)
 }
 
+/// 把配置解析后的真实录音目录加入 asset 协议只读范围。
+/// 开发脚本会把数据放在仓库 `.tools/data`，它不属于 Tauri `$DATA_DIR`。
+fn allow_recording_assets(app: &tauri::AppHandle, config: &ConfigManager) -> Result<(), String> {
+    let dir = config.snapshot().recording.resolve_dir(config.data_dir());
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建录音目录失败 {}: {e}", dir.display()))?;
+    app.asset_protocol_scope()
+        .allow_directory(&dir, false)
+        .map_err(|e| format!("授权录音播放目录失败 {}: {e}", dir.display()))?;
+    log::info!("历史录音播放目录已授权: {}", dir.display());
+    Ok(())
+}
+
+/// ASR 模型目录：包含未安装模型，前端据此禁用选项并展示速度取舍。
+#[tauri::command]
+fn list_asr_models() -> Vec<serde_json::Value> {
+    let root = TalkSageService::resolve_models_dir();
+    EngineKind::ALL
+        .iter()
+        .map(|&kind| {
+            let p = kind.profile();
+            serde_json::json!({
+                "id": kind.display_name(),
+                "label": p.label,
+                "languages": p.languages,
+                "streaming": p.streaming,
+                "speed": p.speed,
+                "description": p.description,
+                "installed": root.as_ref().is_some_and(|r| kind.is_available(r)),
+            })
+        })
+        .collect()
+}
+
 /// 保存配置（前端设置面板提交，写入 talksage.toml）。
 #[tauri::command]
-fn save_config(updates: serde_json::Value, state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn save_config(
+    updates: serde_json::Value,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     state
         .config
         .update(|c| {
             apply_config_updates(c, &updates);
         })
         .map_err(|e| format!("保存配置失败: {e}"))?;
+    // 录音目录可在设置页修改，保存后同步刷新 asset scope。
+    allow_recording_assets(&app, &state.config)?;
     Ok(())
 }
 
@@ -120,8 +156,21 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
         if let Some(b) = asr.get("backend").and_then(|v| v.as_str()) {
             c.asr.backend = b.to_string();
         }
+        if let Some(t) = asr.get("terminology") {
+            if let Some(v) = t.get("enabled").and_then(|v| v.as_bool()) { c.asr.terminology.enabled = v; }
+            if let Some(v) = t.get("hotword_score").and_then(|v| v.as_f64()) { c.asr.terminology.hotword_score = (v as f32).clamp(0.0, 10.0); }
+            if let Some(v) = t.get("terms").and_then(|v| v.as_array()) {
+                c.asr.terminology.terms = v.iter().filter_map(|x| x.as_str()).map(str::to_string).collect();
+            }
+            if let Some(v) = t.get("corrections").and_then(|v| v.as_object()) {
+                c.asr.terminology.corrections = v.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect();
+            }
+        }
     }
     if let Some(audio) = updates.get("audio") {
+        if let Some(v) = audio.get("input_gain_db").and_then(|v| v.as_f64()) {
+            c.audio.input_gain_db = (v as f32).clamp(0.0, 24.0);
+        }
         if let Some(vad) = audio.get("vad") {
             if let Some(p) = vad.get("preset").and_then(|v| v.as_str()) {
                 c.audio.vad.preset = match p {
@@ -144,6 +193,14 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
             if let Some(h) = d.get("highpass").and_then(|v| v.as_bool()) {
                 c.audio.denoise.highpass = h;
             }
+        }
+        if let Some(e) = audio.get("endpoint") {
+            if let Some(v) = e.get("enabled").and_then(|v| v.as_bool()) { c.audio.endpoint.enabled = v; }
+            if let Some(v) = e.get("stable_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.stable_ms = v.max(100); }
+            if let Some(v) = e.get("quiet_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.quiet_ms = v.max(100); }
+            if let Some(v) = e.get("force_quiet_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.force_quiet_ms = v.max(200); }
+            if let Some(v) = e.get("quiet_rms").and_then(|v| v.as_f64()) { c.audio.endpoint.quiet_rms = (v as f32).clamp(0.0, 0.5); }
+            if let Some(v) = e.get("min_segment_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.min_segment_ms = v; }
         }
         // 最短提交时长（ms）：0/null = 不限制
         if let Some(m) = audio.get("min_segment_ms") {
@@ -265,6 +322,19 @@ fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// 暂停或继续当前监听；会话与模型保持存活。
+#[tauri::command]
+fn set_listen_paused(paused: bool, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let guard = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+    match guard.as_ref() {
+        Some(running) => {
+            running.set_paused(paused);
+            Ok(())
+        }
+        None => Err("未在监听中".into()),
+    }
+}
+
 /// 实时调节噪音电平阈值（0 = 关闭；无需停止监听，下一音频块即生效）。
 #[tauri::command]
 fn set_noise_level(level: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
@@ -300,15 +370,15 @@ fn enroll_voice(seconds: u32, state: tauri::State<'_, AppState>) -> Result<serde
     if !model.is_file() {
         return Err(format!("缺少声纹模型: {}", model.display()));
     }
-    let extractor = SpeakerEmbeddingExtractor::create(&SpeakerEmbeddingExtractorConfig {
-        model: Some(model.to_string_lossy().into()),
-        num_threads: 1,
-        debug: false,
-        provider: Some("cpu".into()),
-    })
+    let identifier = talksage_pipeline::speaker::SpeakerIdentifier::new(
+        &model,
+        None,
+        talksage_pipeline::speaker::DEFAULT_THRESHOLD,
+    )
     .ok_or("声纹模型加载失败")?;
 
-    let (mut hub, rx) = AudioHub::new(100);
+    let gain_db = state.config.snapshot().audio.input_gain_db;
+    let (mut hub, rx) = AudioHub::new_with_gain(100, gain_db);
     hub.start(None).map_err(|e| format!("启动麦克风失败: {e}"))?;
     log::info!("声纹注册：录制 {} 秒…", seconds);
     let mut audio: Vec<f32> = Vec::new();
@@ -321,16 +391,18 @@ fn enroll_voice(seconds: u32, state: tauri::State<'_, AppState>) -> Result<serde
     }
     hub.stop();
 
-    let stream = extractor.create_stream().ok_or("创建声纹流失败")?;
-    stream.accept_waveform(16000, &audio);
-    if !extractor.is_ready(&stream) {
-        return Err("采集到的音频太短，无法提取声纹（请保持安静并正常说话）".into());
-    }
-    let emb = extractor.compute(&stream).ok_or("声纹提取失败")?;
+    let (emb, voiced_samples, windows) = identifier.enrollment_profile(&audio).ok_or(
+        "有效人声不足或录音质量较差；请在安静环境连续朗读，避免长时间停顿",
+    )?;
     talksage_pipeline::speaker::save_owner_embedding(state.config.data_dir(), &emb)
         .map_err(|e| format!("保存声纹失败: {e}"))?;
     log::info!("声纹注册完成: dim={} samples={}", emb.len(), audio.len());
-    Ok(serde_json::json!({ "ok": true, "dim": emb.len() }))
+    Ok(serde_json::json!({
+        "ok": true,
+        "dim": emb.len(),
+        "voiced_ms": voiced_samples * 1000 / 16000,
+        "windows": windows,
+    }))
 }
 
 /// 删除已注册的主人声纹。
@@ -494,10 +566,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_version,
             get_config,
+            list_asr_models,
             save_config,
             ping,
             start_listen,
             stop_listen,
+            set_listen_paused,
             set_noise_level,
             get_voiceprint_status,
             enroll_voice,
@@ -517,6 +591,9 @@ pub fn run() {
         .setup(move |app| {
             if let Err(e) = std::fs::create_dir_all(&data_dir) {
                 eprintln!("创建数据目录失败 {}: {e}", data_dir.display());
+            }
+            if let Err(e) = allow_recording_assets(app.handle(), &app.state::<AppState>().config) {
+                log::error!("{e}");
             }
             // 窗口偏好：恢复上次的位置/尺寸（物理像素），并在拖动/缩放时持久化（节流 1s）。
             // 注意：保存/恢复均为物理单位，避免高 DPI 下逻辑→物理转换导致窗口巨大。

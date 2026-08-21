@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AppApi, AppConfig, DomainEvent, NotesTemplate, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./api";
+import type { AppApi, AppConfig, AsrModelInfo, DomainEvent, NotesTemplate, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./api";
 
 /** 统一 fetch 辅助（同源 /api）。 */
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -42,6 +42,10 @@ export const ipcApi: AppApi = {
     return invoke<AppConfig>("get_config");
   },
 
+  async listAsrModels(): Promise<AsrModelInfo[]> {
+    return invoke<AsrModelInfo[]>("list_asr_models");
+  },
+
   async saveConfig(updates: Record<string, unknown>): Promise<void> {
     await invoke("save_config", { updates });
   },
@@ -58,6 +62,10 @@ export const ipcApi: AppApi = {
     await invoke("stop_listen");
   },
 
+  async setListenPaused(paused: boolean): Promise<void> {
+    await invoke("set_listen_paused", { paused });
+  },
+
   async setNoiseLevel(level: number): Promise<void> {
     await invoke("set_noise_level", { level });
   },
@@ -66,7 +74,7 @@ export const ipcApi: AppApi = {
     return invoke("get_voiceprint_status");
   },
 
-  async enrollVoice(seconds: number): Promise<{ ok: boolean; dim: number }> {
+  async enrollVoice(seconds: number): Promise<{ ok: boolean; dim: number; voiced_ms: number; windows: number }> {
     return invoke("enroll_voice", { seconds });
   },
 
@@ -151,6 +159,10 @@ export const httpApi: AppApi = {
     return req<AppConfig>("/config");
   },
 
+  async listAsrModels(): Promise<AsrModelInfo[]> {
+    return req<AsrModelInfo[]>("/asr/models");
+  },
+
   async saveConfig(updates: Record<string, unknown>): Promise<void> {
     await req("/config", {
       method: "POST",
@@ -171,6 +183,14 @@ export const httpApi: AppApi = {
     await req("/listen/stop", { method: "POST" });
   },
 
+  async setListenPaused(paused: boolean): Promise<void> {
+    await req("/listen/pause", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paused }),
+    });
+  },
+
   async setNoiseLevel(level: number): Promise<void> {
     await req("/noise_level", {
       method: "POST",
@@ -183,8 +203,8 @@ export const httpApi: AppApi = {
     return req("/voiceprint/status");
   },
 
-  async enrollVoice(seconds: number): Promise<{ ok: boolean; dim: number }> {
-    const r = await req<{ ok: boolean; dim: number }>("/voiceprint/enroll", {
+  async enrollVoice(seconds: number): Promise<{ ok: boolean; dim: number; voiced_ms: number; windows: number }> {
+    const r = await req<{ ok: boolean; dim: number; voiced_ms: number; windows: number }>("/voiceprint/enroll", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ seconds }),
@@ -292,5 +312,7 @@ export function recordingUrl(recordingPath: string | null | undefined): string |
     return convertFileSrc(recordingPath);
   }
   const name = recordingPath.split(/[\\/]/).pop() ?? recordingPath;
-  return `/api/recordings/${encodeURIComponent(name)}`;
+  const token = getToken();
+  const query = token ? `?token=${encodeURIComponent(token)}` : "";
+  return `/api/recordings/${encodeURIComponent(name)}${query}`;
 }

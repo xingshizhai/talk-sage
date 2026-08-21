@@ -7,6 +7,7 @@
 下载到 models/<repo>/
 """
 import os
+import struct
 import sys
 import urllib.request
 from pathlib import Path
@@ -99,6 +100,70 @@ def download(repo: str | None, filename: str, url: str, group: str) -> Path:
     return out
 
 
+def _read_varint(data: bytes, pos: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while pos < len(data):
+        byte = data[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return value, pos
+        shift += 7
+        if shift > 63:
+            break
+    raise ValueError("无效 protobuf varint")
+
+
+def _skip_field(data: bytes, pos: int, wire: int) -> int:
+    if wire == 0:
+        return _read_varint(data, pos)[1]
+    if wire == 1:
+        return pos + 8
+    if wire == 2:
+        size, pos = _read_varint(data, pos)
+        return pos + size
+    if wire == 5:
+        return pos + 4
+    raise ValueError(f"不支持的 protobuf wire type: {wire}")
+
+
+def export_sentencepiece_vocab(model: Path, output: Path) -> None:
+    """从 SentencePiece ModelProto 导出 sherpa 热词需要的 token/score 文本词表。"""
+    data = model.read_bytes()
+    pieces: list[tuple[str, float]] = []
+    pos = 0
+    while pos < len(data):
+        tag, pos = _read_varint(data, pos)
+        field, wire = tag >> 3, tag & 7
+        if field != 1 or wire != 2:  # ModelProto.pieces
+            pos = _skip_field(data, pos, wire)
+            continue
+        size, pos = _read_varint(data, pos)
+        message, pos = data[pos : pos + size], pos + size
+        piece = None
+        score = 0.0
+        inner = 0
+        while inner < len(message):
+            inner_tag, inner = _read_varint(message, inner)
+            inner_field, inner_wire = inner_tag >> 3, inner_tag & 7
+            if inner_field == 1 and inner_wire == 2:
+                length, inner = _read_varint(message, inner)
+                piece = message[inner : inner + length].decode("utf-8")
+                inner += length
+            elif inner_field == 2 and inner_wire == 5:
+                score = struct.unpack_from("<f", message, inner)[0]
+                inner += 4
+            else:
+                inner = _skip_field(message, inner, inner_wire)
+        if piece is not None:
+            pieces.append((piece, score))
+    if not pieces:
+        raise ValueError(f"SentencePiece 模型无词条: {model}")
+    output.write_text("".join(f"{piece}\t{score:.9g}\n" for piece, score in pieces), encoding="utf-8")
+    print(f"  generated {output.name} ({len(pieces)} pieces)")
+
+
 def main() -> None:
     global opener
     args = sys.argv[1:]
@@ -119,6 +184,12 @@ def main() -> None:
             print(f"== {name} ==")
             for repo, filename, url in files:
                 download(repo, filename, url, name)
+            if name == "zipformer-en":
+                model_dir = OUT_ROOT / "sherpa-onnx-streaming-zipformer-en-2023-06-26"
+                bpe_model = model_dir / "bpe.model"
+                bpe_vocab = model_dir / "bpe.vocab"
+                if bpe_model.is_file() and not bpe_vocab.is_file():
+                    export_sentencepiece_vocab(bpe_model, bpe_vocab)
 
 
 if __name__ == "__main__":

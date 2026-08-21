@@ -11,6 +11,12 @@ export interface AppConfig {
     client_engine: string;
     user_engine: string;
     backend: string;
+    terminology: {
+      enabled: boolean;
+      hotword_score: number;
+      terms: string[];
+      corrections: Record<string, string>;
+    };
   };
   llm: {
     default: string;
@@ -28,8 +34,10 @@ export interface AppConfig {
     brief_retriever: { enabled: boolean; cooldown_seconds: number };
   };
   audio: {
+    input_gain_db: number;
     vad: { preset: "standard" | "sensitive" | "strict"; threshold: number | null };
     denoise: { enabled: boolean; gate_threshold: number; highpass: boolean };
+    endpoint: { enabled: boolean; stable_ms: number; quiet_ms: number; force_quiet_ms: number; quiet_rms: number; min_segment_ms: number };
     min_segment_ms: number | null;
   };
   /** 会议录音（边用边录，形成测试闭环）。 */
@@ -232,10 +240,21 @@ export interface NotesTemplate {
   description: string;
 }
 
+export interface AsrModelInfo {
+  id: string;
+  label: string;
+  languages: string;
+  streaming: boolean;
+  speed: "realtime" | "balanced" | "accurate";
+  description: string;
+  installed: boolean;
+}
+
 /** 应用 API 表面。 */
 export interface AppApi {
   getVersion(): Promise<string>;
   getConfig(): Promise<AppConfig>;
+  listAsrModels(): Promise<AsrModelInfo[]>;
   /** 保存配置（写入 talksage.toml / 服务端配置）。 */
   saveConfig(updates: Record<string, unknown>): Promise<void>;
   ping(): Promise<void>;
@@ -243,12 +262,14 @@ export interface AppApi {
   startListen(): Promise<void>;
   /** 停止实时监听。 */
   stopListen(): Promise<void>;
+  /** 暂停或继续当前监听，会话保持不变。 */
+  setListenPaused(paused: boolean): Promise<void>;
   /** 实时调节噪音电平阈值（0 = 关闭，监听中生效，无需重启）。 */
   setNoiseLevel(level: number): Promise<void>;
   /** 说话人声纹状态。 */
   getVoiceprintStatus(): Promise<{ model_available: boolean; enrolled: boolean }>;
   /** 注册主人声音（录制麦克风 seconds 秒 → 提取声纹保存）。 */
-  enrollVoice(seconds: number): Promise<{ ok: boolean; dim: number }>;
+  enrollVoice(seconds: number): Promise<{ ok: boolean; dim: number; voiced_ms: number; windows: number }>;
   /** 删除主人声纹。 */
   removeVoiceprint(): Promise<void>;
   /** 最小化到系统托盘（Windows；隐藏主窗口）。 */

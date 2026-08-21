@@ -190,6 +190,9 @@ cd web && npx vitest run       # 前端 27 用例
 - [RECORDING.md](docs/RECORDING.md) — 录音/裁剪/回归闭环
 - [LOGGING.md](docs/LOGGING.md) — 结构化日志与排障
 - [testing.md](docs/testing.md) — 自动化测试策略
+- [evaluation-user-guide.md](docs/evaluation-user-guide.md) — 语音自动化测试与模型评估使用手册
+- [evaluation-framework.md](docs/evaluation-framework.md) — 评估框架架构与指标设计
+- [terminology.md](docs/terminology.md) — 专业术语热词、纠错表与术语指标
 - [reference-whisperlivekit.md](docs/reference-whisperlivekit.md) — 参考项目：WhisperLiveKit 研究（引擎池/评测/双载体借鉴）
 - [reference-callmd.md](docs/reference-callmd.md) — 参考项目：Call.md 研究（会话指标/实时提示/三段式纪要/Webhook 借鉴）
 

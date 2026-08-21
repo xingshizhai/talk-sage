@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use sherpa_onnx::{
     OfflineModelConfig, OfflineQwen3ASRModelConfig, OfflineRecognizer, OfflineRecognizerConfig,
     OfflineStream, OfflineWhisperModelConfig, OnlineModelConfig, OnlineParaformerModelConfig,
@@ -44,6 +45,35 @@ pub trait StreamingASREngine {
     fn kind(&self) -> EngineKind;
 }
 
+/// 单次识别会话的上下文选项。参与引擎池键，避免不同会议复用错误热词上下文。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EngineOptions {
+    pub hotwords: Vec<String>,
+    pub hotword_score: f32,
+}
+
+impl EngineOptions {
+    fn signature(&self) -> String {
+        format!("{:.3}|{}", self.hotword_score, self.hotwords.join("\u{1f}"))
+    }
+}
+
+static HOTWORD_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// sherpa 在线 transducer 的 `hotwords_file` 接受普通短语（每行一个），
+/// 识别器创建时内部按 bpe.model 编译。文件只需存活到 create 完成。
+fn write_hotwords_file(hotwords: &[String]) -> anyhow::Result<std::path::PathBuf> {
+    let seq = HOTWORD_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("talksage-hotwords-{}-{seq}.txt", std::process::id()));
+    let body = hotwords.iter()
+        .map(|term| term.replace(['\r', '\n'], " ").trim().to_string())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, format!("{body}\n"))?;
+    Ok(path)
+}
+
 /// 引擎后端选择（与配置 asr.client_engine / user_engine 对应）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineKind {
@@ -59,7 +89,27 @@ pub enum EngineKind {
     Qwen3Asr,
 }
 
+/// 单一事实来源的模型能力描述，供配置界面和服务 API 共用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelProfile {
+    pub kind: EngineKind,
+    pub label: &'static str,
+    pub languages: &'static str,
+    pub streaming: bool,
+    /// `realtime` / `balanced` / `accurate`。
+    pub speed: &'static str,
+    pub description: &'static str,
+}
+
 impl EngineKind {
+    pub const ALL: [Self; 5] = [
+        Self::ParaformerZh,
+        Self::ZipformerEn,
+        Self::WhisperBase,
+        Self::WhisperSmall,
+        Self::Qwen3Asr,
+    ];
+
     /// 从配置字符串解析（zipformer-en / paraformer-zh / whisper-base / whisper-small / qwen3-asr / …）。
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
@@ -98,6 +148,31 @@ impl EngineKind {
             Self::Qwen3Asr => "sherpa-onnx-qwen3-asr-0.6b",
         }
     }
+
+    pub fn profile(self) -> ModelProfile {
+        match self {
+            Self::ParaformerZh => ModelProfile { kind: self, label: "Paraformer 中文", languages: "zh", streaming: true, speed: "realtime", description: "低延迟流式中文，推荐用于实时字幕" },
+            Self::ZipformerEn => ModelProfile { kind: self, label: "Zipformer 英文", languages: "en", streaming: true, speed: "realtime", description: "低延迟流式英文" },
+            Self::WhisperBase => ModelProfile { kind: self, label: "Whisper base", languages: "multilingual", streaming: false, speed: "balanced", description: "段结束后识别，多语言准确率与速度平衡" },
+            Self::WhisperSmall => ModelProfile { kind: self, label: "Whisper small", languages: "multilingual", streaming: false, speed: "accurate", description: "段结束后识别，准确率优先但延迟更高" },
+            Self::Qwen3Asr => ModelProfile { kind: self, label: "Qwen3-ASR 0.6B", languages: "multilingual", streaming: false, speed: "accurate", description: "段结束后识别；仅在模型完整安装后可选" },
+        }
+    }
+
+    /// 检查模型文件是否完整，而不只是检查目录存在。
+    pub fn is_available(self, models_root: &Path) -> bool {
+        let dir = models_root.join(self.model_dir_name());
+        let has = |name: &str| dir.join(name).is_file();
+        match self {
+            Self::ParaformerZh => has("tokens.txt") && ((has("encoder.onnx") && has("decoder.onnx")) || (has("encoder.int8.onnx") && has("decoder.int8.onnx"))),
+            Self::ZipformerEn => has("tokens.txt") && has("bpe.model") && has("encoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx") && has("decoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx") && has("joiner-epoch-99-avg-1-chunk-16-left-64.int8.onnx"),
+            Self::WhisperBase | Self::WhisperSmall => {
+                let stem = if self == Self::WhisperBase { "base" } else { "small" };
+                has(&format!("{stem}-tokens.txt")) && ((has(&format!("{stem}-encoder.onnx")) && has(&format!("{stem}-decoder.onnx"))) || (has(&format!("{stem}-encoder.int8.onnx")) && has(&format!("{stem}-decoder.int8.onnx"))))
+            }
+            Self::Qwen3Asr => has("conv_frontend.onnx") && has("encoder.onnx") && has("decoder.onnx") && has("tokenizer.json"),
+        }
+    }
 }
 
 /// sherpa-onnx 流式识别器封装。
@@ -108,9 +183,24 @@ pub struct SherpaStreamingEngine {
     kind: EngineKind,
 }
 
+/// 在线模型需要右侧声学上下文才能确认句尾 token。直接调用
+/// `input_finished()` 虽会排空已经就绪的帧，却不会替缺失的右上下文补帧，
+/// Paraformer 因此容易吞掉最后一个中文字符。这里补的是模型输入，不是实际
+/// 录音，所以不会延长会话时间戳，也不会让用户额外等待 1600ms。取两个
+/// Paraformer 大块的长度，可覆盖流切分落在任意块内的位置。
+const STREAMING_TAIL_PADDING_MS: usize = 1600;
+
+fn streaming_tail_padding_samples(sample_rate: i32) -> usize {
+    sample_rate.max(0) as usize * STREAMING_TAIL_PADDING_MS / 1000
+}
+
 impl SherpaStreamingEngine {
     /// 构建指定引擎（模型文件在 model_dir 下，文件名与下载脚本约定一致）。
     pub fn new(kind: EngineKind, model_dir: &Path, num_threads: i32) -> anyhow::Result<Self> {
+        Self::new_with_options(kind, model_dir, num_threads, &EngineOptions::default())
+    }
+
+    pub fn new_with_options(kind: EngineKind, model_dir: &Path, num_threads: i32, options: &EngineOptions) -> anyhow::Result<Self> {
         let model_config = match kind {
             EngineKind::ParaformerZh => {
                 // fp32 更准（存在时优先）；int8 作为后备（小/快）
@@ -134,10 +224,11 @@ impl SherpaStreamingEngine {
                 let enc = "encoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx";
                 let dec = "decoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx";
                 let joiner = "joiner-epoch-99-avg-1-chunk-16-left-64.int8.onnx";
+                let bpe_vocab = model_dir.join("bpe.vocab");
                 OnlineModelConfig {
                     model_type: Some("zipformer2".into()),
-                    modeling_unit: Some("bpe".into()),
-                    bpe_vocab: Some(model_dir.join("bpe.model").to_string_lossy().into()),
+                    modeling_unit: bpe_vocab.is_file().then(|| "bpe".into()),
+                    bpe_vocab: bpe_vocab.is_file().then(|| bpe_vocab.to_string_lossy().into_owned()),
                     transducer: OnlineTransducerModelConfig {
                         encoder: Some(model_dir.join(enc).to_string_lossy().into()),
                         decoder: Some(model_dir.join(dec).to_string_lossy().into()),
@@ -153,15 +244,39 @@ impl SherpaStreamingEngine {
             }
         };
 
+        let use_hotwords = kind == EngineKind::ZipformerEn
+            && !options.hotwords.is_empty()
+            && model_dir.join("bpe.vocab").is_file();
+        if kind == EngineKind::ZipformerEn && !options.hotwords.is_empty() && !use_hotwords {
+            log::warn!("Zipformer 缺少 bpe.vocab，热词未启用；运行 scripts/download_models.py zipformer-en 补齐");
+        }
+        let hotwords_path = if use_hotwords { Some(write_hotwords_file(&options.hotwords)?) } else { None };
         let config = OnlineRecognizerConfig {
             model_config,
-            decoding_method: Some("greedy_search".into()),
+            decoding_method: Some(if use_hotwords { "modified_beam_search" } else { "greedy_search" }.into()),
+            max_active_paths: if use_hotwords { 4 } else { 0 },
+            hotwords_file: hotwords_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            hotwords_score: if use_hotwords { options.hotword_score } else { 0.0 },
             enable_endpoint: false,
             ..Default::default()
         };
 
-        let recognizer = OnlineRecognizer::create(&config)
-            .ok_or_else(|| anyhow::anyhow!("创建 sherpa-onnx 流式识别器失败（模型路径/文件不完整？）"))?;
+        let recognizer = OnlineRecognizer::create(&config);
+        if let Some(path) = hotwords_path { std::fs::remove_file(path).ok(); }
+        let recognizer = match recognizer {
+            Some(recognizer) => recognizer,
+            None if use_hotwords => {
+                log::warn!("Zipformer 热词识别器创建失败，回退 greedy_search");
+                let mut fallback = config.clone();
+                fallback.decoding_method = Some("greedy_search".into());
+                fallback.max_active_paths = 0;
+                fallback.hotwords_file = None;
+                fallback.hotwords_score = 0.0;
+                OnlineRecognizer::create(&fallback)
+                    .ok_or_else(|| anyhow::anyhow!("创建 sherpa-onnx 流式识别器失败（模型路径/文件不完整？）"))?
+            }
+            None => return Err(anyhow::anyhow!("创建 sherpa-onnx 流式识别器失败（模型路径/文件不完整？）")),
+        };
         let stream = recognizer.create_stream();
         Ok(Self {
             recognizer,
@@ -187,6 +302,8 @@ impl StreamingASREngine for SherpaStreamingEngine {
     }
 
     fn finish(&mut self) {
+        let padding = vec![0.0; streaming_tail_padding_samples(self.sample_rate)];
+        self.stream.accept_waveform(self.sample_rate, &padding);
         self.stream.input_finished();
         while self.recognizer.is_ready(&self.stream) {
             self.recognizer.decode(&self.stream);
@@ -230,6 +347,10 @@ pub struct OfflineSegmentEngine {
 impl OfflineSegmentEngine {
     /// 构建离线引擎（whisper-base / whisper-small / qwen3-asr）。
     pub fn new(kind: EngineKind, model_dir: &Path, num_threads: i32) -> anyhow::Result<Self> {
+        Self::new_with_options(kind, model_dir, num_threads, &EngineOptions::default())
+    }
+
+    pub fn new_with_options(kind: EngineKind, model_dir: &Path, num_threads: i32, options: &EngineOptions) -> anyhow::Result<Self> {
         let model_config = match kind {
             EngineKind::WhisperBase | EngineKind::WhisperSmall => {
                 let stem = if kind == EngineKind::WhisperBase { "base" } else { "small" };
@@ -268,7 +389,7 @@ impl OfflineSegmentEngine {
                     temperature: 0.0,
                     top_p: 1.0,
                     seed: 42,
-                    hotwords: None,
+                    hotwords: (!options.hotwords.is_empty()).then(|| options.hotwords.join(", ")),
                 },
                 num_threads,
                 debug: false,
@@ -321,15 +442,25 @@ impl SegmentEngine for OfflineSegmentEngine {
 
 /// 按引擎类型创建段级引擎：流式走 sherpa-onnx 流式识别器；离线（whisper/qwen3）走离线段级。
 pub fn create_engine(kind: EngineKind, model_dir: &Path, num_threads: i32) -> anyhow::Result<Box<dyn SegmentEngine>> {
+    create_engine_with_options(kind, model_dir, num_threads, &EngineOptions::default())
+}
+
+pub fn create_engine_with_options(kind: EngineKind, model_dir: &Path, num_threads: i32, options: &EngineOptions) -> anyhow::Result<Box<dyn SegmentEngine>> {
     if kind.is_streaming() {
-        Ok(Box::new(SherpaStreamingEngine::new(kind, model_dir, num_threads)?))
+        Ok(Box::new(SherpaStreamingEngine::new_with_options(kind, model_dir, num_threads, options)?))
     } else {
-        Ok(Box::new(OfflineSegmentEngine::new(kind, model_dir, num_threads)?))
+        Ok(Box::new(OfflineSegmentEngine::new_with_options(kind, model_dir, num_threads, options)?))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn streaming_finish_adds_right_context_without_changing_audio_clock() {
+        assert_eq!(super::streaming_tail_padding_samples(16_000), 25_600);
+        assert_eq!(super::streaming_tail_padding_samples(8_000), 12_800);
+    }
+
     use super::*;
 
     #[test]
@@ -346,16 +477,28 @@ mod tests {
         assert!(!EngineKind::WhisperBase.is_streaming());
         assert!(!EngineKind::Qwen3Asr.is_streaming());
     }
+
+    #[test]
+    fn model_catalog_has_stable_unique_ids_and_speed_classes() {
+        let mut ids = std::collections::HashSet::new();
+        for kind in EngineKind::ALL {
+            let profile = kind.profile();
+            assert_eq!(profile.kind, kind);
+            assert_eq!(profile.streaming, kind.is_streaming());
+            assert!(ids.insert(kind.display_name()), "模型 id 重复");
+            assert!(matches!(profile.speed, "realtime" | "balanced" | "accurate"));
+        }
+    }
 }
 
-/// 每类 (kind, model_dir) 引擎在池中的最大缓存数（防无限累积）。
+/// 每类流式 (kind, model_dir) 引擎在池中的最大缓存数（防无限累积）。
 const POOL_MAX_PER_KEY: usize = 4;
 
-/// 引擎池：按 (kind, model_dir) 缓存已加载的**流式**引擎，会话间复用。
+/// 引擎池：按 (kind, model_dir) 缓存已加载的引擎，会话间复用。
 ///
 /// 参考 WhisperLiveKit 的引擎单例设计：模型只加载一次，后续监听
 /// 直接从池中取已就绪的引擎（热启动，毫秒级），归还时自动 reset。
-/// 离线段级引擎（whisper/qwen3）不进池（每次新建）。
+/// 离线段级模型体积较大，每种最多保留一个；流式模型最多保留四个。
 ///
 /// 线程安全（内部 Mutex）；`SherpaStreamingEngine` 为 Send（OnlineRecognizer/
 /// OnlineStream 均为 Send+Sync），可跨线程借出/归还。
@@ -370,32 +513,37 @@ impl EnginePool {
         Arc::new(Self::default())
     }
 
-    fn key(kind: EngineKind, model_dir: &Path) -> String {
-        format!("{}|{}", kind.display_name(), model_dir.display())
+    fn key(kind: EngineKind, model_dir: &Path, options: &EngineOptions) -> String {
+        format!("{}|{}|{}", kind.display_name(), model_dir.display(), options.signature())
     }
 
-    /// 借出流式引擎：池中有缓存则复用（已 reset），否则新建并加载模型。
+    /// 借出引擎：池中有缓存则复用（已 reset），否则新建并加载模型。
     pub fn acquire(&self, kind: EngineKind, model_dir: &Path, num_threads: i32) -> anyhow::Result<Box<dyn SegmentEngine>> {
-        let key = Self::key(kind, model_dir);
+        self.acquire_with_options(kind, model_dir, num_threads, &EngineOptions::default())
+    }
+
+    pub fn acquire_with_options(&self, kind: EngineKind, model_dir: &Path, num_threads: i32, options: &EngineOptions) -> anyhow::Result<Box<dyn SegmentEngine>> {
+        let key = Self::key(kind, model_dir, options);
         if let Some(e) = self.inner.lock().unwrap().get_mut(&key).and_then(|v| v.pop()) {
             log::debug!("引擎池命中: {key}");
             return Ok(e);
         }
         log::debug!("引擎池未命中，新建: {key}");
-        Ok(Box::new(SherpaStreamingEngine::new(kind, model_dir, num_threads)?))
+        create_engine_with_options(kind, model_dir, num_threads, options)
     }
 
-    /// 归还流式引擎：reset 清空识别状态后入池（超出容量则丢弃）；离线引擎直接释放。
-    pub fn release(&self, kind: EngineKind, model_dir: &Path, mut engine: Box<dyn SegmentEngine>) {
-        if !kind.is_streaming() {
-            log::debug!("离线引擎不缓存: {key}", key = Self::key(kind, model_dir));
-            return;
-        }
+    /// 归还引擎：reset 清空识别状态后入池，超出该类型容量时释放。
+    pub fn release(&self, kind: EngineKind, model_dir: &Path, engine: Box<dyn SegmentEngine>) {
+        self.release_with_options(kind, model_dir, &EngineOptions::default(), engine)
+    }
+
+    pub fn release_with_options(&self, kind: EngineKind, model_dir: &Path, options: &EngineOptions, mut engine: Box<dyn SegmentEngine>) {
         engine.reset();
-        let key = Self::key(kind, model_dir);
+        let key = Self::key(kind, model_dir, options);
         let mut inner = self.inner.lock().unwrap();
         let v = inner.entry(key).or_default();
-        if v.len() < POOL_MAX_PER_KEY {
+        let capacity = if kind.is_streaming() { POOL_MAX_PER_KEY } else { 1 };
+        if v.len() < capacity {
             v.push(engine);
         } // 超限丢弃（内存释放）
     }
@@ -427,10 +575,11 @@ mod pool_tests {
                 return Some(p);
             }
         }
+        let sub = kind.model_dir_name();
         let candidates = [
-            std::path::PathBuf::from("models/sherpa-onnx-streaming-paraformer-zh"),
-            std::path::PathBuf::from("../models/sherpa-onnx-streaming-paraformer-zh"),
-            std::path::PathBuf::from("../../models/sherpa-onnx-streaming-paraformer-zh"),
+            std::path::PathBuf::from("models").join(sub),
+            std::path::PathBuf::from("../models").join(sub),
+            std::path::PathBuf::from("../../models").join(sub),
         ];
         candidates.into_iter().find(|p| p.is_dir())
     }
@@ -466,4 +615,35 @@ mod pool_tests {
         pool.warmup(EngineKind::ParaformerZh, &dir, 1).expect("预热失败");
         assert_eq!(pool.len(), 1);
     }
+
+    #[test]
+    fn pool_key_isolated_by_meeting_hotwords() {
+        let dir = Path::new("models/example");
+        let a = EngineOptions { hotwords: vec!["TalkSage".into()], hotword_score: 1.5 };
+        let b = EngineOptions { hotwords: vec!["WhisperLiveKit".into()], hotword_score: 1.5 };
+        assert_ne!(EnginePool::key(EngineKind::ZipformerEn, dir, &a), EnginePool::key(EngineKind::ZipformerEn, dir, &b));
+    }
+
+    #[test]
+    fn zipformer_builds_plain_text_hotwords_safely() {
+        let Some(dir) = model_dir(EngineKind::ZipformerEn) else {
+            eprintln!("跳过：缺少 zipformer 模型");
+            return;
+        };
+        let options = EngineOptions {
+            hotwords: vec!["TalkSage".into(), "Whisper Live Kit".into()],
+            hotword_score: 1.5,
+        };
+        let mut engine = create_engine_with_options(EngineKind::ZipformerEn, &dir, 1, &options)
+            .expect("普通文本热词应由 sherpa 内部 BPE 编译");
+        assert_eq!(engine.kind(), EngineKind::ZipformerEn);
+        let wav = dir.join("0.wav");
+        if let Some(wave) = sherpa_onnx::Wave::read(&wav.to_string_lossy()) {
+            for chunk in wave.samples().chunks(3200) {
+                let _ = engine.accept(chunk);
+            }
+            assert!(!engine.finish().trim().is_empty(), "启用热词后仍应完成真实音频识别");
+        }
+    }
+
 }
