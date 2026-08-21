@@ -190,6 +190,9 @@ Real-model integration tests cover: Chinese/English ASR recognition, dual-stream
 - [testing.md](docs/testing.md) — automated testing strategy
 - [reference-whisperlivekit.md](docs/reference-whisperlivekit.md) — reference project: WhisperLiveKit study (engine pool / benchmark / dual carriers)
 - [reference-callmd.md](docs/reference-callmd.md) — reference project: Call.md study (conversation metrics / live nudges / trio summary / webhooks)
+- [reference-whisper-flow.md](docs/reference-whisper-flow.md) — reference project: Whisper Flow study (streaming protocol / segmentation heuristic / quality gates)
+- [reference-meetily.md](docs/reference-meetily.md) — reference project: Meetily study (VAD tuning / event payload / crash recovery / device fallbacks)
+- [reference-vibevoice.md](docs/reference-vibevoice.md) — reference project: VibeVoice study (context injection / JSON fault tolerance / streaming cache)
 
 ## Repository layout
 

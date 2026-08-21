@@ -195,6 +195,9 @@ cd web && npx vitest run       # 前端 27 用例
 - [terminology.md](docs/terminology.md) — 专业术语热词、纠错表与术语指标
 - [reference-whisperlivekit.md](docs/reference-whisperlivekit.md) — 参考项目：WhisperLiveKit 研究（引擎池/评测/双载体借鉴）
 - [reference-callmd.md](docs/reference-callmd.md) — 参考项目：Call.md 研究（会话指标/实时提示/三段式纪要/Webhook 借鉴）
+- [reference-whisper-flow.md](docs/reference-whisper-flow.md) — 参考项目：Whisper Flow 研究（流式协议/分段启发式/质量门禁）
+- [reference-meetily.md](docs/reference-meetily.md) — 参考项目：Meetily 研究（VAD 调参/事件负载/崩溃恢复/设备阶梯）
+- [reference-vibevoice.md](docs/reference-vibevoice.md) — 参考项目：VibeVoice 研究（上下文注入/JSON 容错/流式缓存）
 
 ## 仓库结构
 
