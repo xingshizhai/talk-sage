@@ -223,7 +223,7 @@ finalizer 全部在 `stop → flush → 写入 barrier` 之后执行。这是 ar
 | 2 | filter 链：`short_segment` / `cross_stream_dedup` 搬出 `StreamWorker` | 中，动热路径 | ✅ 完成 |
 | 3 | observer：`conversation_metrics` 搬出（含 nudge） | 中，跨段状态 | ✅ 完成 |
 | 4 | finalizer：`session_quality` / `webhook` / `markdown_export` / `trio_notes`；server 与 tauri 导出合一 | 中，涉及两个适配器 | 待办 |
-| 5 | 配置换通用表 + `/plugins` 元数据端点 + 设置 UI 自动生成 | 低，但面广 | 待办 |
+| 5 | 配置换通用表 + `/plugins` 元数据端点 + 设置 UI 自动生成 | 低，但面广 | ✅ 完成 |
 
 **预期产出：** `pipeline/src/lib.rs` 由 1130 行降至约 800 行；server 与 tauri 各去掉一份导出实现；`plugins/` 下新增 6 个小文件。
 
@@ -261,3 +261,56 @@ finalizer 全部在 `stop → flush → 写入 barrier` 之后执行。这是 ar
 - finalizer 之间互不阻塞
 - 新增插件不得要求修改 pipeline、config 结构体或前端
 - 每阶段结束时 `TALKSAGE_REQUIRE_MODELS=1` 下全量测试通过且零跳过
+
+
+---
+
+## 9. 最终状态（五阶段完成，2026-08-20）
+
+**插件总数 8 个**：`short_segment` / `cross_stream_dedup`（Filter）、`conversation_metrics` /
+`term_explainer` / `translator` / `brief_retriever`（Observer）、`session_quality` / `webhook`
+（Finalizer）。`builtin_plugins()` 是唯一来源。
+
+**验收标准达成**：`service.rs`、`server/lib.rs`、`web/src-tauri/lib.rs`、`SettingsSection.tsx`
+四个文件里具体插件 id 出现次数**均为 0**。加一个插件：
+- 基础设施类 **2 处**（加文件 + `builtin.rs` 一行）
+- 分析类 **3 处**（多一处 `talksage-config` 侧的 id 列表）
+
+第三处源于 `talksage-config` 刻意不依赖 `talksage-plugins`，id 列表因而在两个 crate 各存一份。
+已用跨 crate 测试锁住漂移（放在同时依赖两者的 `talksage-pipeline`），改错会让 CI 红而不是
+静默禁用插件。收成 2 处需反转依赖方向或把常量移到 `talksage-core` —— 留作后续决策。
+
+### 行数不是有效指标
+
+| 阶段 | 搬的是什么 | `pipeline/lib.rs` |
+|---|---|---|
+| 1–2 | 判定逻辑（短段抑制、跨流去重） | 1130 → 1165（**+35**） |
+| 3 | 调度逻辑（指标/提示派发） | 1165 → 1125（**−40**） |
+
+**搬「调度」才瘦身，搬「判定」不会** —— 后者只是把代码从核心挪到插件，接线成本还要倒贴。
+真正的收益是解耦，不是行数。
+
+### 过程中发现并修复的既存缺陷
+
+均与本设计无关，但都影响结论可信度：
+
+1. **`TempDir` 目录名碰撞**（`talksage-pipeline`）。纳秒时间戳在 macOS 上实为微秒分辨率，
+   实测连续 1000 次取值 956 次相同，并行测试拿到同一路径。
+2. **环境变量竞争**（`talksage-config`）。`env_overrides_win` 用 `set_var` 设
+   `TALKSAGE_SERVER_PORT`，而 `load()` 会读它 —— 进程全局 + 测试并行，实测连跑 5 次失败 4 次。
+3. **特征化 golden 锁了精确 ASR 文本**，而文本取决于 gitignore 的 `models/` 里有无 fp32 模型，
+   换机器必然对不上，且失败信息诱导人重新生成 golden、把机器差异洗成新基线。改为只锁结构。
+4. **跨流回声重复段仍触发插件**（§3.3 记录的既存缺陷），随阶段 2 修复并补了破坏性验证过的
+   回归测试。
+
+前两条的共性是**测试基建里的并发共享状态**。「测试全绿」在修掉它们之前都含运气成分。
+
+### 已知遗留
+
+- `PluginContext` 每加一个宿主能力就多一个 `Option` 字段（O(N)），且每个插件要自行判断
+  「我是否被接上」。
+- `webhook` finalizer 返回 `Ok` 只代表「已派发」而非「已送达」—— 它起线程后立即返回，
+  传输失败只进日志、不反映到 `FinalizeReport`。
+- `TranslatorPlugin` 没有冷却状态，`should_trigger` 对每个非空段返回 true，即**每个
+  committed 段都触发一次 LLM 翻译调用**。配置里的 `cooldown_seconds: 3.0` 从未被接上。
+  接上会显著减少 LLM 流量但让翻译变少 —— 属产品决策，未在本重构内处理。
