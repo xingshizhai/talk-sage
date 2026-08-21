@@ -13,6 +13,7 @@ pub mod cross_stream_dedup;
 pub mod builtin;
 pub mod conversation_metrics;
 pub mod session_quality;
+pub mod webhook;
 
 pub use builtin::{build_registry, builtin_plugins};
 
