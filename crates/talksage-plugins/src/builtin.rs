@@ -356,7 +356,7 @@ mod tests {
         overrides.insert("short_segment".to_string(), serde_json::json!({"min_ms": 400}));
         let hooks = build_registry(&builtin_plugins(), &overrides, &PluginContext::new());
         let short = DomainEvent::Segment {
-            speaker_id: 0, speaker_label: "我".into(), text: "喂".into(),
+            speaker_id: 0, speaker_label: "我".into(), speaker_attribution: None, text: "喂".into(),
             is_partial: false, ts_ms: 0, duration_ms: 200, rms: 0.1,
             revision: 0, start_sample: 0, end_sample: 3200,
         };

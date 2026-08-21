@@ -131,6 +131,7 @@ mod tests {
         TranscriptSegment {
             speaker_id: speaker,
             speaker_label: if speaker == 1 { "客户" } else { "我" }.into(),
+            speaker_attribution: None,
             text: text.into(),
             is_partial: false,
             ts_ms: 0,

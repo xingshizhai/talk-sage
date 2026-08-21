@@ -188,6 +188,7 @@ async fn export_returns_markdown_for_session() {
                 &talksage_core::TranscriptSegment {
                     speaker_id: 1,
                     speaker_label: "客户".into(),
+                    speaker_attribution: None,
                     text: "We need NPI samples by Friday.".into(),
                     is_partial: false,
                     ts_ms: 500,

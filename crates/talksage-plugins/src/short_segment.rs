@@ -70,6 +70,7 @@ mod tests {
         DomainEvent::Segment {
             speaker_id: 0,
             speaker_label: "我".into(),
+            speaker_attribution: None,
             text: "喂".into(),
             is_partial,
             ts_ms: 1000,

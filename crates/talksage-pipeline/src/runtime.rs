@@ -82,6 +82,7 @@ fn stamp_revision(ev: DomainEvent, revision: u64) -> DomainEvent {
         DomainEvent::Segment {
             speaker_id,
             speaker_label,
+            speaker_attribution,
             text,
             is_partial,
             ts_ms,
@@ -93,6 +94,7 @@ fn stamp_revision(ev: DomainEvent, revision: u64) -> DomainEvent {
         } => DomainEvent::Segment {
             speaker_id,
             speaker_label,
+            speaker_attribution,
             text,
             is_partial,
             ts_ms,
@@ -118,6 +120,7 @@ mod tests {
         let ev = DomainEvent::Segment {
             speaker_id: 0,
             speaker_label: "我".into(),
+            speaker_attribution: None,
             text: "hi".into(),
             is_partial: false,
             ts_ms: 10,

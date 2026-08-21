@@ -87,6 +87,7 @@ mod tests {
         DomainEvent::Segment {
             speaker_id,
             speaker_label: if speaker_id == 0 { "我".into() } else { "客户".into() },
+            speaker_attribution: None,
             text: text.into(),
             is_partial: false,
             ts_ms,

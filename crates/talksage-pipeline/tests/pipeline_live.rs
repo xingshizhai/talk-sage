@@ -145,9 +145,10 @@ fn file_input_produces_status_and_segments() {
     let final_segs: Vec<talksage_core::TranscriptSegment> = evs
         .iter()
         .filter_map(|e| match e {
-            DomainEvent::Segment { speaker_id, speaker_label, text, is_partial: false, ts_ms, duration_ms, .. } => Some(talksage_core::TranscriptSegment {
+            DomainEvent::Segment { speaker_id, speaker_label, speaker_attribution, text, is_partial: false, ts_ms, duration_ms, .. } => Some(talksage_core::TranscriptSegment {
                 speaker_id: *speaker_id,
                 speaker_label: speaker_label.clone(),
+                speaker_attribution: speaker_attribution.clone(),
                 text: text.clone(),
                 is_partial: false,
                 ts_ms: *ts_ms,
@@ -419,11 +420,12 @@ impl talksage_plugins::EventFilter for RewriteFilter {
     fn filter(&self, ev: DomainEvent) -> Option<DomainEvent> {
         match ev {
             DomainEvent::Segment {
-                speaker_id, speaker_label, text, is_partial: false, ts_ms,
+                speaker_id, speaker_label, speaker_attribution, text, is_partial: false, ts_ms,
                 duration_ms, rms, revision, start_sample, end_sample,
             } => Some(DomainEvent::Segment {
                 speaker_id,
                 speaker_label,
+                speaker_attribution,
                 text: format!("{text}{REWRITE_SUFFIX}"),
                 is_partial: false,
                 ts_ms,

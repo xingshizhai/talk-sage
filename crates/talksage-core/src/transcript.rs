@@ -34,6 +34,7 @@ impl TranscriptState {
         let DomainEvent::Segment {
             speaker_id,
             speaker_label,
+            speaker_attribution,
             text,
             is_partial,
             ts_ms,
@@ -67,6 +68,7 @@ impl TranscriptState {
         self.committed.push(TranscriptSegment {
             speaker_id: *speaker_id,
             speaker_label: speaker_label.clone(),
+            speaker_attribution: speaker_attribution.clone(),
             text: text.clone(),
             is_partial: false,
             ts_ms: *ts_ms,
@@ -111,6 +113,7 @@ mod tests {
         DomainEvent::Segment {
             speaker_id: speaker,
             speaker_label: "我".into(),
+            speaker_attribution: None,
             text: text.into(),
             is_partial: true,
             ts_ms: 1_000 + end / 16,
@@ -126,6 +129,7 @@ mod tests {
         DomainEvent::Segment {
             speaker_id: speaker,
             speaker_label: "我".into(),
+            speaker_attribution: None,
             text: text.into(),
             is_partial: false,
             ts_ms: 1_000 + end / 16,
@@ -158,6 +162,7 @@ mod tests {
         st.apply(&DomainEvent::Segment {
             speaker_id: 0,
             speaker_label: "我".into(),
+            speaker_attribution: None,
             text: "我们".into(),
             is_partial: true,
             ts_ms: 10,
@@ -170,6 +175,7 @@ mod tests {
         st.apply(&DomainEvent::Segment {
             speaker_id: 1,
             speaker_label: "客户".into(),
+            speaker_attribution: None,
             text: "We need".into(),
             is_partial: true,
             ts_ms: 12,

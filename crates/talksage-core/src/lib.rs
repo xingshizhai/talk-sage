@@ -22,6 +22,66 @@ pub use webhook::{post_webhook, trigger_webhooks, validate_webhook_url, WebhookR
 /// 应用版本（与 workspace 版本保持一致）。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// 音频在本次会话中的物理来源。它与“谁在说话”是两个独立维度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioSource {
+    Microphone,
+    SystemLoopback,
+    ImportedFile,
+    #[default]
+    Unknown,
+}
+
+/// 业务角色，不等同于声纹聚类身份。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeakerRole {
+    Owner,
+    Client,
+    Other,
+    #[default]
+    Unknown,
+}
+
+/// 声纹系统给出的稳定身份及置信信息。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoiceIdentity {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+}
+
+/// 一条转写段的说话人归属。旧的 speaker_id/label 仍作为兼容展示字段。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SpeakerAttribution {
+    #[serde(default)]
+    pub source: AudioSource,
+    #[serde(default)]
+    pub role: SpeakerRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<VoiceIdentity>,
+}
+
+impl SpeakerAttribution {
+    pub fn from_legacy(source: AudioSource, label: &str) -> Self {
+        let role = if label == "我" {
+            SpeakerRole::Owner
+        } else if label.starts_with("客户") {
+            SpeakerRole::Client
+        } else if label.is_empty() {
+            SpeakerRole::Unknown
+        } else {
+            SpeakerRole::Other
+        };
+        Self {
+            source,
+            role,
+            voice: None,
+        }
+    }
+}
+
 /// 领域事件：实时链路中宿主 → 客户端推送的所有事件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -30,6 +90,9 @@ pub enum DomainEvent {
     Segment {
         speaker_id: u32,
         speaker_label: String,
+        /// 结构化来源/角色/声纹归属；旧事件与旧客户端可省略。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speaker_attribution: Option<SpeakerAttribution>,
         text: String,
         is_partial: bool,
         ts_ms: u64,
@@ -217,6 +280,8 @@ pub enum StatusStage {
 pub struct TranscriptSegment {
     pub speaker_id: u32,
     pub speaker_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_attribution: Option<SpeakerAttribution>,
     pub text: String,
     pub is_partial: bool,
     pub ts_ms: u64,
@@ -386,6 +451,14 @@ mod tests {
         let ev = DomainEvent::Segment {
             speaker_id: 1,
             speaker_label: "客户".into(),
+            speaker_attribution: Some(SpeakerAttribution {
+                source: AudioSource::SystemLoopback,
+                role: SpeakerRole::Client,
+                voice: Some(VoiceIdentity {
+                    id: "客户1".into(),
+                    confidence: Some(0.88),
+                }),
+            }),
             text: "We need NPI samples by Friday.".into(),
             is_partial: false,
             ts_ms: 1234,
@@ -399,10 +472,11 @@ mod tests {
         let back: DomainEvent = serde_json::from_str(&json).unwrap();
         match back {
             DomainEvent::Segment {
-                speaker_id, text, ..
+                speaker_id, text, speaker_attribution, ..
             } => {
                 assert_eq!(speaker_id, 1);
                 assert!(text.contains("NPI"));
+                assert_eq!(speaker_attribution.unwrap().role, SpeakerRole::Client);
             }
             other => panic!("unexpected variant: {other:?}"),
         }
@@ -418,6 +492,7 @@ mod tests {
         let partial = DomainEvent::Segment {
             speaker_id: 0,
             speaker_label: "我".into(),
+            speaker_attribution: None,
             text: "hi".into(),
             is_partial: true,
             ts_ms: 0,
@@ -430,6 +505,7 @@ mod tests {
         let committed = DomainEvent::Segment {
             speaker_id: 0,
             speaker_label: "我".into(),
+            speaker_attribution: None,
             text: "hi".into(),
             is_partial: false,
             ts_ms: 0,
@@ -501,5 +577,39 @@ mod tests {
         assert_eq!(text_similarity("abc", "abc"), 1.0);
         assert!((text_similarity("abcd", "abce") - 0.75).abs() < 1e-6);
         assert!(text_similarity("我们确认交期", "我们确认价格") < 0.9);
+    }
+
+    #[test]
+    fn legacy_speaker_labels_map_to_explicit_roles() {
+        assert_eq!(
+            SpeakerAttribution::from_legacy(AudioSource::Microphone, "我").role,
+            SpeakerRole::Owner
+        );
+        assert_eq!(
+            SpeakerAttribution::from_legacy(AudioSource::SystemLoopback, "客户2").role,
+            SpeakerRole::Client
+        );
+        assert_eq!(
+            SpeakerAttribution::from_legacy(AudioSource::ImportedFile, "发言人A").role,
+            SpeakerRole::Other
+        );
+    }
+
+    #[test]
+    fn attribution_json_defaults_allow_old_records() {
+        let attribution: SpeakerAttribution = serde_json::from_str("{}").unwrap();
+        assert_eq!(attribution, SpeakerAttribution::default());
+        let encoded = serde_json::to_value(SpeakerAttribution {
+            source: AudioSource::Microphone,
+            role: SpeakerRole::Owner,
+            voice: Some(VoiceIdentity {
+                id: "owner".into(),
+                confidence: Some(0.91),
+            }),
+        })
+        .unwrap();
+        assert_eq!(encoded["source"], "microphone");
+        assert_eq!(encoded["role"], "owner");
+        assert_eq!(encoded["voice"]["id"], "owner");
     }
 }

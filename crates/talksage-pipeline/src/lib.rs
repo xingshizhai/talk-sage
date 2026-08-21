@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
@@ -20,13 +20,25 @@ use talksage_config::{DenoiseConfig, EndpointConfig, VadConfig};
 use talksage_core::{AudioClock, DomainEvent, StatusStage, TranscriptSegment};
 
 pub mod finalize;
+mod endpoint;
+mod input_scheduler;
 pub mod offline;
+mod plugin_executor;
 pub mod runtime;
+mod session_writer;
+mod segment;
 pub mod service;
 pub mod speaker;
+mod speaker_assignment;
+mod statistics;
 
 pub use runtime::SessionRuntime;
 pub use service::{ClientCapture, RecoveryReport, RunningListen, StartListen, TalkSageService};
+
+use input_scheduler::{poll_audio, AudioPoll, FilePacer, RoundRobin};
+use segment::{PartialUpdate, SegmentLifecycle};
+use speaker_assignment::SpeakerAssignment;
+use statistics::{StreamStatistics, StreamStatisticsSnapshot};
 
 /// 停止管道时等待工作线程收尾的时限。超时返回，不卡死 UI；后台仍可能继续 ASR `finish`。
 pub const STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -311,52 +323,13 @@ enum InputKind {
     Loopback,
 }
 
-/// Whisper Flow 文本稳定思想的低开销版本：不重跑音频窗口，只观察原生流式
-/// hypothesis，并要求同时出现短暂停顿后才提交。
-struct StableEndpoint {
-    config: EndpointConfig,
-    stable_samples: u64,
-    quiet_samples: u64,
-}
-
-impl StableEndpoint {
-    fn new(config: EndpointConfig) -> Self {
-        Self { config, stable_samples: 0, quiet_samples: 0 }
-    }
-
-    fn reset(&mut self) {
-        self.stable_samples = 0;
-        self.quiet_samples = 0;
-    }
-
-    fn enabled(&self) -> bool {
-        self.config.enabled
-    }
-
-    fn max_wait_ms(&self) -> u64 {
-        self.config.stable_ms
-    }
-
-    fn observe(&mut self, unchanged_nonempty: bool, rms: f32, chunk_samples: u64, segment_samples: u64) -> bool {
-        if !self.config.enabled {
-            return false;
+impl InputKind {
+    fn audio_source(self) -> talksage_core::AudioSource {
+        match self {
+            Self::Mic => talksage_core::AudioSource::Microphone,
+            Self::File => talksage_core::AudioSource::ImportedFile,
+            Self::Loopback => talksage_core::AudioSource::SystemLoopback,
         }
-        if unchanged_nonempty {
-            self.stable_samples += chunk_samples;
-        } else {
-            self.stable_samples = 0;
-        }
-        if rms <= self.config.quiet_rms {
-            self.quiet_samples += chunk_samples;
-        } else {
-            self.quiet_samples = 0;
-        }
-        let ms = |samples: u64| AudioClock::samples_to_ms(talksage_audio::TARGET_SAMPLE_RATE, samples);
-        let long_enough = ms(segment_samples) >= self.config.min_segment_ms;
-        let stable_pause = ms(self.stable_samples) >= self.config.stable_ms
-            && ms(self.quiet_samples) >= self.config.quiet_ms;
-        let forced_pause = ms(self.quiet_samples) >= self.config.force_quiet_ms;
-        long_enough && (stable_pause || forced_pause)
     }
 }
 
@@ -378,16 +351,13 @@ struct StreamWorker {
     pre_roll: VecDeque<Vec<f32>>,
     pre_roll_samples: usize,
     pre_roll_limit_samples: usize,
-    endpoint: StableEndpoint,
-    /// Silero 已检测到段尾；等待流式文本稳定后再提交。
-    pending_vad_endpoint: bool,
-    pending_endpoint_samples: u64,
-    last_partial: String,
+    segment: SegmentLifecycle,
     speaker_id: u32,
     speaker_label: String,
     terminology: talksage_config::TerminologyConfig,
     done: bool,
-    chunk_interval: Duration,
+    /// 文件输入实时节拍；None 表示设备输入。
+    file_pacer: Option<FilePacer>,
     #[cfg(windows)]
     loopback: Option<talksage_audio::LoopbackCapture>,
     /// final 段完成后的回调（插件触发）。
@@ -399,24 +369,7 @@ struct StreamWorker {
     // ── 统计（质量评估 / 历史回溯） ──
     /// 当前语音段开始采样（该流 AudioClock）。
     seg_start_sample: u64,
-    /// 当前语音段样本数。
-    seg_samples: u64,
-    /// 当前语音段能量平方和。
-    seg_rms_acc: f64,
-    /// 该流总样本数。
-    total_samples: u64,
-    /// 语音段样本数。
-    speech_samples: u64,
-    /// 能量平方和（avg_rms = sqrt(sum/total)）。
-    rms_sum: f64,
-    /// 峰值块 RMS。
-    max_rms: f32,
-    /// 最终段数量。
-    final_segments: usize,
-    /// 非语音块能量平方和（背景噪音水平；质量评估自动阈值用）。
-    non_speech_rms_sum: f64,
-    /// 非语音块数。
-    non_speech_blocks: u64,
+    statistics: StreamStatistics,
     /// 运行期可调参数（噪音电平阈值等）。
     runtime: Arc<RuntimeParams>,
     /// 说话人识别器（共享；None = 未启用）。
@@ -434,10 +387,6 @@ struct StreamWorker {
     engine_options: EngineOptions,
     /// 插件钩子（filter 链）。与其它流共享同一批 filter 实例。
     hooks: talksage_plugins::HookRegistry,
-    /// final 段累计词数（会话指标用；借鉴 Call.md）。
-    words: usize,
-    /// final 段累计问句数（会话指标用）。
-    questions: usize,
     /// 该流采样时钟。
     clock: AudioClock,
     /// 会话墙钟原点（ms）；`ts_ms = origin_ms + clock.ms()`。
@@ -516,6 +465,9 @@ impl StreamWorker {
             let chunks: Vec<Vec<f32>> = wave.samples().chunks(chunk_size).map(|c| c.to_vec()).collect();
             file_chunks = Some(chunks.into_iter());
         }
+        let file_pacer = file_chunks
+            .as_ref()
+            .map(|_| FilePacer::new(Duration::from_millis(chunk_ms)));
 
         Ok(Self {
             vad,
@@ -530,30 +482,19 @@ impl StreamWorker {
             pre_roll: VecDeque::new(),
             pre_roll_samples: 0,
             pre_roll_limit_samples: talksage_audio::TARGET_SAMPLE_RATE as usize / 2,
-            endpoint: StableEndpoint::new(endpoint.clone()),
-            pending_vad_endpoint: false,
-            pending_endpoint_samples: 0,
-            last_partial: String::new(),
+            segment: SegmentLifecycle::new(endpoint.clone()),
             speaker_id: cfg.speaker_id,
             speaker_label: cfg.speaker_label.clone(),
             terminology: cfg.terminology.clone(),
             done: false,
-            chunk_interval: Duration::from_millis(chunk_ms),
+            file_pacer,
             #[cfg(windows)]
             loopback: None,
             on_final: None,
             recorder,
             recording_path,
             seg_start_sample: 0,
-            seg_samples: 0,
-            seg_rms_acc: 0.0,
-            total_samples: 0,
-            speech_samples: 0,
-            rms_sum: 0.0,
-            max_rms: 0.0,
-            final_segments: 0,
-            non_speech_rms_sum: 0.0,
-            non_speech_blocks: 0,
+            statistics: StreamStatistics::default(),
             runtime,
             speaker,
             speaker_recognize_owner,
@@ -564,8 +505,6 @@ impl StreamWorker {
             engine_options: cfg.engine_options.clone(),
             engine: Some(engine),
             hooks,
-            words: 0,
-            questions: 0,
             clock: AudioClock::new(talksage_audio::TARGET_SAMPLE_RATE),
             origin_ms,
         })
@@ -604,17 +543,22 @@ impl StreamWorker {
     /// 处理一步：取一块音频并处理。返回 Ok(false) 表示本步无数据（继续轮询）。
     fn tick(&mut self, emit: &EventSink) -> anyhow::Result<bool> {
         let chunk: Option<Vec<f32>> = if let Some(rx) = &self.rx_audio {
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(c) => Some(c),
-                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
+            match poll_audio(rx) {
+                AudioPoll::Chunk(chunk) => Some(chunk),
+                AudioPoll::Empty => None,
+                AudioPoll::Disconnected => {
                     self.done = true;
                     return Ok(false);
                 }
             }
         } else if let Some(iter) = &mut self.file_chunks {
-            if let Some(c) = iter.next() {
-                std::thread::sleep(self.chunk_interval); // 模拟实时节奏
+            let due = self.file_pacer.as_ref().is_none_or(FilePacer::due);
+            if !due {
+                None
+            } else if let Some(c) = iter.next() {
+                if let Some(pacer) = &mut self.file_pacer {
+                    pacer.consumed();
+                }
                 Some(c)
             } else {
                 self.done = true;
@@ -640,19 +584,10 @@ impl StreamWorker {
             (chunk.iter().map(|&x| x * x).sum::<f32>() / chunk.len() as f32).sqrt()
         };
         let chunk_start = self.clock.accept(chunk.len() as u64);
-        self.total_samples = self.clock.accepted();
-        self.rms_sum += (block_rms as f64) * (block_rms as f64) * chunk.len() as f64;
-        if block_rms > self.max_rms {
-            self.max_rms = block_rms;
-        }
+        self.statistics
+            .observe_block(block_rms, chunk.len(), self.in_speech);
         // 电平指示（Level 事件用）
         self.level.store(block_rms.to_bits(), Ordering::Relaxed);
-        // 非语音块（VAD 判定前 in_speech=false）→ 背景噪音水平
-        if !self.in_speech {
-            self.non_speech_blocks += 1;
-            self.non_speech_rms_sum += (block_rms as f64) * (block_rms as f64) * chunk.len() as f64;
-        }
-
         // 录音：原始 PCM（预处理前），方便后续裁剪/降噪对比
         if let Some(rec) = &mut self.recorder {
             let _ = rec.write(&chunk);
@@ -686,24 +621,18 @@ impl StreamWorker {
         if self.vad.detected() && !self.in_speech {
             self.in_speech = true;
             just_started = true;
-            self.last_partial.clear();
-            self.endpoint.reset();
-            self.pending_vad_endpoint = false;
-            self.pending_endpoint_samples = 0;
+            self.segment.begin();
             if let Some(e) = &mut self.engine {
                 e.reset();
             }
             self.seg_start_sample = chunk_start;
-            self.seg_samples = 0;
-            self.seg_rms_acc = 0.0;
+            self.statistics.start_segment();
             self.seg_audio.clear();
 
             let buffered_samples = self.pre_roll_samples as u64;
             self.seg_start_sample = chunk_start.saturating_sub(buffered_samples.saturating_sub(chunk.len() as u64));
             for buffered in self.pre_roll.drain(..) {
-                self.seg_samples += buffered.len() as u64;
-                self.speech_samples += buffered.len() as u64;
-                self.seg_rms_acc += buffered.iter().map(|&x| x * x).sum::<f32>() as f64;
+                self.statistics.observe_speech(&buffered);
                 if self.speaker.is_some() {
                     const MAX_SEG_AUDIO: usize = 480000;
                     let remain = MAX_SEG_AUDIO.saturating_sub(self.seg_audio.len());
@@ -718,12 +647,8 @@ impl StreamWorker {
 
         let mut endpoint_ready = false;
         if self.in_speech && !just_started {
-            if self.pending_vad_endpoint {
-                self.pending_endpoint_samples += chunk.len() as u64;
-            }
-            self.seg_samples += chunk.len() as u64;
-            self.speech_samples += chunk.len() as u64;
-            self.seg_rms_acc += chunk.iter().map(|&x| x * x).sum::<f32>() as f64;
+            self.segment.advance_pending(chunk.len() as u64);
+            self.statistics.observe_speech(&chunk);
             // 说话人音频缓冲（预处理后，限 30s，说话人识别用）
             if self.speaker.is_some() {
                 const MAX_SEG_AUDIO: usize = 480000; // 30s @16k
@@ -732,16 +657,19 @@ impl StreamWorker {
                     self.seg_audio.extend_from_slice(&chunk[..chunk.len().min(remain)]);
                 }
             }
-            let mut unchanged_nonempty = false;
+            let mut partial_update = PartialUpdate::Empty;
             if let Some(engine) = &mut self.engine {
                 if let Some(text) = engine.accept(&chunk) {
                     let text = self.terminology.correct(text.trim());
-                    unchanged_nonempty = !text.is_empty() && text == self.last_partial;
-                    if !text.is_empty() && text != self.last_partial {
-                        self.last_partial = text.clone();
+                    partial_update = self.segment.accept_partial(&text);
+                    if partial_update == PartialUpdate::Changed {
                         emit(DomainEvent::Segment {
                             speaker_id: self.speaker_id,
                             speaker_label: self.speaker_label.clone(),
+                            speaker_attribution: Some(talksage_core::SpeakerAttribution::from_legacy(
+                                self.input_kind.audio_source(),
+                                &self.speaker_label,
+                            )),
                             text,
                             is_partial: true,
                             ts_ms: self.origin_ms + self.clock.ms(),
@@ -755,11 +683,11 @@ impl StreamWorker {
                 }
             }
             endpoint_ready = self.engine.as_ref().is_some_and(|e| e.kind().is_streaming())
-                && self.endpoint.observe(
-                    unchanged_nonempty,
+                && self.segment.observe_endpoint(
+                    partial_update,
                     block_rms,
                     chunk.len() as u64,
-                    self.seg_samples,
+                    self.statistics.segment_samples(),
                 );
         }
 
@@ -767,33 +695,23 @@ impl StreamWorker {
         while !self.vad.is_empty() {
             self.vad.pop();
             vad_endpoint = true;
-            self.pending_vad_endpoint = true;
-            self.pending_endpoint_samples = 0;
+            self.segment.mark_vad_endpoint();
         }
 
         let is_streaming = self.engine.as_ref().is_some_and(|e| e.kind().is_streaming());
         let realtime_input = self.input_kind != InputKind::File;
-        let natural_endpoint = realtime_input && is_streaming && endpoint_ready && !self.pending_vad_endpoint;
-        let commit = if !is_streaming || !self.endpoint.enabled() {
-            vad_endpoint
-        } else {
-            natural_endpoint
-                || (self.pending_vad_endpoint
-                && (endpoint_ready
-                    || AudioClock::samples_to_ms(
-                        talksage_audio::TARGET_SAMPLE_RATE,
-                        self.pending_endpoint_samples,
-                    ) >= self.endpoint.max_wait_ms()))
-        };
-        if commit {
-            if natural_endpoint {
+        let decision =
+            self.segment
+                .decide(is_streaming, realtime_input, endpoint_ready, vad_endpoint);
+        if decision.commit {
+            if decision.natural {
                 // 主动端点发生时 Silero 仍认为处于同一语音段。清空其内部状态，
                 // 防止稍后产生的旧段尾立即切断下一句。
                 self.vad.reset();
                 self.pre_roll.clear();
                 self.pre_roll_samples = 0;
                 log::debug!("流[{}] 文本稳定/强停顿主动提交", self.speaker_label);
-            } else if is_streaming && self.endpoint.enabled() {
+            } else if is_streaming && self.segment.endpoint_enabled() {
                 log::debug!("流[{}] VAD 段尾且文本已稳定，提交", self.speaker_label);
             }
             self.finish_speech(emit);
@@ -814,52 +732,34 @@ impl StreamWorker {
         let final_text = self.terminology.correct(&final_text);
         if !final_text.is_empty() {
             let end_sample = self.clock.accepted();
-            let duration_ms = AudioClock::samples_to_ms(self.clock.sample_rate(), self.seg_samples);
+            let duration_ms = AudioClock::samples_to_ms(
+                self.clock.sample_rate(),
+                self.statistics.segment_samples(),
+            );
             let ts_ms = self.origin_ms + AudioClock::samples_to_ms(self.clock.sample_rate(), end_sample);
-            let rms = if self.seg_samples > 0 {
-                (self.seg_rms_acc / self.seg_samples as f64) as f32
-            } else {
-                0.0
-            };
-            // 说话人判定（声纹）：先识别主人，再区分其他说话人。
-            //
-            // 这里只**查询**：标签既要进事件，也要参与跨流去重的 speaker_id 比较，
-            // 所以必须在建事件之前拿到。但注册（分配"客户N"、写入声纹库）推迟到
-            // filter 链放行之后 —— 否则被吞掉的段会留下一个幻影说话人，之后真实
-            // 的段可能匹配上它。
-            let mut label = self.speaker_label.clone();
-            let sid = self.speaker_id;
-            let mut pending_speaker: Option<speaker::SpeakerQuery> = None;
-            let mut speaker_diagnostic: Option<(speaker::SpeakerDecision, Option<f32>)> = None;
-            if let Some(sp) = &self.speaker {
-                let query = sp.query_for_role(
-                    &self.seg_audio,
-                    &self.speaker_label,
-                    self.speaker_recognize_owner,
-                );
-                let identified = query.label().to_string();
-                speaker_diagnostic = Some((query.decision(), query.similarity()));
-                pending_speaker = Some(query);
-                if identified == "我" {
-                    label = "我".into();
-                } else if identified.starts_with("客户") {
-                    // speaker_id 表示稳定的业务角色/音频通道，不能被声纹聚类编号覆盖。
-                    // 客户编号只用于显示；翻译、指标与跨流去重仍按原通道判断。
-                    label = identified.clone();
-                } else {
-                    label = identified.clone();
-                }
-            }
+            let rms = self.statistics.segment_rms();
+            let assignment = SpeakerAssignment::resolve(
+                self.speaker.clone(),
+                &self.seg_audio,
+                self.speaker_id,
+                self.input_kind.audio_source(),
+                &self.speaker_label,
+                self.speaker_recognize_owner,
+            );
             log::info!(
-                "段完成[{}] 说话人判定=[{label}] 声纹={speaker_diagnostic:?} 时长={}ms rms={rms:.4} 字数={} 文本={}",
+                "段完成[{}] 说话人判定=[{}] attribution={:?} 声纹={:?} 时长={}ms rms={rms:.4} 字数={} 文本={}",
                 self.speaker_label,
+                assignment.label(),
+                assignment.attribution(),
+                assignment.diagnostic(),
                 duration_ms,
                 final_text.chars().count(),
                 final_text.chars().take(60).collect::<String>(),
             );
             let seg = TranscriptSegment {
-                speaker_id: sid,
-                speaker_label: label.clone(),
+                speaker_id: assignment.source_id(),
+                speaker_label: assignment.label().to_string(),
+                speaker_attribution: Some(assignment.attribution().clone()),
                 text: final_text.clone(),
                 is_partial: false,
                 ts_ms,
@@ -871,6 +771,7 @@ impl StreamWorker {
             let ev = DomainEvent::Segment {
                 speaker_id: seg.speaker_id,
                 speaker_label: seg.speaker_label.clone(),
+                speaker_attribution: seg.speaker_attribution.clone(),
                 text: seg.text.clone(),
                 is_partial: false,
                 ts_ms: seg.ts_ms,
@@ -880,66 +781,30 @@ impl StreamWorker {
                 start_sample: self.seg_start_sample,
                 end_sample,
             };
-            let Some(ev) = self.hooks.apply_filters(ev) else {
-                // 被吞掉：不计统计、不 emit、不触发 observer，但仍要收尾引擎状态。
-                //
-                // 注意：下面三行收尾与函数末尾那份是**同一段逻辑的两个副本**
-                // （提前 return 导致）。改动收尾行为时两处必须一起改，
-                // 只改一处会让「被吞掉的段」和「正常段」的引擎状态发散。
-                self.last_partial.clear();
-                self.endpoint.reset();
-                self.pending_vad_endpoint = false;
-                self.pending_endpoint_samples = 0;
-                if let Some(e) = &mut self.engine {
-                    e.reset();
+            if let Some(ev) = self.hooks.apply_filters(ev) {
+                // filter 放行 → 这一段真的存在，此刻才注册/更新说话人。
+                assignment.commit();
+                // filter 是**变换**而不仅是丢弃：observer 与统计计数器都必须看
+                // filter 之后的数据。否则第一个做改写的 filter（脱敏/标点/规范化）
+                // 一上线，落库与 sink 的文本就会和插件、words/questions 静默错位。
+                let seg = filtered_segment(&ev).unwrap_or(seg);
+                self.statistics.record_committed_segment(&seg.text);
+                emit(ev);
+                if let Some(hook) = &self.on_final {
+                    hook(&seg);
                 }
-                self.seg_audio.clear();
-                return;
-            };
-            // filter 放行 → 这一段真的存在，此刻才注册说话人。
-            if let (Some(sp), Some(query)) = (&self.speaker, &pending_speaker) {
-                sp.commit(query);
-            }
-            // filter 是**变换**而不仅是丢弃：observer 与统计计数器都必须看
-            // filter 之后的数据。否则第一个做改写的 filter（脱敏/标点/规范化）
-            // 一上线，落库与 sink 的文本就会和插件、words/questions 静默错位。
-            let seg = filtered_segment(&ev).unwrap_or(seg);
-            self.final_segments += 1;
-            self.words += talksage_core::metrics::count_words(&seg.text);
-            if talksage_core::metrics::is_question_text(&seg.text) {
-                self.questions += 1;
-            }
-            emit(ev);
-            if let Some(hook) = &self.on_final {
-                hook(&seg);
             }
         }
-        self.last_partial.clear();
-        self.endpoint.reset();
-        self.pending_vad_endpoint = false;
-        self.pending_endpoint_samples = 0;
+        self.reset_segment_state();
+    }
+
+    /// 所有 final 路径（空文本、filter 吞掉、正常提交）共用同一个收尾出口。
+    fn reset_segment_state(&mut self) {
+        self.segment.reset();
         if let Some(e) = &mut self.engine {
             e.reset();
         }
         self.seg_audio.clear();
-    }
-
-    /// 流级统计（会话结束回溯用）。
-    /// 返回 (total_ms, speech_ms, final_segments, samples, avg_rms, max_rms, non_speech_avg_rms, words, questions)
-    fn session_stats(&self) -> (u64, u64, usize, u64, f32, f32, f32, usize, usize) {
-        let total_ms = self.total_samples * 1000 / talksage_audio::TARGET_SAMPLE_RATE as u64;
-        let speech_ms = self.speech_samples * 1000 / talksage_audio::TARGET_SAMPLE_RATE as u64;
-        let avg_rms = if self.total_samples > 0 {
-            (self.rms_sum / self.total_samples as f64) as f32
-        } else {
-            0.0
-        };
-        let non_speech_avg_rms = if self.non_speech_blocks > 0 {
-            (self.non_speech_rms_sum / (self.non_speech_blocks as u64 * 1600) as f64) as f32
-        } else {
-            avg_rms
-        };
-        (total_ms, speech_ms, self.final_segments, self.total_samples, avg_rms, self.max_rms, non_speech_avg_rms, self.words, self.questions)
     }
 
     fn stop(&mut self) {
@@ -1004,8 +869,7 @@ impl StreamWorker {
         self.vad.reset();
         self.pre_roll.clear();
         self.pre_roll_samples = 0;
-        self.pending_vad_endpoint = false;
-        self.pending_endpoint_samples = 0;
+        self.segment.reset();
         self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
     }
 
@@ -1013,6 +877,11 @@ impl StreamWorker {
     fn drain_paused(&mut self) {
         if let Some(rx) = &self.rx_audio {
             while rx.try_recv().is_ok() {}
+        }
+        // 文件输入不会被 drain；持续把逻辑时钟推到恢复之后，避免长时间暂停
+        // 后为了“追赶旧 deadline”而瞬间灌入大量音频块。
+        if let Some(pacer) = &mut self.file_pacer {
+            pacer.postpone();
         }
         self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
     }
@@ -1027,6 +896,7 @@ fn filtered_segment(ev: &DomainEvent) -> Option<TranscriptSegment> {
     let DomainEvent::Segment {
         speaker_id,
         speaker_label,
+        speaker_attribution,
         text,
         is_partial,
         ts_ms,
@@ -1040,6 +910,7 @@ fn filtered_segment(ev: &DomainEvent) -> Option<TranscriptSegment> {
     Some(TranscriptSegment {
         speaker_id: *speaker_id,
         speaker_label: speaker_label.clone(),
+        speaker_attribution: speaker_attribution.clone(),
         text: text.clone(),
         is_partial: *is_partial,
         ts_ms: *ts_ms,
@@ -1066,6 +937,10 @@ fn run_loop(
         stage: StatusStage::AsrLoading,
         message: "ASR 加载中…".into(),
     });
+
+    // 所有流共享一个有界慢任务执行器，避免每个 segment/plugin 创建线程。
+    let mut plugin_executor = plugin_executor::PluginExecutor::new(2, 32, cancel.clone());
+    let plugin_handle = plugin_executor.handle();
 
     // 构建各流（client 流失败降级为仅 user 流，不影响主链路）
     let mut workers: Vec<StreamWorker> = Vec::new();
@@ -1142,7 +1017,7 @@ fn run_loop(
     };
     match build(&cfg.user) {
         Ok(mut w) => {
-            w.on_final = Some(make_on_final(&cfg, &emit, cancel.clone()));
+            w.on_final = Some(make_on_final(&cfg, &emit, plugin_handle.clone()));
             workers.push(w);
         }
         Err(e) => {
@@ -1157,7 +1032,7 @@ fn run_loop(
     if let Some(c) = &cfg.client {
         match build(c) {
             Ok(mut w) => {
-                w.on_final = Some(make_on_final(&cfg, &emit, cancel.clone()));
+                w.on_final = Some(make_on_final(&cfg, &emit, plugin_handle.clone()));
                 workers.push(w);
             }
             Err(e) => {
@@ -1181,6 +1056,7 @@ fn run_loop(
     let mut tick_err: Option<anyhow::Error> = None;
     let mut last_level_at = std::time::Instant::now();
     let mut was_paused = false;
+    let mut poll_cursor = RoundRobin::default();
     loop {
         if cancel.load(Ordering::Relaxed) {
             break;
@@ -1225,27 +1101,51 @@ fn run_loop(
         }
 
         let mut any_alive = false;
-        for w in workers.iter_mut() {
-            if w.done {
+        let mut processed_any = false;
+        let worker_count = workers.len();
+        for offset in 0..worker_count {
+            // 每轮换一个起始流，避免固定让 user 流优先于 client 流。
+            let index = poll_cursor.index(offset, worker_count);
+            let worker = &mut workers[index];
+            if worker.done {
                 continue;
             }
             any_alive = true;
-            if let Err(e) = w.tick(&emit) {
-                tick_err = Some(e);
-                break;
+            match worker.tick(&emit) {
+                Ok(processed) => processed_any |= processed,
+                Err(e) => {
+                    tick_err = Some(e);
+                    break;
+                }
             }
         }
+        poll_cursor.advance(worker_count);
         if tick_err.is_some() || !any_alive {
             break;
+        }
+        if !processed_any {
+            // 所有输入暂时为空时让出 CPU；不再由每个流各阻塞 50ms。
+            std::thread::park_timeout(Duration::from_millis(2));
         }
     }
 
     for w in workers.iter_mut() {
         w.shutdown(&emit);
     }
+    plugin_executor.shutdown(!cancel.load(Ordering::Relaxed), Duration::from_millis(500));
     // 会话统计事件（每条流一条）：质量评估 / 历史回溯的基础数据
     for w in &workers {
-        let (total_ms, speech_ms, final_segments, samples, avg_rms, max_rms, non_speech_avg_rms, words, questions) = w.session_stats();
+        let StreamStatisticsSnapshot {
+            total_ms,
+            speech_ms,
+            final_segments,
+            samples,
+            avg_rms,
+            max_rms,
+            non_speech_avg_rms,
+            words,
+            questions,
+        } = w.statistics.snapshot(w.clock.sample_rate());
         let (vad_threshold, ..) = cfg.vad.effective();
         fire(&emit, DomainEvent::SessionStats {
             speaker_label: w.speaker_label.clone(),
@@ -1287,11 +1187,11 @@ fn run_loop(
     Ok(())
 }
 
-/// 构造 final 段回调：骨架同步发，最终（LLM）在独立线程执行。
+/// 构造 final 段回调：骨架同步发，最终（LLM）交给会话级有界执行器。
 fn make_on_final(
     cfg: &LivePipelineConfig,
     emit: &EventSink,
-    cancel: Arc<AtomicBool>,
+    executor: plugin_executor::PluginExecutorHandle,
 ) -> Arc<dyn Fn(&TranscriptSegment) + Send + Sync> {
     let cfg = cfg.clone();
     let emit = emit.clone();
@@ -1310,28 +1210,7 @@ fn make_on_final(
             for skel in plugin.skeleton(seg) {
                 emit(skel);
             }
-            // 最终（可能 LLM）：独立线程，不阻塞管道 / 音频回调
-            let plugin = plugin.clone();
-            let ctx = cfg.plugin_ctx.clone();
-            let emit = emit.clone();
-            let seg = seg.clone();
-            let cancel = cancel.clone();
-            std::thread::spawn(move || {
-                let t0 = Instant::now();
-                let result = plugin.run(&seg, &ctx);
-                if cancel.load(Ordering::Relaxed) {
-                    log::info!("插件[{}] 会话已停止，丢弃结果", plugin.name());
-                    return;
-                }
-                if t0.elapsed() > PLUGIN_RUN_TIMEOUT {
-                    log::warn!("插件[{}] 超时 {:?}，丢弃结果", plugin.name(), t0.elapsed());
-                    return;
-                }
-                log::info!("插件[{}] 完成: 耗时={:?} 有结果={}", plugin.name(), t0.elapsed(), result.is_some());
-                if let Some(ev) = result {
-                    emit(ev);
-                }
-            });
+            executor.submit(plugin.clone(), cfg.plugin_ctx.clone(), emit.clone(), seg.clone());
         }
     })
 }
@@ -1352,64 +1231,4 @@ mod stop_timeout_tests {
         assert!(!join_with_timeout(h, Duration::from_millis(50)));
     }
 
-    #[test]
-    fn stable_endpoint_requires_both_text_stability_and_quiet_audio() {
-        let mut endpoint = StableEndpoint::new(EndpointConfig {
-            stable_ms: 300,
-            quiet_ms: 200,
-            min_segment_ms: 1000,
-            ..EndpointConfig::default()
-        });
-        let chunk = 1600; // 100ms
-        for _ in 0..3 {
-            assert!(!endpoint.observe(true, 0.03, chunk, 16000));
-        }
-        assert!(!endpoint.observe(true, 0.001, chunk, 17600));
-        assert!(endpoint.observe(true, 0.001, chunk, 19200));
-    }
-
-    #[test]
-    fn changed_hypothesis_resets_stability() {
-        let mut endpoint = StableEndpoint::new(EndpointConfig {
-            stable_ms: 200,
-            quiet_ms: 200,
-            min_segment_ms: 0,
-            ..EndpointConfig::default()
-        });
-        assert!(!endpoint.observe(true, 0.001, 1600, 1600));
-        assert!(!endpoint.observe(false, 0.001, 1600, 3200));
-        assert!(!endpoint.observe(true, 0.001, 1600, 4800));
-        assert!(endpoint.observe(true, 0.001, 1600, 6400));
-    }
-
-    #[test]
-    fn long_quiet_pause_commits_even_while_hypothesis_changes() {
-        let mut endpoint = StableEndpoint::new(EndpointConfig {
-            stable_ms: 400,
-            quiet_ms: 400,
-            force_quiet_ms: 700,
-            min_segment_ms: 1000,
-            ..EndpointConfig::default()
-        });
-        let chunk = 1600; // 100ms
-        for index in 0..6 {
-            assert!(!endpoint.observe(index % 2 == 0, 0.001, chunk, 16000 + index * chunk));
-        }
-        assert!(endpoint.observe(false, 0.001, chunk, 25600));
-    }
-
-    #[test]
-    fn natural_endpoint_respects_minimum_segment_duration() {
-        let mut endpoint = StableEndpoint::new(EndpointConfig {
-            stable_ms: 200,
-            quiet_ms: 200,
-            force_quiet_ms: 300,
-            min_segment_ms: 1000,
-            ..EndpointConfig::default()
-        });
-        for _ in 0..5 {
-            assert!(!endpoint.observe(true, 0.001, 1600, 8000));
-        }
-        assert!(endpoint.observe(true, 0.001, 1600, 16000));
-    }
 }

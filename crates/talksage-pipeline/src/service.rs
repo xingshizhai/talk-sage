@@ -9,14 +9,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use talksage_asr::{EngineKind, EnginePool};
 use talksage_config::{ConfigManager, SceneMode};
-use talksage_core::{DomainEvent, ResultStatus, TranscriptSegment};
+use talksage_core::DomainEvent;
 use talksage_llm::{LLMProvider, OpenAICompatProvider};
 use talksage_plugins::{
     HookRegistry, QualityDeps, PluginContext, WebhookDeps,
 };
-use talksage_session::{SessionStore, StreamMeta};
+use talksage_session::SessionStore;
 
 use crate::finalize::{QualityHost, WebhookHost};
+use crate::session_writer::SessionWriter;
 use crate::speaker::{self, DEFAULT_THRESHOLD};
 use crate::{AudioInput, EventSink, LivePipelineConfig, RuntimeParams, SessionRuntime, SpeakerConfig, StreamConfig};
 
@@ -87,6 +88,8 @@ pub struct RunningListen {
     /// 本次会话的钩子表（与管道内跑的是同一批实例）。`finish()` 用它跑
     /// finalizer 链 —— 依赖已在 register 时注入，此处只能调用，不能再改。
     hooks: HookRegistry,
+    /// 独立 SQLite writer；必须在 finalizer 之前 drain。
+    session_writer: Option<SessionWriter>,
 }
 
 impl RunningListen {
@@ -468,18 +471,26 @@ impl TalkSageService {
             None
         };
 
-        let sink_sessions = sessions.clone();
-        let sink_sid = session_id;
-        let sink_stats = stats.clone();
-        let sink_texts = texts.clone();
+        let mut session_writer = match (&sessions, session_id) {
+            (Some(store), Some(sid)) => match SessionWriter::start(
+                store.clone(),
+                sid,
+                stats.clone(),
+                texts.clone(),
+            ) {
+                Ok(writer) => Some(writer),
+                Err(err) => {
+                    let _ = store.end_session(sid, unix_secs());
+                    return Err(err.context("启动会话持久化线程失败"));
+                }
+            },
+            _ => None,
+        };
+        let writer_tx = session_writer.as_ref().map(SessionWriter::sender);
         let sink: EventSink = Arc::new(move |ev: DomainEvent| {
-            persist_domain_event(
-                sink_sessions.as_deref(),
-                sink_sid,
-                &sink_stats,
-                &sink_texts,
-                &ev,
-            );
+            if let Some(writer) = &writer_tx {
+                writer.enqueue(&ev);
+            }
             on_event(ev);
         });
 
@@ -487,6 +498,9 @@ impl TalkSageService {
         let hooks = cfg.hooks.clone();
         let mut runtime = SessionRuntime::new(cfg);
         if let Err(e) = runtime.start(sink) {
+            if let Some(writer) = &mut session_writer {
+                let _ = writer.finish();
+            }
             if let (Some(store), Some(sid)) = (&sessions, session_id) {
                 let _ = store.end_session(sid, unix_secs());
             }
@@ -496,6 +510,7 @@ impl TalkSageService {
             runtime,
             session_id,
             hooks,
+            session_writer,
         })
     }
 
@@ -504,6 +519,9 @@ impl TalkSageService {
     /// 具体做什么由注册表决定，这里只负责「停 → 落库 → 收尾」这三步的次序。
     pub fn finish(&self, mut running: RunningListen) -> Result<Option<i64>> {
         running.runtime.stop();
+        if let Some(writer) = &mut running.session_writer {
+            writer.finish()?;
+        }
         let Some(sid) = running.session_id else {
             return Ok(None);
         };
@@ -606,89 +624,6 @@ pub(crate) fn unix_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-fn persist_domain_event(
-    sessions: Option<&SessionStore>,
-    session_id: Option<i64>,
-    stats: &Mutex<Vec<StreamMeta>>,
-    texts: &Mutex<Vec<String>>,
-    ev: &DomainEvent,
-) {
-    if let (Some(store), Some(sid)) = (sessions, session_id) {
-        match ev {
-            DomainEvent::Segment {
-                text,
-                is_partial: false,
-                speaker_id,
-                speaker_label,
-                ts_ms,
-                duration_ms,
-                rms,
-                ..
-            } => {
-                if let Ok(mut t) = texts.lock() {
-                    t.push(text.clone());
-                }
-                let _ = store.add_segment(
-                    sid,
-                    &TranscriptSegment {
-                        speaker_id: *speaker_id,
-                        speaker_label: speaker_label.clone(),
-                        text: text.clone(),
-                        is_partial: false,
-                        ts_ms: *ts_ms,
-                        duration_ms: *duration_ms,
-                        rms: *rms,
-                    },
-                );
-            }
-            DomainEvent::Term {
-                status: ResultStatus::Final,
-                content,
-                ..
-            } => {
-                let _ = store.add_term(sid, content);
-            }
-            DomainEvent::Translation { content, .. } => {
-                let _ = store.add_translation(sid, "translate", content);
-            }
-            _ => {}
-        }
-    }
-    if let DomainEvent::SessionStats {
-        speaker_label,
-        total_ms,
-        speech_ms,
-        final_segments,
-        avg_rms,
-        max_rms,
-        non_speech_avg_rms,
-        recording,
-        vad_preset,
-        vad_threshold,
-        words,
-        questions,
-        ..
-    } = ev
-    {
-        if let Ok(mut sm) = stats.lock() {
-            sm.push(StreamMeta {
-                speaker_label: speaker_label.clone(),
-                total_ms: *total_ms,
-                speech_ms: *speech_ms,
-                final_segments: *final_segments,
-                avg_rms: *avg_rms,
-                max_rms: *max_rms,
-                non_speech_avg_rms: *non_speech_avg_rms,
-                recording: recording.clone(),
-                vad_preset: vad_preset.clone(),
-                vad_threshold: *vad_threshold,
-                words: *words,
-                questions: *questions,
-            });
-        }
-    }
 }
 
 #[cfg(test)]
@@ -965,18 +900,16 @@ mod tests {
     #[test]
     fn persist_ignores_partial_segments() {
         let (svc, _dir) = temp_service(true);
-        let store = svc.sessions().unwrap();
+        let store = svc.sessions().unwrap().clone();
         let sid = store.start_session(1).unwrap();
-        let stats = Mutex::new(Vec::new());
-        let texts = Mutex::new(Vec::new());
-        persist_domain_event(
-            Some(store.as_ref()),
-            Some(sid),
-            &stats,
-            &texts,
-            &DomainEvent::Segment {
+        let stats = Arc::new(Mutex::new(Vec::new()));
+        let texts = Arc::new(Mutex::new(Vec::new()));
+        let mut writer = SessionWriter::start(store.clone(), sid, stats, texts.clone()).unwrap();
+        let tx = writer.sender();
+        tx.enqueue(&DomainEvent::Segment {
                 speaker_id: 0,
                 speaker_label: "我".into(),
+                speaker_attribution: None,
                 text: "草稿".into(),
                 is_partial: true,
                 ts_ms: 1,
@@ -985,16 +918,11 @@ mod tests {
                 revision: 0,
                 start_sample: 0,
                 end_sample: 0,
-            },
-        );
-        persist_domain_event(
-            Some(store.as_ref()),
-            Some(sid),
-            &stats,
-            &texts,
-            &DomainEvent::Segment {
+            });
+        tx.enqueue(&DomainEvent::Segment {
                 speaker_id: 0,
                 speaker_label: "我".into(),
+                speaker_attribution: None,
                 text: "定稿".into(),
                 is_partial: false,
                 ts_ms: 2,
@@ -1003,8 +931,10 @@ mod tests {
                 revision: 0,
                 start_sample: 0,
                 end_sample: 6400,
-            },
-        );
+            });
+        // 刻意保留 sender clone：writer 的显式 Shutdown 不能依赖所有事件源
+        // 都及时 drop（Pipeline 超时停止时仍可能持有一份）。
+        writer.finish().unwrap();
         let detail = store.get_session(sid).unwrap();
         assert_eq!(detail.segments.len(), 1);
         assert_eq!(detail.segments[0].text, "定稿");

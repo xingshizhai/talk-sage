@@ -421,10 +421,11 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
     let done_for_sink = done.clone();
     let sink: talksage_pipeline::EventSink = std::sync::Arc::new(move |ev| {
         match &ev {
-            DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, ts_ms, duration_ms, rms, .. } => {
+            DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, speaker_attribution, ts_ms, duration_ms, rms, .. } => {
                 segs_for_sink.lock().unwrap().push(talksage_core::TranscriptSegment {
                     speaker_id: *speaker_id,
                     speaker_label: speaker_label.clone(),
+                    speaker_attribution: speaker_attribution.clone(),
                     text: text.clone(),
                     is_partial: false,
                     ts_ms: *ts_ms,

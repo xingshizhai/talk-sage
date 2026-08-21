@@ -110,11 +110,20 @@ export interface SceneParams {
 }
 
 /** 领域事件（与 Rust 侧 DomainEvent 对应，tag = type）。 */
+export type AudioSource = "microphone" | "system_loopback" | "imported_file" | "unknown";
+export type SpeakerRole = "owner" | "client" | "other" | "unknown";
+export interface SpeakerAttribution {
+  source: AudioSource;
+  role: SpeakerRole;
+  voice?: { id: string; confidence?: number };
+}
+
 export type DomainEvent =
   | {
       type: "segment";
       speaker_id: number;
       speaker_label: string;
+      speaker_attribution?: SpeakerAttribution;
       text: string;
       is_partial: boolean;
       ts_ms: number;
@@ -148,7 +157,7 @@ export type DomainEvent =
   | {
       type: "snapshot";
       revision: number;
-      committed: { speaker_id: number; speaker_label: string; text: string; ts_ms: number; duration_ms?: number }[];
+      committed: { speaker_id: number; speaker_label: string; speaker_attribution?: SpeakerAttribution; text: string; ts_ms: number; duration_ms?: number }[];
       hypothesis: { speaker_id: number; speaker_label: string; text: string; ts_ms: number }[];
       processed_until_sample?: number;
       committed_until_sample?: number;
@@ -245,7 +254,7 @@ export interface SessionDetail {
   id: number;
   started_at: number;
   ended_at: number | null;
-  segments: { speaker_id: number; speaker_label: string; text: string; ts_ms: number; duration_ms?: number; rms?: number }[];
+  segments: { speaker_id: number; speaker_label: string; speaker_attribution?: SpeakerAttribution; text: string; ts_ms: number; duration_ms?: number; rms?: number }[];
   terms: string[];
   translations: string[];
   notes: string | null;

@@ -498,6 +498,7 @@ impl SessionStore {
                 ts_ms INTEGER NOT NULL,
                 duration_ms INTEGER NOT NULL DEFAULT 0,
                 rms REAL NOT NULL DEFAULT 0,
+                speaker_attribution TEXT,
                 FOREIGN KEY(session_id) REFERENCES sessions(id)
             );
             CREATE TABLE IF NOT EXISTS terms (
@@ -524,6 +525,7 @@ impl SessionStore {
         let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN trio TEXT;");
         let _ = conn.execute_batch("ALTER TABLE segments ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0;");
         let _ = conn.execute_batch("ALTER TABLE segments ADD COLUMN rms REAL NOT NULL DEFAULT 0;");
+        let _ = conn.execute_batch("ALTER TABLE segments ADD COLUMN speaker_attribution TEXT;");
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -582,10 +584,15 @@ impl SessionStore {
 
     /// 追加转写段（含时长/能量统计）。
     pub fn add_segment(&self, session_id: i64, seg: &TranscriptSegment) -> Result<()> {
+        let attribution = seg
+            .speaker_attribution
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO segments (session_id, speaker_id, speaker_label, text, ts_ms, duration_ms, rms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            "INSERT INTO segments (session_id, speaker_id, speaker_label, text, ts_ms, duration_ms, rms, speaker_attribution)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             rusqlite::params![
                 session_id,
                 seg.speaker_id,
@@ -593,7 +600,8 @@ impl SessionStore {
                 seg.text,
                 seg.ts_ms,
                 seg.duration_ms,
-                seg.rms
+                seg.rms,
+                attribution
             ],
         )?;
         Ok(())
@@ -734,13 +742,26 @@ impl SessionStore {
 
         let segments = {
             let mut stmt = conn.prepare(
-                "SELECT speaker_id, speaker_label, text, ts_ms, duration_ms, rms FROM segments WHERE session_id = ?1 ORDER BY id",
+                "SELECT speaker_id, speaker_label, text, ts_ms, duration_ms, rms, speaker_attribution FROM segments WHERE session_id = ?1 ORDER BY id",
             )?;
             let rows = stmt
                 .query_map([session_id], |r| {
+                    let speaker_id = r.get(0)?;
+                    let speaker_label: String = r.get(1)?;
+                    let raw: Option<String> = r.get(6)?;
+                    let speaker_attribution = raw
+                        .as_deref()
+                        .and_then(|json| serde_json::from_str(json).ok())
+                        .or_else(|| {
+                            Some(talksage_core::SpeakerAttribution::from_legacy(
+                                talksage_core::AudioSource::Unknown,
+                                &speaker_label,
+                            ))
+                        });
                     Ok(TranscriptSegment {
-                        speaker_id: r.get(0)?,
-                        speaker_label: r.get(1)?,
+                        speaker_id,
+                        speaker_label,
+                        speaker_attribution,
                         text: r.get(2)?,
                         is_partial: false,
                         ts_ms: r.get(3)?,
@@ -798,6 +819,7 @@ mod tests {
         TranscriptSegment {
             speaker_id: speaker,
             speaker_label: label.into(),
+            speaker_attribution: None,
             text: text.into(),
             is_partial: false,
             ts_ms: 1000,
@@ -811,6 +833,7 @@ mod tests {
         TranscriptSegment {
             speaker_id: speaker,
             speaker_label: label.into(),
+            speaker_attribution: None,
             text: text.into(),
             is_partial: false,
             ts_ms,
@@ -855,7 +878,16 @@ mod tests {
     fn crud_roundtrip() {
         let s = store();
         let id = s.start_session(111).unwrap();
-        s.add_segment(id, &seg(1, "客户", "We need NPI samples")).unwrap();
+        let mut client = seg(1, "客户", "We need NPI samples");
+        client.speaker_attribution = Some(talksage_core::SpeakerAttribution {
+            source: talksage_core::AudioSource::SystemLoopback,
+            role: talksage_core::SpeakerRole::Client,
+            voice: Some(talksage_core::VoiceIdentity {
+                id: "客户1".into(),
+                confidence: Some(0.82),
+            }),
+        });
+        s.add_segment(id, &client).unwrap();
         s.add_segment(id, &seg(0, "我", "好的")).unwrap();
         s.add_term(id, "NPI = 新产品导入").unwrap();
         s.add_translation(id, "en_zh", "我们需要 NPI 样品").unwrap();
@@ -865,10 +897,57 @@ mod tests {
         assert_eq!(detail.segments.len(), 2);
         assert_eq!(detail.segments[0].duration_ms, 800);
         assert!((detail.segments[0].rms - 0.2).abs() < 1e-6);
+        let attribution = detail.segments[0].speaker_attribution.as_ref().unwrap();
+        assert_eq!(attribution.source, talksage_core::AudioSource::SystemLoopback);
+        assert_eq!(attribution.voice.as_ref().unwrap().id, "客户1");
+        // 旧式调用未提供 attribution，读取时仍按 label 推导兼容角色。
+        assert_eq!(
+            detail.segments[1].speaker_attribution.as_ref().unwrap().role,
+            talksage_core::SpeakerRole::Owner
+        );
         assert_eq!(detail.terms, vec!["NPI = 新产品导入"]);
         assert_eq!(detail.translations.len(), 1);
         assert_eq!(detail.started_at, 111);
         assert_eq!(detail.ended_at, Some(222));
+    }
+
+    #[test]
+    fn old_database_schema_migrates_speaker_attribution_column() {
+        let path = std::env::temp_dir().join(format!(
+            "talksage-old-schema-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, ended_at INTEGER, notes TEXT);
+                 CREATE TABLE segments (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL, speaker_id INTEGER NOT NULL, speaker_label TEXT NOT NULL, text TEXT NOT NULL, ts_ms INTEGER NOT NULL);
+                 CREATE TABLE terms (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL, content TEXT NOT NULL);
+                 CREATE TABLE translations (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL, direction TEXT NOT NULL, content TEXT NOT NULL);",
+            )
+            .unwrap();
+        }
+
+        let store = SessionStore::open(&path.to_string_lossy()).unwrap();
+        let id = store.start_session(1).unwrap();
+        let mut segment = seg(0, "我", "迁移后写入");
+        segment.speaker_attribution = Some(talksage_core::SpeakerAttribution {
+            source: talksage_core::AudioSource::Microphone,
+            role: talksage_core::SpeakerRole::Owner,
+            voice: None,
+        });
+        store.add_segment(id, &segment).unwrap();
+        let detail = store.get_session(id).unwrap();
+        assert_eq!(
+            detail.segments[0].speaker_attribution.as_ref().unwrap().source,
+            talksage_core::AudioSource::Microphone
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

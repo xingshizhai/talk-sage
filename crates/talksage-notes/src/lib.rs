@@ -447,8 +447,8 @@ mod tests {
         let mock = MockProvider { response: "# 会议纪要\n\n## 摘要\n讨论了 NPI 项目进度。\n\n## 关键决策\n- 确认方案 A".into() };
         let gen = NotesGenerator::new(Arc::new(mock));
         let segs = vec![
-            TranscriptSegment { speaker_id: 1, speaker_label: "客户".into(), text: "We need NPI samples by Friday.".into(), is_partial: false, ts_ms: 0, duration_ms: 500, rms: 0.2 },
-            TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), text: "我们确认可以安排。".into(), is_partial: false, ts_ms: 1, duration_ms: 400, rms: 0.15 },
+            TranscriptSegment { speaker_id: 1, speaker_label: "客户".into(), speaker_attribution: None, text: "We need NPI samples by Friday.".into(), is_partial: false, ts_ms: 0, duration_ms: 500, rms: 0.2 },
+            TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), speaker_attribution: None, text: "我们确认可以安排。".into(), is_partial: false, ts_ms: 1, duration_ms: 400, rms: 0.15 },
         ];
         let t = get_template("standard_meeting").unwrap();
         let notes = gen.generate(&segs, &["NPI = 新产品导入".into()], &[], &t).unwrap();
@@ -472,8 +472,8 @@ mod tests {
         };
         let gen = TrioGenerator::new(Arc::new(mock));
         let segs = vec![
-            TranscriptSegment { speaker_id: 1, speaker_label: "客户".into(), text: "We need NPI samples by Friday.".into(), is_partial: false, ts_ms: 0, duration_ms: 500, rms: 0.2 },
-            TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), text: "我们确认可以安排。".into(), is_partial: false, ts_ms: 1, duration_ms: 400, rms: 0.15 },
+            TranscriptSegment { speaker_id: 1, speaker_label: "客户".into(), speaker_attribution: None, text: "We need NPI samples by Friday.".into(), is_partial: false, ts_ms: 0, duration_ms: 500, rms: 0.2 },
+            TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), speaker_attribution: None, text: "我们确认可以安排。".into(), is_partial: false, ts_ms: 1, duration_ms: 400, rms: 0.15 },
         ];
         let trio = gen.generate(&segs, Some("NPI 评审"), Some("确认交付时间")).unwrap();
         assert!(!trio.short_overview.trim().is_empty(), "概述为空");
@@ -486,7 +486,7 @@ mod tests {
     fn trio_rejects_invalid_json() {
         let mock = MockProvider { response: "抱歉，我无法生成".into() };
         let gen = TrioGenerator::new(Arc::new(mock));
-        let segs = vec![TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), text: "hi".into(), is_partial: false, ts_ms: 0, duration_ms: 100, rms: 0.1 }];
+        let segs = vec![TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), speaker_attribution: None, text: "hi".into(), is_partial: false, ts_ms: 0, duration_ms: 100, rms: 0.1 }];
         assert!(gen.generate(&segs, None, None).is_err());
     }
 
@@ -503,7 +503,7 @@ mod tests {
             response: r#"{"points":["客户确认周五交付NPI样品","报价单需下周一前提交"]}"#.into(),
         };
         let llm: Arc<dyn LLMProvider> = Arc::new(mock);
-        let segs = vec![TranscriptSegment { speaker_id: 1, speaker_label: "客户".into(), text: "We need NPI samples by Friday.".into(), is_partial: false, ts_ms: 0, duration_ms: 500, rms: 0.2 }];
+        let segs = vec![TranscriptSegment { speaker_id: 1, speaker_label: "客户".into(), speaker_attribution: None, text: "We need NPI samples by Friday.".into(), is_partial: false, ts_ms: 0, duration_ms: 500, rms: 0.2 }];
         let points = generate_highlights(&segs, &llm).unwrap();
         assert_eq!(points.len(), 2);
         assert!(points[0].contains("周五"));
@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn highlights_reject_invalid_json() {
         let llm: Arc<dyn LLMProvider> = Arc::new(MockProvider { response: "抱歉，无法提炼".into() });
-        let segs = vec![TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), text: "hi".into(), is_partial: false, ts_ms: 0, duration_ms: 100, rms: 0.1 }];
+        let segs = vec![TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), speaker_attribution: None, text: "hi".into(), is_partial: false, ts_ms: 0, duration_ms: 100, rms: 0.1 }];
         assert!(generate_highlights(&segs, &llm).is_err());
     }
 

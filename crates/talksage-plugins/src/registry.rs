@@ -217,10 +217,10 @@ mod hook_tests {
     impl EventFilter for AppendSuffix {
         fn filter(&self, ev: DomainEvent) -> Option<DomainEvent> {
             match ev {
-                DomainEvent::Segment { speaker_id, speaker_label, text, is_partial, ts_ms,
+                DomainEvent::Segment { speaker_id, speaker_label, speaker_attribution, text, is_partial, ts_ms,
                                        duration_ms, rms, revision, start_sample, end_sample } => {
                     Some(DomainEvent::Segment {
-                        speaker_id, speaker_label, text: format!("{text}{}", self.0),
+                        speaker_id, speaker_label, speaker_attribution, text: format!("{text}{}", self.0),
                         is_partial, ts_ms, duration_ms, rms, revision, start_sample, end_sample,
                     })
                 }
@@ -233,6 +233,7 @@ mod hook_tests {
         DomainEvent::Segment {
             speaker_id: 0,
             speaker_label: "我".into(),
+            speaker_attribution: None,
             text: text.into(),
             is_partial: false,
             ts_ms: 0,

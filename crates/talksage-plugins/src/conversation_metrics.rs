@@ -95,6 +95,7 @@ mod tests {
         TranscriptSegment {
             speaker_id,
             speaker_label: label.into(),
+            speaker_attribution: None,
             text: text.into(),
             is_partial: false,
             ts_ms,
