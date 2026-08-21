@@ -11,6 +11,9 @@ use talksage_asr::EngineKind;
 use talksage_core::DomainEvent;
 use talksage_pipeline::{AudioInput, LivePipelineConfig, SessionRuntime, StreamConfig};
 
+mod common;
+use common::{model_root, skip};
+
 /// 内置插件钩子（短段阈值可调）。整份注册表只建一次，两条流共享同一批
 /// filter 实例 —— 跨流去重靠的就是这份共享历史。
 fn hooks_with_min_commit_ms(min_ms: u64) -> talksage_plugins::HookRegistry {
@@ -22,53 +25,6 @@ fn hooks_with_min_commit_ms(min_ms: u64) -> talksage_plugins::HookRegistry {
         )]),
         &talksage_plugins::PluginContext::new(),
     )
-}
-
-/// 缺资源时是否必须失败（而不是跳过）。`env` 为 `TALKSAGE_REQUIRE_MODELS` 的值。
-fn must_fail_on_missing(env: Option<&str>) -> bool {
-    matches!(env, Some("1") | Some("true"))
-}
-
-/// 资源缺失：默认打印并跳过；`TALKSAGE_REQUIRE_MODELS=1` 时直接失败，
-/// 避免 CI 上「因跳过而全绿」掩盖回归。
-fn skip(reason: &str) {
-    let env = std::env::var("TALKSAGE_REQUIRE_MODELS").ok();
-    assert!(
-        !must_fail_on_missing(env.as_deref()),
-        "集成测试资源缺失（TALKSAGE_REQUIRE_MODELS=1 要求必须真实运行）: {reason}"
-    );
-    eprintln!("跳过：{reason}");
-}
-
-#[test]
-fn require_models_flag_controls_skip_vs_fail() {
-    assert!(!must_fail_on_missing(None), "未设置时应跳过");
-    assert!(!must_fail_on_missing(Some("0")), "0 应跳过");
-    assert!(!must_fail_on_missing(Some("")), "空值应跳过");
-    assert!(must_fail_on_missing(Some("1")), "1 应失败");
-    assert!(must_fail_on_missing(Some("true")), "true 应失败");
-}
-
-/// 解析模型根目录（TALKSAGE_MODELS_DIR 优先，其次相对 CARGO_MANIFEST_DIR 探测）。
-fn model_root() -> Option<PathBuf> {
-    if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
-        let p = PathBuf::from(d);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for cand in [
-        here.join("../../models"),
-        here.join("../../../models"),
-        PathBuf::from("models"),
-        PathBuf::from("../models"),
-    ] {
-        if cand.is_dir() {
-            return Some(cand);
-        }
-    }
-    None
 }
 
 fn zh_model_dir(root: &Path) -> PathBuf {

@@ -8,6 +8,9 @@ use std::sync::Mutex;
 
 use talksage_pipeline::speaker::{SpeakerDecision, SpeakerIdentifier};
 
+mod common;
+use common::{model_root, skip};
+
 /// 同一进程里并发创建 `SpeakerEmbeddingExtractor` 会让 onnxruntime 抛出
 /// `Ort::Exception` 并 abort（整个测试进程挂掉，SIGABRT）。用真实模型的测试
 /// 因此必须串行 —— 与被测逻辑无关，纯粹是 ORT 的进程级限制。
@@ -16,22 +19,6 @@ static ORT_MODEL: Mutex<()> = Mutex::new(());
 /// 取得模型串行锁；前一个测试 panic 时不因中毒而连带失败。
 fn model_guard() -> std::sync::MutexGuard<'static, ()> {
     ORT_MODEL.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// 缺资源时是否必须失败（而不是跳过）。`env` 为 `TALKSAGE_REQUIRE_MODELS` 的值。
-fn must_fail_on_missing(env: Option<&str>) -> bool {
-    matches!(env, Some("1") | Some("true"))
-}
-
-/// 资源缺失：默认打印并跳过；`TALKSAGE_REQUIRE_MODELS=1` 时直接失败，
-/// 避免 CI 上「因跳过而全绿」掩盖回归。
-fn skip(reason: &str) {
-    let env = std::env::var("TALKSAGE_REQUIRE_MODELS").ok();
-    assert!(
-        !must_fail_on_missing(env.as_deref()),
-        "集成测试资源缺失（TALKSAGE_REQUIRE_MODELS=1 要求必须真实运行）: {reason}"
-    );
-    eprintln!("跳过：{reason}");
 }
 
 

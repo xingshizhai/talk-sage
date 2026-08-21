@@ -14,40 +14,8 @@ use talksage_asr::EngineKind;
 use talksage_core::DomainEvent;
 use talksage_pipeline::{AudioInput, LivePipelineConfig, SessionRuntime, StreamConfig};
 
-fn skip(reason: &str) {
-    let require = matches!(
-        std::env::var("TALKSAGE_REQUIRE_MODELS").ok().as_deref(),
-        Some("1") | Some("true")
-    );
-    assert!(
-        !require,
-        "集成测试资源缺失（TALKSAGE_REQUIRE_MODELS=1 要求必须真实运行）: {reason}"
-    );
-    eprintln!("跳过：{reason}");
-}
-
-fn model_root() -> Option<PathBuf> {
-    if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
-        let p = PathBuf::from(d);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    // 候选列表与 pipeline_live.rs 保持一致：否则换个工作目录跑时，
-    // 本测试会静默跳过而其余测试照跑 —— 安全网失效且无人察觉。
-    for cand in [
-        here.join("../../models"),
-        here.join("../../../models"),
-        PathBuf::from("models"),
-        PathBuf::from("../models"),
-    ] {
-        if cand.is_dir() {
-            return Some(cand);
-        }
-    }
-    None
-}
+mod common;
+use common::{model_root, skip};
 
 /// 事件归一化：只保留对行为有意义的字段。
 ///
