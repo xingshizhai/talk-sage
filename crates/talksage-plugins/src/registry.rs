@@ -101,11 +101,13 @@ pub trait SegmentObserver: Send + Sync {
 ///
 /// 刻意保持极简：finalizer 需要的持久数据都能用 `session_id` 从 SessionStore
 /// 查到，把整个 store 塞进 context 会让插件能改库，破坏「会后只读」的约束。
-pub struct FinalizeContext<'a> {
+///
+/// **finalizer 之间不经由本结构传值。** `run_finalizers` 拿的是
+/// `&FinalizeContext`，谁也写不进来。链上有顺序依赖时（如 `session_quality`
+/// 必须排在 `webhook` 之前），耦合走的是数据库：前者把 meta 写进会话行，
+/// 后者重新读这一行来拼载荷。
+pub struct FinalizeContext {
     pub session_id: i64,
-    /// 由 `session_quality` 写入，供后续 finalizer 读取（如 webhook 载荷）。
-    /// 因此 `session_quality` 必须排在链首。
-    pub quality: Option<&'a str>,
 }
 
 /// 会后钩子：`stop → flush → 落库` 之后执行，不占实时路径。
@@ -319,8 +321,8 @@ mod finalizer_tests {
         }
     }
 
-    fn ctx() -> FinalizeContext<'static> {
-        FinalizeContext { session_id: 1, quality: None }
+    fn ctx() -> FinalizeContext {
+        FinalizeContext { session_id: 1 }
     }
 
     #[test]

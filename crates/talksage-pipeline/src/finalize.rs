@@ -60,9 +60,12 @@ pub(crate) struct WebhookHost {
 }
 
 impl WebhookDeps for WebhookHost {
-    /// `quality` 用不上：载荷是从库里现取的会话详情，其中的 meta 已由链上游的
-    /// `session_quality` 写好 —— 这就是两者顺序不能反的原因。
-    fn push(&self, session_id: i64, _quality: Option<&str>) -> anyhow::Result<()> {
+    /// 载荷是从库里现取的会话详情，其中的 meta 已由链上游的 `session_quality`
+    /// 写好 —— 这就是两者顺序不能反的原因。
+    ///
+    /// **返回 `Ok(())` 只表示已派发，不表示已送达**：真正的推送在下面的独立
+    /// 线程里，它的成败进不了 `FinalizeReport`。别把「无失败项」读成「都推成功了」。
+    fn push(&self, session_id: i64) -> anyhow::Result<()> {
         // 第二道闸：配置在会后现取，会话进行中改了开关也算数（与搬迁前一致）。
         // 插件自身的 enabled 只决定 finalizer 装不装，看不到 [webhooks]。
         let wh_cfg = self.config.snapshot().webhooks;
@@ -172,7 +175,7 @@ mod tests {
         assert!(!f.config.snapshot().webhooks.enabled);
         let host = WebhookHost { config: f.config.clone(), store: f.store.clone() };
         // 没有可达 URL，若真的推送这里会挂网络；返回 Ok 即说明在闸口就返回了
-        assert!(host.push(1, Some("正常")).is_ok());
+        assert!(host.push(1).is_ok());
     }
 
     /// enabled 为真但 urls 为空同样不推 —— 两个条件是与的关系，搬迁前后一致。
@@ -183,6 +186,6 @@ mod tests {
         cfg.webhooks.urls = Vec::new();
         let f = fixture(cfg);
         let host = WebhookHost { config: f.config.clone(), store: f.store.clone() };
-        assert!(host.push(1, None).is_ok());
+        assert!(host.push(1).is_ok());
     }
 }

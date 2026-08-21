@@ -17,8 +17,11 @@ use crate::PluginContext;
 /// 真正发不发请求由宿主在 `push` 里按 `[webhooks]` 配置再判一次。
 /// 两道闸互不代替 —— 配置是会后现取的，装载期的开关看不到它。
 pub trait WebhookDeps: Send + Sync {
-    /// 推送会话结论到外部地址。宿主可自行决定异步执行。
-    fn push(&self, session_id: i64, quality: Option<&str>) -> anyhow::Result<()>;
+    /// 推送会话结论到外部地址。载荷由宿主用 `session_id` 现取 —— 其中的质量
+    /// meta 已由链上游的 `session_quality` 写进会话行。
+    ///
+    /// 宿主可自行决定异步执行，所以 `Ok(())` 只表示**已派发**，不表示已送达。
+    fn push(&self, session_id: i64) -> anyhow::Result<()>;
 }
 
 /// 依赖在 `register` 时从 `PluginContext` 取出并装进来 —— FinalizeContext
@@ -36,7 +39,8 @@ impl SessionFinalizer for WebhookFinalizer {
         let Some(deps) = &self.deps else {
             return Ok(()); // 无依赖（如单测）时静默跳过
         };
-        deps.push(ctx.session_id, ctx.quality)?;
+        deps.push(ctx.session_id)?;
+        // 「已交付宿主」而非「已送达」：宿主通常异步发，失败进不了 FinalizeReport。
         log::debug!("会话 #{} webhook 推送已交付宿主", ctx.session_id);
         Ok(())
     }
@@ -66,10 +70,10 @@ mod tests {
     use std::sync::Mutex;
 
     #[derive(Default)]
-    struct FakeWebhook(Mutex<Vec<(i64, Option<String>)>>);
+    struct FakeWebhook(Mutex<Vec<i64>>);
     impl WebhookDeps for FakeWebhook {
-        fn push(&self, session_id: i64, quality: Option<&str>) -> anyhow::Result<()> {
-            self.0.lock().unwrap().push((session_id, quality.map(str::to_string)));
+        fn push(&self, session_id: i64) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(session_id);
             Ok(())
         }
     }
@@ -83,16 +87,16 @@ mod tests {
         assert_eq!(hooks.finalizer_count(), 1);
     }
 
-    /// 注入的依赖必须真的被调用，且拿到链上游写入的质量结论。
+    /// 注入的依赖必须真的被调用，并拿到会话 id —— 载荷由宿主凭它现取。
     #[test]
-    fn injected_deps_receive_session_id_and_quality() {
+    fn injected_deps_receive_the_session_id() {
         let fake = Arc::new(FakeWebhook::default());
         let ctx = PluginContext { webhook: Some(fake.clone()), ..PluginContext::new() };
         let mut hooks = HookRegistry::default();
         WebhookPlugin.register(&WebhookPlugin.default_config(), &ctx, &mut hooks);
-        let report = hooks.run_finalizers(&FinalizeContext { session_id: 9, quality: Some("clean") });
+        let report = hooks.run_finalizers(&FinalizeContext { session_id: 9 });
         assert!(report.failed.is_empty());
-        assert_eq!(*fake.0.lock().unwrap(), vec![(9, Some("clean".to_string()))]);
+        assert_eq!(*fake.0.lock().unwrap(), vec![9]);
     }
 
     #[test]
@@ -100,7 +104,7 @@ mod tests {
         let mut hooks = HookRegistry::default();
         WebhookPlugin.register(&WebhookPlugin.default_config(), &PluginContext::new(), &mut hooks);
         assert!(hooks
-            .run_finalizers(&FinalizeContext { session_id: 9, quality: None })
+            .run_finalizers(&FinalizeContext { session_id: 9 })
             .failed
             .is_empty());
     }

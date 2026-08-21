@@ -23,8 +23,8 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
         Box::new(CrossStreamDedupPlugin),
         // observer：彼此无顺序依赖，排在 filter 之后仅为便于阅读
         Box::new(ConversationMetricsPlugin),
-        // finalizer：session_quality 必须在 webhook 之前 —— 它先把 meta 写进库，
-        // webhook 的载荷是从库里现取的会话详情
+        // finalizer：session_quality 必须在 webhook 之前 —— 它把质量 meta 写进
+        // 会话行，webhook 要重新读这一行来拼载荷
         Box::new(SessionQualityPlugin),
         Box::new(WebhookPlugin),
     ]
@@ -91,8 +91,9 @@ mod tests {
         assert!(short < dedup, "short_segment 必须排在 cross_stream_dedup 之前，实际顺序: {ids:?}");
     }
 
-    /// 设计 §3.4 S2：session_quality 必须在 webhook 之前 ——
-    /// 它写入 FinalizeContext.quality，webhook 载荷要带这个结论。
+    /// 设计 §3.4 S2：session_quality 必须在 webhook 之前 —— 它把质量 meta 写进
+    /// 会话行，webhook 重新读这一行来拼载荷；反过来就会推一条 meta 还没写好的会话。
+    /// 耦合走的是**数据库**，不是 FinalizeContext（谁也写不进那个只读引用）。
     #[test]
     fn session_quality_is_ordered_before_webhook() {
         let ids: Vec<&str> = builtin_plugins().iter().map(|p| p.id()).collect();

@@ -1,7 +1,7 @@
 //! session_quality：会话结束时评估质量并写入 sessions.meta。
 //!
-//! 迁移自 service.rs 的 finish()。必须排在 finalizer 链首位——
-//! 它写入 FinalizeContext.quality，webhook 载荷要带这个结论。
+//! 迁移自 service.rs 的 finish()。必须排在 webhook 之前——
+//! 它把质量 meta 写进会话行，webhook 要重新读这一行来拼载荷。
 
 use std::sync::Arc;
 
@@ -99,7 +99,7 @@ mod tests {
         };
         let mut hooks = HookRegistry::default();
         SessionQualityPlugin.register(&SessionQualityPlugin.default_config(), &ctx, &mut hooks);
-        let report = hooks.run_finalizers(&FinalizeContext { session_id: 7, quality: None });
+        let report = hooks.run_finalizers(&FinalizeContext { session_id: 7 });
         assert!(report.failed.is_empty());
         assert_eq!(calls.load(Ordering::Relaxed), 1, "注入的 QualityDeps 应被调用");
     }
@@ -113,7 +113,7 @@ mod tests {
             &PluginContext::new(),
             &mut hooks,
         );
-        let report = hooks.run_finalizers(&FinalizeContext { session_id: 7, quality: None });
+        let report = hooks.run_finalizers(&FinalizeContext { session_id: 7 });
         assert!(report.failed.is_empty(), "没有依赖不等于失败");
     }
 }

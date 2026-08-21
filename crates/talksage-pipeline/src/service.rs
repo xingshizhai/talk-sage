@@ -502,13 +502,11 @@ impl TalkSageService {
             return Ok(Some(sid));
         };
         let _ = store.end_session(sid, unix_secs());
-        // quality 传 None：run_finalizers 拿的是 &FinalizeContext，链上游没法回写。
-        // 不影响 webhook —— 它的载荷是从库里现取的会话详情，meta 已由
-        // session_quality 落库（两者的顺序不变量见 builtin_plugins）。
-        let report = running.hooks.run_finalizers(&talksage_plugins::FinalizeContext {
-            session_id: sid,
-            quality: None,
-        });
+        // finalizer 之间不经由 context 传值：webhook 的载荷是从库里现取的会话
+        // 详情，meta 已由链上游的 session_quality 落库（顺序不变量见 builtin_plugins）。
+        let report = running
+            .hooks
+            .run_finalizers(&talksage_plugins::FinalizeContext { session_id: sid });
         if !report.failed.is_empty() {
             log::warn!("会话 #{sid} 收尾有 {} 项失败: {:?}", report.failed.len(), report.failed);
         }
