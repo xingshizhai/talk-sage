@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
@@ -862,52 +862,9 @@ fn run_loop(
         emit(ev);
     }
 
-    // 会话指标 + 实时提示（借鉴 Call.md conversation-metrics / nudge-engine）：
-    // 包装事件流——final 段事件聚合进 seg_log，随之推送 Metrics 事件；
-    // NudgeEngine 按规则（2min 冷却）评估并推送 Nudge 事件。
-    // 跨流回显去重已搬到 cross_stream_dedup filter（在产生点施加）。
-    let seg_log: Arc<Mutex<Vec<TranscriptSegment>>> = Arc::new(Mutex::new(Vec::new()));
-    let nudge_engine: Arc<Mutex<talksage_core::NudgeEngine>> = Arc::new(Mutex::new(talksage_core::NudgeEngine::default()));
-    let session_start = Instant::now();
-    let (seg_log_sink, nudge_sink) = (seg_log.clone(), nudge_engine.clone());
-    let emit_raw = emit.clone();
-    let emit: EventSink = Arc::new(move |ev: DomainEvent| {
-        if let DomainEvent::Segment {
-            text,
-            is_partial: false,
-            speaker_id,
-            speaker_label,
-            ts_ms,
-            duration_ms,
-            ..
-        } = &ev
-        {
-            seg_log_sink.lock().unwrap().push(TranscriptSegment {
-                speaker_id: *speaker_id,
-                speaker_label: speaker_label.clone(),
-                text: text.clone(),
-                is_partial: false,
-                ts_ms: *ts_ms,
-                duration_ms: *duration_ms,
-                rms: 0.0,
-            });
-            let metrics = {
-                let segs = seg_log_sink.lock().unwrap();
-                talksage_core::compute_conversation_metrics(&segs)
-            };
-            emit_raw(DomainEvent::Metrics { metrics: metrics.clone() });
-            let call_ms = session_start.elapsed().as_millis() as u64;
-            let now_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            if let Some(nudge) = nudge_sink.lock().unwrap().evaluate(&metrics, call_ms, now_ms) {
-                log::info!("会中提示[{:?}] {}", nudge.kind, nudge.message);
-                emit_raw(DomainEvent::Nudge { nudge });
-            }
-        }
-        emit_raw(ev);
-    });
+    // 会话指标与会中提示已搬到 conversation_metrics observer（阶段 3）。
+    // 它们不再包装事件流，因此事件顺序由「metrics 先于 Segment」变为
+    // 「Segment 先于 metrics」—— observer 在 on_final 派发，晚于 emit。
 
     fire(&emit, DomainEvent::Status {
         stage: StatusStage::AsrLoading,
@@ -1109,7 +1066,10 @@ fn make_on_final(
     let cfg = cfg.clone();
     let emit = emit.clone();
     Arc::new(move |seg: &TranscriptSegment| {
-        for plugin in &cfg.plugins {
+        // 两个来源：cfg.plugins 是阶段 5 之前遗留的手工装配（term/translator/
+        // brief），cfg.hooks.observers() 是注册表提供的。两者都要派发，否则
+        // 直接构造 LivePipelineConfig 的测试会拿不到注册表里的 observer。
+        for plugin in cfg.plugins.iter().chain(cfg.hooks.observers()) {
             if seg.is_partial && !plugin.accepts_speculative() {
                 continue;
             }
