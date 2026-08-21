@@ -128,7 +128,8 @@ StreamWorker 产生 final 段
   → EventSink → Tauri IPC / WebSocket
 
 会话 stop → flush → 写入 barrier →
-  SessionFinalizer 链：session_quality → webhook → markdown_export → trio_notes
+  SessionFinalizer 链：session_quality → webhook
+  （导出与纪要是按需 API，不在此链上 —— 见 §3.5 勘误）
 ```
 
 **filter 挂在事件产生点，不是 sink。** 必须显式说明，因为现状两个待迁移功能的作用域不一致：
@@ -151,7 +152,7 @@ StreamWorker 产生 final 段
 **S2. 钩子顺序 = `builtin_plugins()` 的列表顺序。** 不引入优先级数字或声明式依赖。顺序敏感的有两处，均由列表位置保证：
 
 - filter 链：`short_segment` 必须在 `cross_stream_dedup` 之前（便宜的先跑，且 dedup 需要看两条流的历史）
-- finalizer 链：`session_quality` 必须在其余 finalizer 之前（它写入 `FinalizeContext.quality`）
+- finalizer 链：`session_quality` 必须在 `webhook` 之前（它写入 `FinalizeContext.quality`，webhook 载荷要带质量结论）
 
 写在一个列表里比分散声明更容易审查；§6 的注册表不变量测试会锁住这两条相对顺序。
 
@@ -167,8 +168,8 @@ StreamWorker 产生 final 段
 | `conversation_metrics` | Observer | `pipeline/src/lib.rs` 调度。**含教练提示** —— 原设计列为独立的 `coaching_nudge`，实施时合并：两者共享 `seg_log`，拆开会让本已是 O(n²) 的指标计算翻倍 |
 | `session_quality` | Observer + Finalizer | `session/src/lib.rs:428` + `service.rs` |
 | `webhook` | Finalizer | `service.rs` |
-| `markdown_export` | Finalizer | `server/src/lib.rs` + `web/src-tauri/src/lib.rs` 合一 |
-| `trio_notes` | Finalizer | 现有 |
+| ~~`markdown_export`~~ | ~~Finalizer~~ | **勘误：不是 finalizer。** 它是用户在历史页点击触发的按需 API（`GET /session/{id}/export` 与对应 Tauri 命令），`finish()` 从不调用。真实问题是 server 与 tauri 各有一份实现 —— 解法是抽成 `TalkSageService` 共享方法，与插件无关 |
+| ~~`trio_notes`~~ | ~~Finalizer~~ | **勘误：同上。** 按需触发且含 LLM 调用；做成 finalizer 等于每次会话结束都自动烧 token，与「用户点击才生成」的产品行为相抵触 |
 
 ## 4. 配置与 UI
 
