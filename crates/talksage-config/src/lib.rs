@@ -1060,8 +1060,22 @@ fn apply_env_overrides(cfg: &mut Config) {
 mod tests {
     use super::*;
 
+    /// `ConfigManager::load` 末尾会调 `apply_env_overrides` 读进程环境变量，
+    /// 而 `env_overrides_win` 会 `set_var` —— 环境变量是进程全局的，Rust 测试
+    /// 默认并行，两者相撞时读方会拿到别人设的值（实测连跑 5 次失败 4 次，
+    /// 现象是 user_file_overrides_defaults 读到 7070 而非文件里的 9090）。
+    ///
+    /// 所有触碰环境变量的测试在此串行。
+    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        // 只需互斥、不共享状态，前一个测试 panic 导致的毒化可以忽略。
+        ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn defaults_load_without_file() {
+        let _env = env_lock();
         let mgr = ConfigManager::load(None, None).unwrap();
         let c = mgr.snapshot();
         assert_eq!(c.asr.user_engine, "paraformer-zh");
@@ -1072,6 +1086,7 @@ mod tests {
 
     #[test]
     fn user_file_overrides_defaults() {
+        let _env = env_lock();
         let dir = std::env::temp_dir().join(format!("talksage-cfg-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("talksage.toml");
@@ -1104,6 +1119,7 @@ min_segment_ms = 600
 
     #[test]
     fn env_overrides_win() {
+        let _env = env_lock();
         unsafe {
             std::env::set_var("TALKSAGE_SERVER_PORT", "7070");
         }
@@ -1186,6 +1202,7 @@ min_segment_ms = 600
 
     #[test]
     fn scene_custom_roundtrip_via_toml() {
+        let _env = env_lock();
         let dir = std::env::temp_dir().join(format!("talksage-cfg-scene-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("talksage.toml");
@@ -1219,6 +1236,7 @@ mode = "life"
     /// 通用表要能装宿主完全不认识的插件 —— 这是「加插件不用改配置结构」的前提。
     #[test]
     fn unknown_plugin_ids_survive_a_toml_roundtrip() {
+        let _env = env_lock();
         let dir = std::env::temp_dir().join(format!("talksage-cfg-plug-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("talksage.toml");
