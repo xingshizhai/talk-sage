@@ -370,6 +370,22 @@ export default function App() {
     [],
   );
 
+  /** 新监听会话必须从空白的实时上下文开始；暂停/继续不调用此方法。 */
+  const resetLiveSession = useCallback(() => {
+    accumulatorRef.current.reset();
+    pointsRef.current = new KeyPointAggregator();
+    lastTranslationRef.current = {};
+    setLines([]);
+    setPoints([]);
+    setTerms([]);
+    setExpandedTerms({});
+    setBriefs([]);
+    setRawEvents([]);
+    setMetrics(null);
+    setNudges([]);
+    setMicRms(0);
+  }, []);
+
   const handleListen = useCallback(async () => {
     try {
       if (listening) {
@@ -381,12 +397,15 @@ export default function App() {
         setStatus("启动中…");
         // 开始监听 → 自动跳转到实时转写页
         setNavPage("transcript");
+        // 后端会创建全新的 SessionRuntime；前端也必须同步丢弃上一会话的聚合状态。
+        // 必须在 startListen 前清空，避免启动后立即到达的新事件被误删。
+        resetLiveSession();
         await api.startListen();
       }
     } catch (e) {
       setStatus(`错误: ${e}`);
     }
-  }, [listening]);
+  }, [listening, resetLiveSession]);
 
   const handlePause = useCallback(async () => {
     if (!listening) return;
