@@ -12,8 +12,7 @@ use talksage_config::{ConfigManager, SceneMode};
 use talksage_core::{DomainEvent, ResultStatus, TranscriptSegment};
 use talksage_llm::{LLMProvider, OpenAICompatProvider};
 use talksage_plugins::{
-    brief_retriever::BriefRetrieverPlugin, term_explainer::TermExplainerPlugin, translator::TranslatorPlugin,
-    HookRegistry, QualityDeps, SegmentObserver, PluginContext, WebhookDeps,
+    HookRegistry, QualityDeps, PluginContext, WebhookDeps,
 };
 use talksage_session::{SessionStore, StreamMeta};
 
@@ -364,22 +363,6 @@ impl TalkSageService {
             }
         });
 
-        let mut plugins: Vec<Arc<dyn SegmentObserver>> = Vec::new();
-        if scene.term_enabled && snapshot.plugins.term_explainer.enabled {
-            plugins.push(Arc::new(TermExplainerPlugin::new(
-                snapshot.plugins.term_explainer.cooldown_seconds as f64,
-            )));
-        }
-        if scene.translation_enabled && snapshot.plugins.translator.enabled {
-            plugins.push(Arc::new(TranslatorPlugin::new()));
-        }
-        if scene.brief_enabled && snapshot.plugins.brief_retriever.enabled && kb.is_some() {
-            plugins.push(Arc::new(BriefRetrieverPlugin::new(
-                snapshot.plugins.brief_retriever.cooldown_seconds as f64,
-                0.05,
-            )));
-        }
-
         let speaker = if scene.speaker_enabled {
             let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
             let owner = speaker::load_owner_embedding(self.config.data_dir());
@@ -413,6 +396,33 @@ impl TalkSageService {
         plugin_overrides.insert(
             "cross_stream_dedup".into(),
             serde_json::json!({ "enabled": true }),
+        );
+        // 分析类插件：场景开关与用户开关是两道与门（沿用阶段 5 之前 service.rs
+        // 手工装配时的判定）。Task 3 会把场景那一半换成 allowlist。
+        // brief_retriever 还有第三道门「知识库有内容」—— 已移进它自己的
+        // register()，由 PluginContext.kb 判断，这里不再重复。
+        plugin_overrides.insert(
+            "term_explainer".into(),
+            serde_json::json!({
+                "enabled": scene.term_enabled && snapshot.plugins.term_explainer.enabled,
+                "cooldown_seconds": snapshot.plugins.term_explainer.cooldown_seconds as f64,
+            }),
+        );
+        plugin_overrides.insert(
+            "translator".into(),
+            // cooldown_seconds 照旧透传但插件不读它 —— 迁移前翻译插件的构造函数
+            // 就不接受参数。接上去会改变翻译触发频率，属于行为变更，另行提出。
+            serde_json::json!({
+                "enabled": scene.translation_enabled && snapshot.plugins.translator.enabled,
+                "cooldown_seconds": snapshot.plugins.translator.cooldown_seconds as f64,
+            }),
+        );
+        plugin_overrides.insert(
+            "brief_retriever".into(),
+            serde_json::json!({
+                "enabled": scene.brief_enabled && snapshot.plugins.brief_retriever.enabled,
+                "cooldown_seconds": snapshot.plugins.brief_retriever.cooldown_seconds as f64,
+            }),
         );
         let plugin_ctx = PluginContext {
             kb,
@@ -451,7 +461,6 @@ impl TalkSageService {
                 terminology,
             },
             client,
-            plugins,
             plugin_ctx,
             recording_dir,
             runtime: Arc::new(RuntimeParams::with_noise_level(req.noise_level)),

@@ -153,7 +153,6 @@ fn zh_pipeline(root: &Path, wav: &Path, min_commit_ms: u64) -> LivePipelineConfi
             terminology: Default::default(),
         },
         client: None,
-        plugins: Vec::new(),
         plugin_ctx: talksage_plugins::PluginContext::new(),
         recording_dir: None,
         runtime: Arc::new(talksage_pipeline::RuntimeParams::default()),
