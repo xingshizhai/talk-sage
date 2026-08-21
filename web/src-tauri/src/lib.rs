@@ -41,9 +41,34 @@ fn get_version() -> String {
 }
 
 /// 配置快照。
+///
+/// `plugins` 单独换成**生效配置**（插件默认值 + 用户覆盖）。原样序列化的话
+/// 通用表里只有用户显式写过的插件，设置页读 `plugins.<id>.enabled` 会拿到
+/// undefined —— 默认值归插件所有，宿主在出口处替前端补齐。
 #[tauri::command]
 fn get_config(state: tauri::State<'_, AppState>) -> serde_json::Value {
-    serde_json::to_value(state.config.snapshot()).unwrap_or(serde_json::Value::Null)
+    let snapshot = state.config.snapshot();
+    let mut value =
+        serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = value.as_object_mut() {
+        let mut plugins =
+            talksage_plugins::effective_plugin_configs(&snapshot.plugins.entries);
+        plugins.insert(
+            "notes".into(),
+            serde_json::json!({ "template": snapshot.plugins.notes.template }),
+        );
+        obj.insert("plugins".into(), serde_json::Value::Object(plugins));
+    }
+    value
+}
+
+/// 插件元数据（id / 显示名 / 是否分析类 / 默认配置）。
+///
+/// 设置页据此**生成**插件表单，因此桌面端与 headless 的 `GET /api/plugins`
+/// 必须是同一份数据 —— 两边都直接吐 `plugin_metadata()`，不做各自的加工。
+#[tauri::command]
+fn list_plugins() -> Vec<serde_json::Value> {
+    talksage_plugins::plugin_metadata()
 }
 
 /// 把配置解析后的真实录音目录加入 asset 协议只读范围。
@@ -119,24 +144,8 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
         }
     }
     if let Some(plugins) = updates.get("plugins") {
-        if let Some(t) = plugins.get("term_explainer") {
-            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
-                c.plugins.term_explainer.enabled = e;
-            }
-            if let Some(cd) = t.get("cooldown_seconds").and_then(|v| v.as_f64()) {
-                c.plugins.term_explainer.cooldown_seconds = cd as f32;
-            }
-        }
-        if let Some(t) = plugins.get("translator") {
-            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
-                c.plugins.translator.enabled = e;
-            }
-        }
-        if let Some(t) = plugins.get("brief_retriever") {
-            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
-                c.plugins.brief_retriever.enabled = e;
-            }
-        }
+        // 通用表：逐插件逐键合并，宿主不认识具体插件的配置结构。
+        c.plugins.apply_updates(plugins);
     }
     if let Some(kb) = updates.get("knowledge_base") {
         if let Some(e) = kb.get("enabled").and_then(|v| v.as_bool()) {
@@ -566,6 +575,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_version,
             get_config,
+            list_plugins,
             list_asr_models,
             save_config,
             ping,

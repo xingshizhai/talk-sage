@@ -876,8 +876,7 @@ fn cmd_doctor() -> ExitCode {
     let c = mgr.snapshot();
     println!("asr engines  : client={} user={} backend={}", c.asr.client_engine, c.asr.user_engine, c.asr.backend);
     println!("server       : enabled={} ({}:{})", c.server.enabled, c.server.host, c.server.port);
-    println!("plugins      : term={} translator={} brief={}",
-        c.plugins.term_explainer.enabled, c.plugins.translator.enabled, c.plugins.brief_retriever.enabled);
+    print_plugin_status(&c);
     let rec_dir = c.recording.resolve_dir(mgr.data_dir());
     println!("recording    : enabled={} dir={}（{}）",
         c.recording.enabled,
@@ -905,6 +904,37 @@ fn cmd_doctor() -> ExitCode {
 
     println!("\ndoctor 完成。");
     ExitCode::SUCCESS
+}
+
+/// 打印插件状态。
+///
+/// 遍历注册表而非具名字段：加插件不用改 doctor。每行的 enabled 是
+/// 「插件默认值 + 用户 `[plugins.<id>]`」的合并结果，再由当前场景的
+/// allowlist 对分析类插件裁决一次 —— 与 service.rs 建注册表时同一套顺序。
+fn print_plugin_status(c: &talksage_config::Config) {
+    let scene = c.scene.effective();
+    println!(
+        "plugins      : 场景={} allowlist=[{}]",
+        c.scene.mode_label(),
+        scene.plugin_allowlist.join(", ")
+    );
+    for p in talksage_plugins::builtin_plugins() {
+        let id = p.id();
+        let mut cfg = p.default_config();
+        if let Some(user) = c.plugins.entries.get(id) {
+            cfg.merge(user);
+        }
+        let gated = talksage_plugins::ANALYSIS_PLUGIN_IDS.contains(&id)
+            && !scene.plugin_allowlist.iter().any(|a| a == id);
+        let note = if gated {
+            "（本场景不允许）"
+        } else if !cfg.enabled() {
+            "（配置已关闭）"
+        } else {
+            ""
+        };
+        println!("  {id:<21}enabled={}{note}", cfg.enabled() && !gated);
+    }
 }
 
 /// 统计目录内 wav 文件数。

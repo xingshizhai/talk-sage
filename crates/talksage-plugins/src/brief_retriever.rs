@@ -79,6 +79,46 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// 注册表条目。
+pub struct BriefRetrieverPluginDef;
+
+impl crate::registry::Plugin for BriefRetrieverPluginDef {
+    fn id(&self) -> &'static str {
+        "brief_retriever"
+    }
+
+    fn label(&self) -> &'static str {
+        "简报检索"
+    }
+
+    fn default_config(&self) -> crate::registry::PluginConfig {
+        // `min_score` 迁移前硬编码在 service.rs 的调用点（0.05），不在配置里；
+        // 这里给出同一个值，行为不变。
+        crate::registry::PluginConfig::from_value(serde_json::json!({
+            "enabled": true,
+            "cooldown_seconds": 15.0,
+            "min_score": 0.05,
+        }))
+    }
+
+    fn register(
+        &self,
+        cfg: &crate::registry::PluginConfig,
+        ctx: &PluginContext,
+        hooks: &mut crate::registry::HookRegistry,
+    ) {
+        // 原 service.rs 的 `&& kb.is_some()`：知识库没索引到内容时不装配，
+        // 否则每段都会白跑一次检索。
+        if ctx.kb.is_none() {
+            return;
+        }
+        hooks.add_observer(std::sync::Arc::new(BriefRetrieverPlugin::new(
+            cfg.get_f64("cooldown_seconds", 15.0),
+            cfg.get_f64("min_score", 0.05) as f32,
+        )));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

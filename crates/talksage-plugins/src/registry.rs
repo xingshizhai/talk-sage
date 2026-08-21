@@ -134,6 +134,14 @@ pub trait Plugin: Send + Sync {
     fn id(&self) -> &'static str;
     fn default_config(&self) -> PluginConfig;
     fn register(&self, cfg: &PluginConfig, ctx: &PluginContext, hooks: &mut HookRegistry);
+
+    /// 设置页显示用的人话名字。**归插件自己**：宿主既不认识插件的配置结构，
+    /// 也就不该替它写标签表 —— 否则每加一个插件都要改一次前端常量。
+    ///
+    /// 默认返回 id：忘了写只是设置页里显示 `foo_bar` 而不是「某某」，不会崩。
+    fn label(&self) -> &'static str {
+        self.id()
+    }
 }
 
 /// 钩子集合。顺序即执行顺序。

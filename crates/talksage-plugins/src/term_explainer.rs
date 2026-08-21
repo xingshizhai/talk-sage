@@ -138,6 +138,38 @@ impl SegmentObserver for TermExplainerPlugin {
     }
 }
 
+/// 注册表条目。与 observer 本体 `TermExplainerPlugin` 分开命名：
+/// 前者是「插件身份 + 配置 + 装配」，后者是钩子实现。
+pub struct TermExplainerPluginDef;
+
+impl crate::registry::Plugin for TermExplainerPluginDef {
+    fn id(&self) -> &'static str {
+        "term_explainer"
+    }
+
+    fn label(&self) -> &'static str {
+        "术语解释"
+    }
+
+    fn default_config(&self) -> crate::registry::PluginConfig {
+        crate::registry::PluginConfig::from_value(serde_json::json!({
+            "enabled": true,
+            "cooldown_seconds": 10.0,
+        }))
+    }
+
+    fn register(
+        &self,
+        cfg: &crate::registry::PluginConfig,
+        _ctx: &PluginContext,
+        hooks: &mut crate::registry::HookRegistry,
+    ) {
+        hooks.add_observer(std::sync::Arc::new(TermExplainerPlugin::new(
+            cfg.get_f64("cooldown_seconds", 10.0),
+        )));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -12,8 +12,7 @@ use talksage_config::{ConfigManager, SceneMode};
 use talksage_core::{DomainEvent, ResultStatus, TranscriptSegment};
 use talksage_llm::{LLMProvider, OpenAICompatProvider};
 use talksage_plugins::{
-    brief_retriever::BriefRetrieverPlugin, term_explainer::TermExplainerPlugin, translator::TranslatorPlugin,
-    HookRegistry, QualityDeps, SegmentObserver, PluginContext, WebhookDeps,
+    HookRegistry, QualityDeps, PluginContext, WebhookDeps,
 };
 use talksage_session::{SessionStore, StreamMeta};
 
@@ -364,22 +363,6 @@ impl TalkSageService {
             }
         });
 
-        let mut plugins: Vec<Arc<dyn SegmentObserver>> = Vec::new();
-        if scene.term_enabled && snapshot.plugins.term_explainer.enabled {
-            plugins.push(Arc::new(TermExplainerPlugin::new(
-                snapshot.plugins.term_explainer.cooldown_seconds as f64,
-            )));
-        }
-        if scene.translation_enabled && snapshot.plugins.translator.enabled {
-            plugins.push(Arc::new(TranslatorPlugin::new()));
-        }
-        if scene.brief_enabled && snapshot.plugins.brief_retriever.enabled && kb.is_some() {
-            plugins.push(Arc::new(BriefRetrieverPlugin::new(
-                snapshot.plugins.brief_retriever.cooldown_seconds as f64,
-                0.05,
-            )));
-        }
-
         let speaker = if scene.speaker_enabled {
             let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
             let owner = speaker::load_owner_embedding(self.config.data_dir());
@@ -401,19 +384,9 @@ impl TalkSageService {
             None
         };
 
-        // 阶段 2 过渡：filter 类插件的配置暂时仍从既有具名字段翻译过来，
-        // 阶段 5 换成通用 [plugins.<id>] 表后这段删除。
         // 注册表在这里只建一次 —— 两条流共享同一批 filter 实例（跨流去重的前提）。
-        let mut plugin_overrides: std::collections::HashMap<String, serde_json::Value> =
-            std::collections::HashMap::new();
-        plugin_overrides.insert(
-            "short_segment".into(),
-            serde_json::json!({ "min_ms": scene.min_segment_ms }),
-        );
-        plugin_overrides.insert(
-            "cross_stream_dedup".into(),
-            serde_json::json!({ "enabled": true }),
-        );
+        let mut plugin_overrides = plugin_overrides_for(&snapshot.plugins, &scene);
+
         let plugin_ctx = PluginContext {
             kb,
             llm: Self::build_llm(&self.config),
@@ -423,8 +396,9 @@ impl TalkSageService {
         // webhook 默认关闭（会把会话内容发到外部）。这里只在「本次会话确实会落库、
         // 有东西可推」时把 finalizer 装上；装上不等于会发 —— 真正发不发由
         // [webhooks] 在会后再判一次（见 WebhookHost::push）。两道闸互不代替。
-        plugin_overrides.insert(
-            "webhook".into(),
+        merge_override(
+            &mut plugin_overrides,
+            "webhook",
             serde_json::json!({ "enabled": plugin_ctx.webhook.is_some() }),
         );
         let hooks = talksage_plugins::build_registry(
@@ -451,7 +425,6 @@ impl TalkSageService {
                 terminology,
             },
             client,
-            plugins,
             plugin_ctx,
             recording_dir,
             runtime: Arc::new(RuntimeParams::with_noise_level(req.noise_level)),
@@ -547,6 +520,84 @@ impl TalkSageService {
             log::warn!("会话 #{sid} 收尾有 {} 项失败: {:?}", report.failed.len(), report.failed);
         }
         Ok(Some(sid))
+    }
+}
+
+/// 组装本次会话的插件配置覆盖表。
+///
+/// **合并顺序**：`plugin.default_config()` → 用户 `[plugins.<id>]` →
+/// 宿主/场景最后裁决。前两步的第二步在这里搬运（第一步在 `build_registry`
+/// 里与默认值合并），第三步就是本函数余下的部分。
+///
+/// 这里刻意不认识任何具体插件的配置结构：通用表原样透传，插件 id 只在
+/// 「宿主必须裁决」的三处出现（场景 VAD 参数、跨流去重、webhook 宿主可用性），
+/// 以及场景 allowlist 的循环里 —— 而那个循环遍历的是
+/// `ANALYSIS_PLUGIN_IDS`，不是写死的三个名字。
+///
+/// webhook 不在这里裁决：它要看 `PluginContext.webhook` 是否有宿主，
+/// 而那个 ctx 在调用点之后才构造。
+fn plugin_overrides_for(
+    plugins: &talksage_config::PluginsConfig,
+    scene: &talksage_config::SceneParams,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    let mut overrides: std::collections::HashMap<String, serde_json::Value> =
+        plugins.entries.clone().into_iter().collect();
+
+    // 宿主裁决的键：来自场景参数或运行期能力，用户配置改不动它们。
+    merge_override(
+        &mut overrides,
+        "short_segment",
+        serde_json::json!({ "min_ms": scene.min_segment_ms }),
+    );
+    merge_override(
+        &mut overrides,
+        "cross_stream_dedup",
+        serde_json::json!({ "enabled": true }),
+    );
+
+    // 场景 allowlist 最后裁决：分析类插件不在列表里就关掉。只有分析类受此
+    // 约束 —— filter/finalizer 是基础设施，不该被场景关掉（见
+    // ANALYSIS_PLUGIN_IDS 的文档）。用 allowlist 而非 denylist：新增插件不会
+    // 因为某个场景忘了更新而在该场景意外开启。
+    //
+    // 注意这是**单向**的：allowlist 只能关，不能开。列表里有某个插件而用户在
+    // `[plugins.<id>]` 里写了 `enabled = false`，仍然是关 —— 沿用阶段 5 之前
+    // 「场景开关与用户开关是两道与门」的语义。
+    //
+    // 有的插件还有第三道门（简报检索要求「知识库有内容」）—— 那类判断在插件
+    // 自己的 register() 里靠 PluginContext 做，宿主这里不重复。
+    for id in talksage_plugins::ANALYSIS_PLUGIN_IDS {
+        if !scene.plugin_allowlist.iter().any(|a| a == id) {
+            merge_override(&mut overrides, id, serde_json::json!({ "enabled": false }));
+        }
+    }
+
+    overrides
+}
+
+/// 把 `patch` 的键并进某个插件的 override（用户在 `[plugins.<id>]` 里写的
+/// 其他键保留）。宿主裁决的键覆盖用户值 —— 场景参数与运行期能力不该被
+/// 配置文件推翻。
+fn merge_override(
+    overrides: &mut std::collections::HashMap<String, serde_json::Value>,
+    id: &str,
+    patch: serde_json::Value,
+) {
+    let Some(patch) = patch.as_object() else {
+        return;
+    };
+    let entry = overrides
+        .entry(id.to_string())
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    if !entry.is_object() {
+        // 用户把 [plugins.<id>] 写成了标量：丢掉，按空表处理。
+        *entry = serde_json::Value::Object(Default::default());
+    }
+    let Some(dst) = entry.as_object_mut() else {
+        return;
+    };
+    for (k, v) in patch {
+        dst.insert(k.clone(), v.clone());
     }
 }
 
@@ -783,6 +834,123 @@ mod tests {
         if let Some(input) = TalkSageService::resolve_client_input(true, &ClientCapture::Auto) {
             assert!(!matches!(input, AudioInput::Mic(_)));
         }
+    }
+
+    /// 覆盖表里某插件的 enabled（缺省按插件自己的默认，即「没被裁决」）。
+    fn enabled_in(
+        o: &std::collections::HashMap<String, serde_json::Value>,
+        id: &str,
+    ) -> Option<bool> {
+        o.get(id).and_then(|v| v.get("enabled")).and_then(|v| v.as_bool())
+    }
+
+    /// 阶段 5 之前的判定是 `scene.X_enabled && snapshot.plugins.X.enabled`，
+    /// 三个场景的 X_enabled 分别是 生活=false / 会议=true / 会谈=true。
+    /// allowlist 必须复现这一表现。
+    #[test]
+    fn scene_allowlist_reproduces_the_old_scene_gating() {
+        let plugins = talksage_config::PluginsConfig::default();
+        for (mode, want_off) in [
+            (SceneMode::Life, true),
+            (SceneMode::Meeting, false),
+            (SceneMode::Talk, false),
+            (SceneMode::Custom, false),
+        ] {
+            let o = plugin_overrides_for(&plugins, &talksage_config::scene_params(mode));
+            for id in talksage_plugins::ANALYSIS_PLUGIN_IDS {
+                if want_off {
+                    assert_eq!(enabled_in(&o, id), Some(false), "{mode:?} 应关掉 {id}");
+                } else {
+                    assert_ne!(enabled_in(&o, id), Some(false), "{mode:?} 不应关掉 {id}");
+                }
+            }
+        }
+    }
+
+    /// 基础设施类插件不受场景 allowlist 约束 —— 生活模式也要有短段抑制、
+    /// 跨流去重、指标与质量评估。
+    #[test]
+    fn infrastructure_plugins_survive_the_life_scene() {
+        let o = plugin_overrides_for(
+            &talksage_config::PluginsConfig::default(),
+            &talksage_config::scene_params(SceneMode::Life),
+        );
+        for id in ["conversation_metrics", "session_quality"] {
+            assert_eq!(enabled_in(&o, id), None, "{id} 不该被场景裁决");
+        }
+        assert_eq!(enabled_in(&o, "cross_stream_dedup"), Some(true));
+    }
+
+    /// 用户 `[plugins.<id>]` 的键要能穿到 override 表里，且 allowlist 只能关不能开。
+    ///
+    /// 取 id 而不写死名字：本文件不该认识任何具体插件，测试也一样。
+    #[test]
+    fn user_entries_pass_through_and_allowlist_only_turns_off() {
+        let on = talksage_plugins::ANALYSIS_PLUGIN_IDS[0];
+        let off = talksage_plugins::ANALYSIS_PLUGIN_IDS[1];
+        let mut plugins = talksage_config::PluginsConfig::default();
+        plugins.merge_entry(on, &serde_json::json!({ "enabled": true, "knob": 99.0 }));
+        plugins.merge_entry(off, &serde_json::json!({ "enabled": false }));
+
+        // 会议：allowlist 允许，用户值原样保留
+        let meeting =
+            plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Meeting));
+        assert_eq!(enabled_in(&meeting, on), Some(true));
+        assert_eq!(meeting[on]["knob"], serde_json::json!(99.0));
+        assert_eq!(
+            enabled_in(&meeting, off),
+            Some(false),
+            "用户关掉的，场景允许也不该打开"
+        );
+
+        // 生活：allowlist 不允许，enabled 被压成 false，但其他键不动
+        let life = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Life));
+        assert_eq!(enabled_in(&life, on), Some(false));
+        assert_eq!(
+            life[on]["knob"],
+            serde_json::json!(99.0),
+            "场景只裁决 enabled，不该抹掉用户其他配置"
+        );
+    }
+
+    /// 场景的 min_segment_ms 必须压过用户 `[plugins.short_segment]`
+    /// —— 场景参数是宿主裁决的键。
+    #[test]
+    fn scene_min_segment_ms_wins_over_user_config() {
+        let mut plugins = talksage_config::PluginsConfig::default();
+        plugins.merge_entry("short_segment", &serde_json::json!({ "min_ms": 7 }));
+        let o = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Talk));
+        assert_eq!(o["short_segment"]["min_ms"], serde_json::json!(300));
+    }
+
+    /// `HOST_MANAGED_KEYS` 是设置页「这个控件置灰」的依据，必须与本文件
+    /// `plugin_overrides_for` 的实际行为一致：声明为宿主裁决的键，用户写什么
+    /// 都得被压掉。漂移的表现是设置页上出现一个能改却不生效的输入框。
+    #[test]
+    fn declared_host_managed_keys_really_override_user_config() {
+        for (id, key) in talksage_plugins::HOST_MANAGED_KEYS {
+            let mut plugins = talksage_config::PluginsConfig::default();
+            // 用一个不可能与宿主值相同的哨兵：压过了就看不到它
+            plugins.merge_entry(id, &serde_json::json!({ *key: "SENTINEL" }));
+            let o = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Meeting));
+            assert_ne!(
+                o[*id][*key],
+                serde_json::json!("SENTINEL"),
+                "{id}.{key} 声明为宿主裁决，却没被 plugin_overrides_for 覆盖"
+            );
+        }
+    }
+
+    /// 配置层的 allowlist 与插件层的 ANALYSIS_PLUGIN_IDS 各存一份
+    /// （talksage-config 刻意不依赖 talksage-plugins）。这里锁住两者不漂移。
+    #[test]
+    fn meeting_allowlist_matches_the_plugin_layers_analysis_ids() {
+        let allow = talksage_config::scene_params(SceneMode::Meeting).plugin_allowlist;
+        let ids: Vec<String> = talksage_plugins::ANALYSIS_PLUGIN_IDS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(allow, ids, "会议 allowlist 应正好是全部分析类插件");
     }
 
     #[test]

@@ -87,12 +87,13 @@ pub struct SceneParams {
     pub client_enabled: bool,
     /// 客户流引擎。
     pub client_engine: String,
-    /// 术语解释插件。
-    pub term_enabled: bool,
-    /// 实时翻译插件。
-    pub translation_enabled: bool,
-    /// 简报检索插件。
-    pub brief_enabled: bool,
+    /// 该场景允许启用的分析类插件 id。不在列表里的一律关闭。
+    ///
+    /// 用 allowlist 而非 denylist —— 新增插件不会因为某个场景忘了更新而意外开启。
+    /// 只约束**分析类**插件（术语/翻译/简报这类「会议辅助功能」）；短段抑制、
+    /// 跨流去重、质量评估是基础设施，不受此列表影响（见
+    /// `talksage_plugins::ANALYSIS_PLUGIN_IDS`）。
+    pub plugin_allowlist: Vec<String>,
     /// 说话人识别（wespeaker + 主人声纹）。
     pub speaker_enabled: bool,
     /// 质量评估自动检测背景噪音（auto_detect）。
@@ -103,6 +104,18 @@ impl Default for SceneParams {
     fn default() -> Self {
         scene_params(SceneMode::Meeting)
     }
+}
+
+/// 分析类插件全开的 allowlist（会议 / 会谈 / 自定义共用）。
+///
+/// 这里的 id 必须与 `talksage_plugins::ANALYSIS_PLUGIN_IDS` 对齐 —— 配置层
+/// 刻意不依赖插件层（依赖方向是「pipeline 实现、plugins 定义」），所以两处
+/// 各存一份；一致性由 talksage-pipeline 的 `scene_allowlist` 测试锁住。
+fn all_analysis_plugins() -> Vec<String> {
+    ["term_explainer", "translator", "brief_retriever"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// 内置场景参数模板。
@@ -120,9 +133,8 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             user_engine: "paraformer-zh".into(),
             client_enabled: false, // 日常单方说话，不开双流
             client_engine: "zipformer-en".into(),
-            term_enabled: false, // 省资源/安静
-            translation_enabled: false,
-            brief_enabled: false,
+            // 省资源/安静：生活模式不允许任何分析类插件
+            plugin_allowlist: Vec::new(),
             speaker_enabled: false, // 默认关闭说话人识别（回环双录时在线聚类会产生重复标签，先把实时转写做好）
             noise_auto_detect: true,
         },
@@ -139,9 +151,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             user_engine: "paraformer-zh".into(),
             client_enabled: true,
             client_engine: "zipformer-en".into(),
-            term_enabled: true,
-            translation_enabled: true,
-            brief_enabled: true,
+            plugin_allowlist: all_analysis_plugins(),
             speaker_enabled: false, // 默认关闭说话人识别（先把实时转写做好）
             noise_auto_detect: true,
         },
@@ -157,9 +167,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             user_engine: "paraformer-zh".into(),
             client_enabled: true,
             client_engine: "zipformer-en".into(),
-            term_enabled: true,
-            translation_enabled: true,
-            brief_enabled: true,
+            plugin_allowlist: all_analysis_plugins(),
             speaker_enabled: false, // 默认关闭说话人识别（先把实时转写做好）
             noise_auto_detect: true,
         },
@@ -175,9 +183,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             user_engine: "paraformer-zh".into(),
             client_enabled: true,
             client_engine: "zipformer-en".into(),
-            term_enabled: true,
-            translation_enabled: true,
-            brief_enabled: true,
+            plugin_allowlist: all_analysis_plugins(),
             speaker_enabled: false, // 默认关闭说话人识别（先把实时转写做好）
             noise_auto_detect: true,
         },
@@ -285,14 +291,13 @@ pub fn apply_scene_params(p: &mut SceneParams, u: &serde_json::Value) {
     if let Some(v) = u.get("client_engine").and_then(|v| v.as_str()) {
         p.client_engine = v.to_string();
     }
-    if let Some(v) = u.get("term_enabled").and_then(|v| v.as_bool()) {
-        p.term_enabled = v;
-    }
-    if let Some(v) = u.get("translation_enabled").and_then(|v| v.as_bool()) {
-        p.translation_enabled = v;
-    }
-    if let Some(v) = u.get("brief_enabled").and_then(|v| v.as_bool()) {
-        p.brief_enabled = v;
+    // allowlist 整体替换而非逐项增删：前端提交的就是「这个场景允许哪些插件」的
+    // 完整答案，半个列表没有意义。非字符串项直接丢弃。
+    if let Some(v) = u.get("plugin_allowlist").and_then(|v| v.as_array()) {
+        p.plugin_allowlist = v
+            .iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .collect();
     }
     if let Some(v) = u.get("speaker_enabled").and_then(|v| v.as_bool()) {
         p.speaker_enabled = v;
@@ -654,47 +659,74 @@ impl Default for LlmProviderConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 插件配置表。
+///
+/// **通用表，不认识具体插件。** 键是插件 id，值的结构由插件自己的
+/// `default_config()` 定义；这里只负责原样存取。缺省是空表 —— 每个插件的
+/// 默认值归插件自己，配置文件里没写就是「用默认」。
+///
+/// 破坏性变更（设计 §4）：阶段 5 之前这里是 `term_explainer` /`translator` /
+/// `brief_retriever` 三个具名字段。旧配置文件里的这三段会被原样读进
+/// `entries`，键名相同，所以 `enabled` / `cooldown_seconds` 仍然生效；
+/// 不做读时迁移。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PluginsConfig {
-    pub term_explainer: PluginToggle,
-    pub translator: PluginToggle,
-    pub brief_retriever: PluginToggle,
+    /// 通用插件表：键是插件 id，值由插件自己的 default_config() 定义结构。
+    #[serde(flatten)]
+    pub entries: std::collections::BTreeMap<String, serde_json::Value>,
+    /// 纪要模板 —— 不是插件配置，是宿主自己的设置，保持具名。
     pub notes: NotesConfig,
 }
 
-impl Default for PluginsConfig {
-    fn default() -> Self {
-        Self {
-            term_explainer: PluginToggle {
-                enabled: true,
-                cooldown_seconds: 10.0,
-            },
-            translator: PluginToggle {
-                enabled: true,
-                cooldown_seconds: 3.0,
-            },
-            brief_retriever: PluginToggle {
-                enabled: true,
-                cooldown_seconds: 15.0,
-            },
-            notes: NotesConfig::default(),
+impl PluginsConfig {
+    /// 读某个插件的某个布尔键（表里没有该插件 / 该键时返回 `default`）。
+    /// 只给宿主展示用（doctor / API），真正的合并在 `build_registry` 里。
+    pub fn get_bool(&self, id: &str, key: &str, default: bool) -> bool {
+        self.entries
+            .get(id)
+            .and_then(|v| v.get(key))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(default)
+    }
+
+    /// 应用前端提交的 `plugins` 表（设置面板 / API 保存）。
+    ///
+    /// 逐插件逐键合并，不认识具体插件 —— 前端提交什么 id 就存什么 id，
+    /// 校验归插件自己（读配置时 `get_*` 都带默认值）。`notes` 不是插件，
+    /// 单独走具名字段。
+    pub fn apply_updates(&mut self, updates: &serde_json::Value) {
+        let Some(obj) = updates.as_object() else {
+            return;
+        };
+        for (id, patch) in obj {
+            if id == "notes" {
+                if let Some(t) = patch.get("template").and_then(|v| v.as_str()) {
+                    self.notes.template = t.to_string();
+                }
+                continue;
+            }
+            self.merge_entry(id, patch);
         }
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PluginToggle {
-    pub enabled: bool,
-    pub cooldown_seconds: f32,
-}
-
-impl Default for PluginToggle {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            cooldown_seconds: 10.0,
+    /// 把 `patch` 里的键并进 `[plugins.<id>]`（未提交的键保留）。
+    pub fn merge_entry(&mut self, id: &str, patch: &serde_json::Value) {
+        let Some(patch) = patch.as_object() else {
+            return;
+        };
+        let entry = self
+            .entries
+            .entry(id.to_string())
+            .or_insert_with(|| serde_json::Value::Object(Default::default()));
+        if !entry.is_object() {
+            *entry = serde_json::Value::Object(Default::default());
+        }
+        let Some(dst) = entry.as_object_mut() else {
+            return;
+        };
+        for (k, v) in patch {
+            dst.insert(k.clone(), v.clone());
         }
     }
 }
@@ -937,12 +969,9 @@ fn merge_config(default: Config, user: Config) -> Config {
                 merged
             },
         },
-        plugins: PluginsConfig {
-            term_explainer: user.plugins.term_explainer,
-            translator: user.plugins.translator,
-            brief_retriever: user.plugins.brief_retriever,
-            notes: user.plugins.notes,
-        },
+        // 通用表：用户写了什么就是什么，宿主不认识键也不该替插件填默认值
+        // —— 默认值归 plugin.default_config()，合并在 build_registry 里发生。
+        plugins: user.plugins,
         session: user.session,
         recording: RecordingConfig {
             enabled: user.recording.enabled,
@@ -979,9 +1008,7 @@ fn merge_config(default: Config, user: Config) -> Config {
                 user_engine: user.scene.custom.user_engine,
                 client_enabled: user.scene.custom.client_enabled,
                 client_engine: user.scene.custom.client_engine,
-                term_enabled: user.scene.custom.term_enabled,
-                translation_enabled: user.scene.custom.translation_enabled,
-                brief_enabled: user.scene.custom.brief_enabled,
+                plugin_allowlist: user.scene.custom.plugin_allowlist,
                 speaker_enabled: user.scene.custom.speaker_enabled,
                 noise_auto_detect: user.scene.custom.noise_auto_detect,
             },
@@ -1033,8 +1060,22 @@ fn apply_env_overrides(cfg: &mut Config) {
 mod tests {
     use super::*;
 
+    /// `ConfigManager::load` 末尾会调 `apply_env_overrides` 读进程环境变量，
+    /// 而 `env_overrides_win` 会 `set_var` —— 环境变量是进程全局的，Rust 测试
+    /// 默认并行，两者相撞时读方会拿到别人设的值（实测连跑 5 次失败 4 次，
+    /// 现象是 user_file_overrides_defaults 读到 7070 而非文件里的 9090）。
+    ///
+    /// 所有触碰环境变量的测试在此串行。
+    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        // 只需互斥、不共享状态，前一个测试 panic 导致的毒化可以忽略。
+        ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn defaults_load_without_file() {
+        let _env = env_lock();
         let mgr = ConfigManager::load(None, None).unwrap();
         let c = mgr.snapshot();
         assert_eq!(c.asr.user_engine, "paraformer-zh");
@@ -1045,6 +1086,7 @@ mod tests {
 
     #[test]
     fn user_file_overrides_defaults() {
+        let _env = env_lock();
         let dir = std::env::temp_dir().join(format!("talksage-cfg-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("talksage.toml");
@@ -1077,6 +1119,7 @@ min_segment_ms = 600
 
     #[test]
     fn env_overrides_win() {
+        let _env = env_lock();
         unsafe {
             std::env::set_var("TALKSAGE_SERVER_PORT", "7070");
         }
@@ -1094,14 +1137,15 @@ min_segment_ms = 600
         let mgr = ConfigManager::load(Some(dir.clone()), None).unwrap();
         mgr.update(|c| {
             c.llm.default = "kimi".into();
-            c.plugins.translator.enabled = false;
+            c.plugins
+                .merge_entry("translator", &serde_json::json!({ "enabled": false }));
         })
         .unwrap();
 
         // 重新加载同一目录，应读到更新后的值
         let reloaded = ConfigManager::load(Some(dir.clone()), None).unwrap();
         assert_eq!(reloaded.snapshot().llm.default, "kimi");
-        assert!(!reloaded.snapshot().plugins.translator.enabled);
+        assert!(!reloaded.snapshot().plugins.get_bool("translator", "enabled", true));
         // 未修改字段保持默认
         assert_eq!(reloaded.snapshot().asr.user_engine, "paraformer-zh");
         std::fs::remove_dir_all(&dir).ok();
@@ -1128,7 +1172,10 @@ min_segment_ms = 600
         assert_eq!(p.min_segment_ms, 0);
         assert_eq!(p.user_engine, "paraformer-zh");
         assert!(p.client_enabled);
-        assert!(p.term_enabled && p.translation_enabled && p.brief_enabled);
+        assert_eq!(
+            p.plugin_allowlist,
+            vec!["term_explainer", "translator", "brief_retriever"]
+        );
         // 说话人识别默认关闭（回环双录时在线聚类产生重复标签；先把实时转写做好）
         assert!(!p.speaker_enabled);
         // 与场景 to_* 转换一致
@@ -1142,7 +1189,7 @@ min_segment_ms = 600
         let meeting = scene_params(SceneMode::Meeting);
         assert_eq!(life.vad_preset, VadPreset::Sensitive);
         assert!(!life.client_enabled, "生活场景应单流");
-        assert!(!life.term_enabled, "生活场景应关闭分析插件");
+        assert!(life.plugin_allowlist.is_empty(), "生活场景应关闭分析插件");
         assert_eq!(talk.min_segment_ms, 300);
         assert!(talk.client_enabled);
         // 默认（会议）→ effective 用模板而非 custom
@@ -1155,6 +1202,7 @@ min_segment_ms = 600
 
     #[test]
     fn scene_custom_roundtrip_via_toml() {
+        let _env = env_lock();
         let dir = std::env::temp_dir().join(format!("talksage-cfg-scene-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("talksage.toml");
@@ -1172,6 +1220,81 @@ mode = "life"
         // 生活模板生效（未写 custom）
         assert_eq!(cfg.scene.effective().vad_preset, VadPreset::Sensitive);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn plugins_config_is_a_generic_table() {
+        let mut c = Config::default();
+        c.plugins.entries.insert(
+            "term_explainer".into(),
+            serde_json::json!({ "enabled": false, "cooldown_seconds": 99.0 }),
+        );
+        let toml = toml::to_string(&c).expect("应可序列化");
+        assert!(toml.contains("term_explainer"), "通用表应写进 toml");
+    }
+
+    /// 通用表要能装宿主完全不认识的插件 —— 这是「加插件不用改配置结构」的前提。
+    #[test]
+    fn unknown_plugin_ids_survive_a_toml_roundtrip() {
+        let _env = env_lock();
+        let dir = std::env::temp_dir().join(format!("talksage-cfg-plug-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("talksage.toml");
+        std::fs::write(
+            &file,
+            r#"
+[plugins.some_future_plugin]
+enabled = true
+knob = 42
+"#,
+        )
+        .unwrap();
+        let cfg = ConfigManager::load(None, Some(&file)).unwrap().snapshot();
+        assert_eq!(
+            cfg.plugins.entries.get("some_future_plugin").and_then(|v| v.get("knob")),
+            Some(&serde_json::json!(42))
+        );
+        // notes 仍是具名字段，不该被吸进通用表
+        assert!(!cfg.plugins.entries.contains_key("notes"), "notes 不是插件");
+        assert_eq!(cfg.plugins.notes.template, "standard_meeting");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 场景用 allowlist：不在列表里的插件一律关闭。
+    /// 用 allowlist 而非 denylist —— 新增插件不会因为某个场景忘了更新而意外开启。
+    #[test]
+    fn life_scene_allows_no_analysis_plugins() {
+        let allow = scene_params(SceneMode::Life).plugin_allowlist;
+        for id in ["term_explainer", "translator", "brief_retriever"] {
+            assert!(!allow.contains(&id.to_string()), "生活模式不应允许 {id}");
+        }
+    }
+
+    #[test]
+    fn meeting_scene_allows_all_analysis_plugins() {
+        let allow = scene_params(SceneMode::Meeting).plugin_allowlist;
+        for id in ["term_explainer", "translator", "brief_retriever"] {
+            assert!(allow.contains(&id.to_string()), "会议模式应允许 {id}");
+        }
+    }
+
+    /// 会谈与会议一致 —— 阶段 5 之前两者的三个 *_enabled 都是 true。
+    #[test]
+    fn talk_scene_allows_all_analysis_plugins() {
+        assert_eq!(
+            scene_params(SceneMode::Talk).plugin_allowlist,
+            scene_params(SceneMode::Meeting).plugin_allowlist
+        );
+    }
+
+    #[test]
+    fn apply_scene_params_replaces_the_whole_allowlist() {
+        let mut p = scene_params(SceneMode::Meeting);
+        apply_scene_params(&mut p, &serde_json::json!({ "plugin_allowlist": ["translator"] }));
+        assert_eq!(p.plugin_allowlist, vec!["translator"]);
+        // 未提交时保留原值
+        apply_scene_params(&mut p, &serde_json::json!({ "denoise_enabled": true }));
+        assert_eq!(p.plugin_allowlist, vec!["translator"]);
     }
 
     #[test]

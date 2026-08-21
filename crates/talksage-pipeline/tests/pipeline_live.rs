@@ -130,7 +130,6 @@ fn zh_file_pipeline(root: &Path, wav: &Path) -> LivePipelineConfig {
             terminology: Default::default(),
         },
         client: None,
-        plugins: Vec::new(),
         plugin_ctx: talksage_plugins::PluginContext::new(),
         recording_dir: None,
         runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
@@ -378,9 +377,13 @@ fn count_finals(evs: &[DomainEvent]) -> usize {
 }
 
 /// 跑一遍管道，返回 (事件流, observer 派发次数)。
+///
+/// 阶段 5 之后没有 `cfg.plugins` 这条旁路了：自定义 observer 也得走注册表，
+/// 直接挂进这份 `HookRegistry`。挂法不同，测的东西不变 —— 派发次数仍由
+/// `CountingObserver::should_trigger` 计数。
 fn run_with_counting_observer(mut cfg: LivePipelineConfig) -> (Vec<DomainEvent>, usize) {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    cfg.plugins = vec![Arc::new(CountingObserver { calls: calls.clone() })];
+    cfg.hooks.add_observer(Arc::new(CountingObserver { calls: calls.clone() }));
     let evs = run_and_collect(cfg);
     let n = calls.load(std::sync::atomic::Ordering::SeqCst);
     (evs, n)
@@ -522,9 +525,9 @@ fn observers_and_counters_see_the_filtered_text() {
 
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let mut cfg = zh_file_pipeline(&root, &wav);
-    cfg.plugins = vec![Arc::new(RecordingObserver { seen: seen.clone() })];
     let mut hooks = hooks_with_min_commit_ms(0);
     hooks.add_filter(Arc::new(RewriteFilter));
+    hooks.add_observer(Arc::new(RecordingObserver { seen: seen.clone() }));
     cfg.hooks = hooks;
 
     let evs = run_and_collect(cfg);
@@ -588,10 +591,20 @@ fn plugins_emit_term_and_translation_events() {
         llm: Some(Arc::new(mock)),
         ..talksage_plugins::PluginContext::new()
     };
-    let plugins: Vec<Arc<dyn talksage_plugins::SegmentObserver>> = vec![
-        Arc::new(talksage_plugins::term_explainer::TermExplainerPlugin::new(0.0)),
-        Arc::new(talksage_plugins::translator::TranslatorPlugin::new()),
-    ];
+    // 阶段 5 之后 term/translator 由注册表装配（同一份 ctx 既喂 register 也喂
+    // run）。cooldown 覆盖成 0 保持迁移前 `TermExplainerPlugin::new(0.0)` 的语义。
+    let hooks = talksage_plugins::build_registry(
+        &talksage_plugins::builtin_plugins(),
+        &std::collections::HashMap::from([
+            ("short_segment".to_string(), serde_json::json!({ "min_ms": 0 })),
+            ("term_explainer".to_string(), serde_json::json!({ "cooldown_seconds": 0.0 })),
+        ]),
+        &ctx,
+    );
+    assert!(
+        hooks.observers().iter().any(|o| o.name() == "translator"),
+        "translator 应由注册表装配 —— 否则本测试等于空转"
+    );
 
     let cfg = LivePipelineConfig {
         vad_model: vad_model(&root),
@@ -611,13 +624,12 @@ fn plugins_emit_term_and_translation_events() {
             terminology: Default::default(),
         },
         client: None,
-        plugins,
         plugin_ctx: ctx,
         recording_dir: None,
         runtime: std::sync::Arc::new(talksage_pipeline::RuntimeParams::default()),
         speaker: None,
         engine_pool: None,
-        hooks: hooks_with_min_commit_ms(0),
+        hooks,
     };
 
     let evs = run_and_collect(cfg);

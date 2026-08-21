@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AppApi, AppConfig, AsrModelInfo, DomainEvent, NotesTemplate, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./api";
+import type { AppApi, AppConfig, AsrModelInfo, DomainEvent, NotesTemplate, PluginMeta, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./api";
 
 /** 统一 fetch 辅助（同源 /api）。 */
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -44,6 +44,10 @@ export const ipcApi: AppApi = {
 
   async listAsrModels(): Promise<AsrModelInfo[]> {
     return invoke<AsrModelInfo[]>("list_asr_models");
+  },
+
+  async listPlugins(): Promise<PluginMeta[]> {
+    return invoke<PluginMeta[]>("list_plugins");
   },
 
   async saveConfig(updates: Record<string, unknown>): Promise<void> {
@@ -161,6 +165,10 @@ export const httpApi: AppApi = {
 
   async listAsrModels(): Promise<AsrModelInfo[]> {
     return req<AsrModelInfo[]>("/asr/models");
+  },
+
+  async listPlugins(): Promise<PluginMeta[]> {
+    return req<PluginMeta[]>("/plugins");
   },
 
   async saveConfig(updates: Record<string, unknown>): Promise<void> {

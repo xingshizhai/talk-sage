@@ -45,6 +45,10 @@ impl Plugin for ShortSegmentPlugin {
         "short_segment"
     }
 
+    fn label(&self) -> &'static str {
+        "短段抑制"
+    }
+
     fn default_config(&self) -> PluginConfig {
         PluginConfig::from_value(json!({ "enabled": true, "min_ms": DEFAULT_MIN_MS }))
     }

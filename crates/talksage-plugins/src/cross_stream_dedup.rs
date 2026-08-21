@@ -65,6 +65,10 @@ impl Plugin for CrossStreamDedupPlugin {
         "cross_stream_dedup"
     }
 
+    fn label(&self) -> &'static str {
+        "双流去重"
+    }
+
     fn default_config(&self) -> PluginConfig {
         PluginConfig::from_value(json!({ "enabled": true }))
     }

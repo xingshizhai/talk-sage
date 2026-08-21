@@ -50,6 +50,10 @@ impl Plugin for SessionQualityPlugin {
         "session_quality"
     }
 
+    fn label(&self) -> &'static str {
+        "会话质量评估"
+    }
+
     fn default_config(&self) -> PluginConfig {
         PluginConfig::from_value(json!({ "enabled": true }))
     }

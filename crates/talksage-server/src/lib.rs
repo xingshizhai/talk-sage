@@ -80,6 +80,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/config", get(get_config_api).post(save_config_api))
+        .route("/plugins", get(list_plugins_api))
         .route("/asr/models", get(asr_models_api))
         .route("/sessions", get(list_sessions_api))
         .route("/search", get(search_api))
@@ -163,14 +164,23 @@ async fn get_config_api(State(state): State<ServerState>, headers: axum::http::H
             "terminology": cfg.asr.terminology,
         },
         "audio": cfg.audio,
-        "plugins": {
-            "term_explainer": cfg.plugins.term_explainer,
-            "translator": cfg.plugins.translator,
-            "brief_retriever": cfg.plugins.brief_retriever,
-        },
+        // 通用表：每个插件的默认值 + 用户覆盖，键就是插件 id。
+        // 前端不需要预先知道有哪些插件（Task 4 的 /plugins 端点给出元数据）。
+        "plugins": talksage_plugins::effective_plugin_configs(&cfg.plugins.entries),
         "server": { "host": cfg.server.host, "port": cfg.server.port },
     });
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// 插件元数据（设置页据此生成表单）。
+///
+/// 与 `/config` 一样走 `token_ok`：这里枚举的是「本机装了哪些插件、默认配置
+/// 长什么样」，属于配置面，不该匿名可读。
+async fn list_plugins_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    Json(talksage_plugins::plugin_metadata()).into_response()
 }
 
 async fn asr_models_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
@@ -230,21 +240,7 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
         }
     }
     if let Some(plugins) = updates.get("plugins") {
-        if let Some(t) = plugins.get("term_explainer") {
-            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
-                c.plugins.term_explainer.enabled = e;
-            }
-        }
-        if let Some(t) = plugins.get("translator") {
-            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
-                c.plugins.translator.enabled = e;
-            }
-        }
-        if let Some(t) = plugins.get("brief_retriever") {
-            if let Some(e) = t.get("enabled").and_then(|v| v.as_bool()) {
-                c.plugins.brief_retriever.enabled = e;
-            }
-        }
+        c.plugins.apply_updates(plugins);
     }
     if let Some(kb) = updates.get("knowledge_base") {
         if let Some(e) = kb.get("enabled").and_then(|v| v.as_bool()) {

@@ -28,11 +28,11 @@ export interface AppConfig {
     port: number;
     token: string;
   };
-  plugins: {
-    term_explainer: { enabled: boolean; cooldown_seconds: number };
-    translator: { enabled: boolean; cooldown_seconds: number };
-    brief_retriever: { enabled: boolean; cooldown_seconds: number };
-  };
+  /**
+   * 通用插件表：键是插件 id，值的结构由插件自己定义（`enabled` 是唯一约定键）。
+   * 后端返回的是「插件默认值 + 用户覆盖」的生效配置，所以每个内置插件都会出现。
+   */
+  plugins: Record<string, { enabled?: boolean; [key: string]: unknown }>;
   audio: {
     input_gain_db: number;
     vad: { preset: "standard" | "sensitive" | "strict"; threshold: number | null };
@@ -68,6 +68,28 @@ export interface AppConfig {
   [key: string]: unknown;
 }
 
+/**
+ * 插件元数据（与 Rust 侧 `plugin_metadata()` 对应）。设置页据此**生成**表单。
+ *
+ * `schema` 是插件的默认配置整体，没有单独的 schema 语言：默认值的 JSON 类型
+ * 就是控件类型（boolean → 开关，number → 数字框，string → 文本框）。
+ */
+export interface PluginMeta {
+  /** 提交时 `plugins.<id>` 的键。 */
+  id: string;
+  /** 显示名（插件自己给；缺省是 id）。 */
+  label: string;
+  /** 是否受场景 allowlist 约束（「会议辅助功能」那一类）。 */
+  analysis: boolean;
+  /** 默认配置。键即配置键，值即默认值。 */
+  schema: Record<string, unknown>;
+  /**
+   * 由宿主裁决的配置键：装配时被场景参数/运行期能力无条件覆盖，用户改不动。
+   * 设置页把这些控件置灰 —— 能改却不生效的输入框比没有更糟。
+   */
+  host_managed: string[];
+}
+
 /** 场景参数集（自定义模式可全量编辑）。 */
 export interface SceneParams {
   vad_preset: "standard" | "sensitive" | "strict";
@@ -81,9 +103,8 @@ export interface SceneParams {
   user_engine: string;
   client_enabled: boolean;
   client_engine: string;
-  term_enabled: boolean;
-  translation_enabled: boolean;
-  brief_enabled: boolean;
+  /** 该场景允许启用的分析类插件 id；不在列表里的一律关闭（allowlist，非 denylist）。 */
+  plugin_allowlist: string[];
   speaker_enabled: boolean;
   noise_auto_detect: boolean;
 }
@@ -255,6 +276,8 @@ export interface AppApi {
   getVersion(): Promise<string>;
   getConfig(): Promise<AppConfig>;
   listAsrModels(): Promise<AsrModelInfo[]>;
+  /** 插件元数据（设置页据此生成插件表单）。 */
+  listPlugins(): Promise<PluginMeta[]>;
   /** 保存配置（写入 talksage.toml / 服务端配置）。 */
   saveConfig(updates: Record<string, unknown>): Promise<void>;
   ping(): Promise<void>;

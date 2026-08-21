@@ -53,6 +53,10 @@ impl Plugin for WebhookPlugin {
         "webhook"
     }
 
+    fn label(&self) -> &'static str {
+        "会议结束推送"
+    }
+
     fn default_config(&self) -> PluginConfig {
         PluginConfig::from_value(json!({ "enabled": false }))
     }

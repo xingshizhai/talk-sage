@@ -70,7 +70,6 @@ pub fn transcribe_file(
             terminology: Default::default(),
         },
         client: None,
-        plugins: Vec::new(),
         plugin_ctx: talksage_plugins::PluginContext::new(),
         recording_dir: None,
         runtime: Arc::new(RuntimeParams::default()),

@@ -18,7 +18,6 @@ use talksage_asr::{EngineKind, EngineOptions, EnginePool};
 use talksage_audio::{AudioHub, Preprocessor};
 use talksage_config::{DenoiseConfig, EndpointConfig, VadConfig};
 use talksage_core::{AudioClock, DomainEvent, StatusStage, TranscriptSegment};
-use talksage_plugins::SegmentObserver;
 
 pub mod finalize;
 pub mod offline;
@@ -137,8 +136,6 @@ pub struct LivePipelineConfig {
     pub user: StreamConfig,
     /// 客户流（英文，可选）。
     pub client: Option<StreamConfig>,
-    /// 会议辅助插件（final 段后触发）。
-    pub plugins: Vec<Arc<dyn SegmentObserver>>,
     /// 插件上下文（知识库/LLM 共享）。
     pub plugin_ctx: talksage_plugins::PluginContext,
     /// 录音目录（Some 时监听期间把每条流的原始音频保存为 `{ts}_{speaker_label}.wav`）。
@@ -1299,10 +1296,9 @@ fn make_on_final(
     let cfg = cfg.clone();
     let emit = emit.clone();
     Arc::new(move |seg: &TranscriptSegment| {
-        // 两个来源：cfg.plugins 是阶段 5 之前遗留的手工装配（term/translator/
-        // brief），cfg.hooks.observers() 是注册表提供的。两者都要派发，否则
-        // 直接构造 LivePipelineConfig 的测试会拿不到注册表里的 observer。
-        for plugin in cfg.plugins.iter().chain(cfg.hooks.observers()) {
+        // 唯一来源：注册表。阶段 5 之前这里还要 chain 上 cfg.plugins
+        // （service.rs 手工装配的 term/translator/brief），那条路已删除。
+        for plugin in cfg.hooks.observers() {
             if seg.is_partial && !plugin.accepts_speculative() {
                 continue;
             }
