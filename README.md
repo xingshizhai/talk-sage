@@ -208,7 +208,7 @@ crates/            Rust workspace (10 domain crates)
 web/               Tauri 2 + React frontend
 scripts/           build/run/test tooling + model downloaders
 docs/              design & operation docs
-models/            runtime models (gitignored, ~340 MB)
+models/            runtime models (gitignored, ~1.2 GB, multi-engine optional)
 ```
 
 ## License

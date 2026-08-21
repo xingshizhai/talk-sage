@@ -164,9 +164,9 @@ AudioHub（cpal / WASAPI 回环）→ Preprocessor（降噪/高通/噪声门）
 |---|---|
 | `talksage-core` | 领域事件、会话质量、文本噪音评分 |
 | `talksage-audio` | 麦克风/回环采集、重采样、降噪、wav 读写、静音裁剪 |
-| `talksage-asr` | sherpa-onnx 流式引擎封装 |
-| `talksage-pipeline` | VAD 分段、双流、录音、运行时噪音电平阈值、说话人识别 |
-| `talksage-plugins` | 术语解释 / 翻译 / 简报检索 |
+| `talksage-asr` | 多模型引擎：sherpa-onnx 流式（paraformer/zipformer）+ 离线段级（whisper/qwen3） |
+| `talksage-pipeline` | 模块化实时管线：TalkSageService 装配、VAD 分段、双流、有界采集、SessionWriter 落库、插件执行器、说话人识别 |
+| `talksage-plugins` | 插件注册表：8 个内置插件（filter/observer/finalizer 三类钩子，短段抑制/跨流去重/指标/术语/翻译/简报/质量/Webhook） |
 | `talksage-session` | SQLite 存储 + 质量评估 |
 | `talksage-notes` | 纪要模板 + 生成器 |
 | `talksage-server` | axum headless 服务（REST + WS + SPA） |
@@ -207,7 +207,7 @@ crates/            Rust workspace（10 个领域 crate）
 web/               Tauri 2 + React 前端
 scripts/           构建/运行/测试工具 + 模型下载器
 docs/              设计与运维文档
-models/            运行期模型（gitignore，约 340MB）
+models/            运行期模型（gitignore，约 1.2GB，多引擎可选）
 ```
 
 ## 许可证
