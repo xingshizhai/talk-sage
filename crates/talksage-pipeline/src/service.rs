@@ -13,7 +13,7 @@ use talksage_core::{DomainEvent, ResultStatus, TranscriptSegment};
 use talksage_llm::{LLMProvider, OpenAICompatProvider};
 use talksage_plugins::{
     brief_retriever::BriefRetrieverPlugin, term_explainer::TermExplainerPlugin, translator::TranslatorPlugin,
-    AnalyzerPlugin, PluginContext,
+    SegmentObserver, PluginContext,
 };
 use talksage_session::{SessionStore, StreamMeta};
 
@@ -324,7 +324,7 @@ impl TalkSageService {
             }
         });
 
-        let mut plugins: Vec<Arc<dyn AnalyzerPlugin>> = Vec::new();
+        let mut plugins: Vec<Arc<dyn SegmentObserver>> = Vec::new();
         if scene.term_enabled && snapshot.plugins.term_explainer.enabled {
             plugins.push(Arc::new(TermExplainerPlugin::new(
                 snapshot.plugins.term_explainer.cooldown_seconds as f64,

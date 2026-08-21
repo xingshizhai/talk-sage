@@ -91,7 +91,9 @@ pub trait SegmentObserver: Send + Sync {
     fn accepts_speculative(&self) -> bool {
         false
     }
-    fn skeleton(&self, seg: &TranscriptSegment) -> Option<DomainEvent>;
+    /// 本地即时骨架（同步、无 HTTP）。返回多个事件：一段上可能同时产出
+    /// 指标与提示。空向量 = 不发。
+    fn skeleton(&self, seg: &TranscriptSegment) -> Vec<DomainEvent>;
     fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> Option<DomainEvent>;
 }
 

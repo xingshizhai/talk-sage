@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+use crate::conversation_metrics::ConversationMetricsPlugin;
 use crate::cross_stream_dedup::CrossStreamDedupPlugin;
 use crate::registry::{HookRegistry, Plugin};
 use crate::short_segment::ShortSegmentPlugin;
@@ -17,6 +18,8 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
         // filter：便宜的先跑；dedup 需要看两条流的历史，必须在 short_segment 之后
         Box::new(ShortSegmentPlugin),
         Box::new(CrossStreamDedupPlugin),
+        // observer：彼此无顺序依赖，排在 filter 之后仅为便于阅读
+        Box::new(ConversationMetricsPlugin),
     ]
 }
 

@@ -339,7 +339,7 @@ struct CountingObserver {
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-impl talksage_plugins::AnalyzerPlugin for CountingObserver {
+impl talksage_plugins::SegmentObserver for CountingObserver {
     fn name(&self) -> &'static str {
         "counting_observer"
     }
@@ -349,8 +349,8 @@ impl talksage_plugins::AnalyzerPlugin for CountingObserver {
         false
     }
 
-    fn skeleton(&self, _seg: &talksage_core::TranscriptSegment) -> Option<DomainEvent> {
-        None
+    fn skeleton(&self, _seg: &talksage_core::TranscriptSegment) -> Vec<DomainEvent> {
+        Vec::new()
     }
 
     fn run(
@@ -473,7 +473,7 @@ struct RecordingObserver {
     seen: Arc<Mutex<Vec<String>>>,
 }
 
-impl talksage_plugins::AnalyzerPlugin for RecordingObserver {
+impl talksage_plugins::SegmentObserver for RecordingObserver {
     fn name(&self) -> &'static str {
         "recording_observer"
     }
@@ -483,8 +483,8 @@ impl talksage_plugins::AnalyzerPlugin for RecordingObserver {
         false
     }
 
-    fn skeleton(&self, _seg: &talksage_core::TranscriptSegment) -> Option<DomainEvent> {
-        None
+    fn skeleton(&self, _seg: &talksage_core::TranscriptSegment) -> Vec<DomainEvent> {
+        Vec::new()
     }
 
     fn run(
@@ -576,7 +576,7 @@ fn plugins_emit_term_and_translation_events() {
         kb: None,
         llm: Some(Arc::new(mock)),
     };
-    let plugins: Vec<Arc<dyn talksage_plugins::AnalyzerPlugin>> = vec![
+    let plugins: Vec<Arc<dyn talksage_plugins::SegmentObserver>> = vec![
         Arc::new(talksage_plugins::term_explainer::TermExplainerPlugin::new(0.0)),
         Arc::new(talksage_plugins::translator::TranslatorPlugin::new()),
     ];

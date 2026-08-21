@@ -69,7 +69,9 @@ pub trait EventFilter: Send + Sync {
 pub trait SegmentObserver: Send + Sync {
     fn should_trigger(&self, seg: &TranscriptSegment) -> bool;
     fn accepts_speculative(&self) -> bool { false }
-    fn skeleton(&self, seg: &TranscriptSegment) -> Option<DomainEvent>;
+    /// 阶段 3 起返回 Vec：一段上可能同时产出多个事件（指标 + 提示），
+    /// Option 表达不了。空向量 = 不发。
+    fn skeleton(&self, seg: &TranscriptSegment) -> Vec<DomainEvent>;
     fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> Option<DomainEvent>;
 }
 
@@ -162,8 +164,7 @@ StreamWorker 产生 final 段
 | `term_explainer` | Observer | 现有，仅改名 |
 | `translator` | Observer | 现有，仅改名 |
 | `brief_retriever` | Observer | 现有，仅改名 |
-| `conversation_metrics` | Observer | `pipeline/src/lib.rs` 调度 |
-| `coaching_nudge` | Observer | 同上 |
+| `conversation_metrics` | Observer | `pipeline/src/lib.rs` 调度。**含教练提示** —— 原设计列为独立的 `coaching_nudge`，实施时合并：两者共享 `seg_log`，拆开会让本已是 O(n²) 的指标计算翻倍 |
 | `session_quality` | Observer + Finalizer | `session/src/lib.rs:428` + `service.rs` |
 | `webhook` | Finalizer | `service.rs` |
 | `markdown_export` | Finalizer | `server/src/lib.rs` + `web/src-tauri/src/lib.rs` 合一 |
@@ -220,7 +221,7 @@ finalizer 全部在 `stop → flush → 写入 barrier` 之后执行。这是 ar
 |---|---|---|---|
 | 1 | 特征化测试 + `registry.rs` 骨架 + `AnalyzerPlugin` → `SegmentObserver` 接入 | 低，纯搭台 | ✅ 完成 |
 | 2 | filter 链：`short_segment` / `cross_stream_dedup` 搬出 `StreamWorker` | 中，动热路径 | ✅ 完成 |
-| 3 | observer：`conversation_metrics` / `coaching_nudge` 搬出 | 中，跨段状态 | 待办 |
+| 3 | observer：`conversation_metrics` 搬出（含 nudge） | 中，跨段状态 | ✅ 完成 |
 | 4 | finalizer：`session_quality` / `webhook` / `markdown_export` / `trio_notes`；server 与 tauri 导出合一 | 中，涉及两个适配器 | 待办 |
 | 5 | 配置换通用表 + `/plugins` 元数据端点 + 设置 UI 自动生成 | 低，但面广 | 待办 |
 
@@ -230,11 +231,21 @@ finalizer 全部在 `stop → flush → 写入 barrier` 之后执行。这是 ar
 
 | 指标 | 预期 | 实际 |
 |---|---|---|
-| `pipeline/src/lib.rs` 行数 | 阶段 1–2 后约 1070 | **1119**（1130 → 1119，仅减 11 行） |
+| `pipeline/src/lib.rs` 行数 | 阶段 1–2 后约 1070 | **1165**（1130 → 1165，净增 35 行） |
 | 加 filter 插件的成本 | 加 1 文件 + 表里 1 行 | ✅ 达成（pipeline 内无任何具体插件类型引用，仅一处解释性注释） |
 | 特征化 golden | 保持不变 | ✅ 字节一致，全程未重新生成 |
 
-**行数减得远少于预期。** filter 链的接线代码与「被吞掉」分支的清理逻辑把删掉的行加了回来（diff −55/+40）。真正的瘦身要等阶段 3 搬走 metrics/nudge 调度。**不要拿行数当阶段 3–5 的验收指标** —— 结构解耦（加插件不碰核心）已达成，那才是目标。
+> **勘误。** 本节初版记为「1130 → 1119，仅减 11 行」，那是在三个复查修复
+> （`c63f0a0` / `03bc360` / `5604e95`）落地**之前**量的，属于过期数据。
+> 计入修复后实际为 1165，阶段 1–2 净**增加** 35 行。
+
+**行数不降反增。** filter 链接线、「被吞掉」分支的清理逻辑，以及三个复查修复
+（说话人查询/注册拆分、`filtered_segment` 重建、文档补全）都在加行。**不要拿
+行数当阶段 3–5 的验收指标** —— 结构解耦（加插件不碰核心）已达成，那才是目标。
+
+对照阶段 3：删掉整块 metrics/nudge 调度、没有接线代码抵消，`lib.rs` 由 1165
+降至 1125（净减 40 行）。**搬走「调度逻辑」才会瘦身，搬走「判定逻辑」不会** ——
+后者只是把代码从核心挪到插件，接线成本还要倒贴。
 
 **过程中发现并修复的两个既存缺陷**（不在本设计范围内，但影响结论可信度）：
 

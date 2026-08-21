@@ -97,10 +97,10 @@ impl SegmentObserver for TermExplainerPlugin {
         seg.speaker_id != 0 && !self.unseen_acronyms(&seg.text).is_empty() && !self.cooldown_active()
     }
 
-    fn skeleton(&self, seg: &TranscriptSegment) -> Option<DomainEvent> {
+    fn skeleton(&self, seg: &TranscriptSegment) -> Vec<DomainEvent> {
         let acronyms = self.unseen_acronyms(&seg.text);
         if acronyms.is_empty() {
-            return None;
+            return Vec::new();
         }
         let result_id = format!("term-{}", now() as u64);
         *self.pending_result_id.lock().unwrap() = Some(result_id.clone());
@@ -109,11 +109,11 @@ impl SegmentObserver for TermExplainerPlugin {
         } else {
             format!("{} = …", acronyms.join("、"))
         };
-        Some(DomainEvent::Term {
+        vec![DomainEvent::Term {
             result_id,
             status: ResultStatus::Skeleton,
             content,
-        })
+        }]
     }
 
     fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> Option<DomainEvent> {
@@ -180,8 +180,9 @@ mod tests {
     fn triggers_and_emits_skeleton() {
         let p = TermExplainerPlugin::new(0.0);
         assert!(p.should_trigger(&seg(1, "We need NPI samples")));
-        let skel = p.skeleton(&seg(1, "We need NPI samples")).expect("应有骨架");
-        match skel {
+        let mut skels = p.skeleton(&seg(1, "We need NPI samples"));
+        assert!(!skels.is_empty(), "应有骨架");
+        match skels.remove(0) {
             DomainEvent::Term { status: ResultStatus::Skeleton, content, .. } => {
                 assert!(content.contains("NPI"));
             }

@@ -11,14 +11,12 @@ pub mod registry;
 pub mod short_segment;
 pub mod cross_stream_dedup;
 pub mod builtin;
+pub mod conversation_metrics;
 
 pub use builtin::{build_registry, builtin_plugins};
 
 pub use registry::{EventFilter, HookRegistry, Plugin, PluginConfig, SegmentObserver};
 
-/// 过渡别名：老代码仍可用 AnalyzerPlugin 这个名字。
-/// 阶段 3 迁移完 observer 后删除。
-pub use registry::SegmentObserver as AnalyzerPlugin;
 
 use std::sync::Arc;
 

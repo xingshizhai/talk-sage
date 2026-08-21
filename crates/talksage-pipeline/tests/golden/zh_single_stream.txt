@@ -3,18 +3,18 @@ status	AsrReady
 status	Recording
 partial
 partial
-metrics
 final	我	2000	天是 mon
-partial
-partial
-partial
 metrics
+partial
+partial
+partial
 final	我	2400	he is 礼八
-partial
-partial
-partial
-partial
 metrics
+partial
+partial
+partial
+partial
 final	我	3253	a after tomorrow 是星期
+metrics
 stats	我	3
 status	Idle
