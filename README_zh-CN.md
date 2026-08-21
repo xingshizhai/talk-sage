@@ -193,8 +193,12 @@ cd web && npx vitest run       # 前端 27 用例
 - [evaluation-user-guide.md](docs/evaluation-user-guide.md) — 语音自动化测试与模型评估使用手册
 - [evaluation-framework.md](docs/evaluation-framework.md) — 评估框架架构与指标设计
 - [terminology.md](docs/terminology.md) — 专业术语热词、纠错表与术语指标
-- [reference-whisperlivekit.md](docs/reference-whisperlivekit.md) — 参考项目：WhisperLiveKit 研究（引擎池/评测/双载体借鉴）
-- [reference-callmd.md](docs/reference-callmd.md) — 参考项目：Call.md 研究（会话指标/实时提示/三段式纪要/Webhook 借鉴）
+- [comparison/whisperlivekit.md](docs/comparison/whisperlivekit.md) — 对比分析：WhisperLiveKit（引擎池/评测/双载体）
+- [comparison/callmd.md](docs/comparison/callmd.md) — 对比分析：Call.md（会话指标/实时提示/三段式纪要/Webhook）
+- [comparison/whisper-flow.md](docs/comparison/whisper-flow.md) — 对比分析：Whisper Flow（流式协议/分段启发式/质量门禁）
+- [comparison/meetily.md](docs/comparison/meetily.md) — 对比分析：Meetily（VAD 调参/事件负载/崩溃恢复/设备阶梯）
+- [comparison/vibevoice.md](docs/comparison/vibevoice.md) — 对比分析：VibeVoice（上下文注入/JSON 容错/流式缓存）
+- [comparison/noscribe.md](docs/comparison/noscribe.md) — 对比分析：noScribe（增量持久化/说话人对齐/子进程协议/加权进度）
 
 ## 仓库结构
 
