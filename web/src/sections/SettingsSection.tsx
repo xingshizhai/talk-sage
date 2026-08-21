@@ -2,7 +2,9 @@
 // 保存写入 talksage.toml。
 
 import { useEffect, useState } from "react";
-import type { AppConfig, AsrModelInfo, SceneParams } from "../lib/api";
+import type { AppConfig, AsrModelInfo, PluginMeta, SceneParams } from "../lib/api";
+import type { PluginValues } from "../lib/plugins";
+import { analysisPluginIds, buildPluginUpdates, fieldLabel, initialPluginValues, pluginFields } from "../lib/plugins";
 import { getApi } from "../lib/transport";
 
 const api = getApi();
@@ -10,17 +12,6 @@ const PROVIDERS = ["deepseek", "kimi", "minimax", "groq", "ollama", "claude"];
 const VOICE_ENROLL_SECONDS = 16;
 const VOICE_ENROLL_TEXT =
   "你好，我正在为拓思者录制声音标识。今天阳光明亮，我会清楚、自然、连续地读完这段文字。会议结束后，请帮我整理重点、时间和下一步行动。";
-
-/**
- * 受场景 allowlist 约束的分析类插件（与 Rust 侧 `ANALYSIS_PLUGIN_IDS` 对应）。
- * 阶段 5 Task 5 会改成从 `/plugins` 元数据端点取，届时这份常量删除。
- */
-const ANALYSIS_PLUGIN_IDS = ["term_explainer", "translator", "brief_retriever"] as const;
-const ANALYSIS_PLUGIN_LABELS: Record<string, string> = {
-  term_explainer: "术语解释",
-  translator: "实时翻译",
-  brief_retriever: "简报检索",
-};
 
 type SettingsTab = "scene" | "asr" | "plugins" | "recording" | "quality" | "voice" | "llm" | "webhooks";
 
@@ -57,15 +48,17 @@ export default function SettingsSection({
     user_engine: config?.scene?.custom?.user_engine ?? "paraformer-zh",
     client_enabled: config?.scene?.custom?.client_enabled ?? true,
     client_engine: config?.scene?.custom?.client_engine ?? "zipformer-en",
-    plugin_allowlist: config?.scene?.custom?.plugin_allowlist ?? [...ANALYSIS_PLUGIN_IDS],
+    // 配置没给 allowlist 时，元数据到货后回填「全部分析类插件」（见下方 effect）——
+    // 这里不能写死 id 列表：哪些插件算分析类归 Rust 侧 ANALYSIS_PLUGIN_IDS。
+    plugin_allowlist: config?.scene?.custom?.plugin_allowlist ?? [],
     speaker_enabled: config?.scene?.custom?.speaker_enabled ?? false,
     noise_auto_detect: config?.scene?.custom?.noise_auto_detect ?? true,
   }));
   const [defaultProvider, setDefaultProvider] = useState(config?.llm?.default ?? "deepseek");
   const [apiKey, setApiKey] = useState<string>("");
-  const [termEnabled, setTermEnabled] = useState(config?.plugins?.term_explainer?.enabled ?? true);
-  const [transEnabled, setTransEnabled] = useState(config?.plugins?.translator?.enabled ?? true);
-  const [briefEnabled, setBriefEnabled] = useState(config?.plugins?.brief_retriever?.enabled ?? true);
+  // 插件表单由 /plugins 元数据生成：设置页不认识任何具体插件。
+  const [pluginMeta, setPluginMeta] = useState<PluginMeta[]>([]);
+  const [pluginValues, setPluginValues] = useState<PluginValues>({});
   const [kbFolder, setKbFolder] = useState<string>("");
   const [kbEnabled, setKbEnabled] = useState(false);
   const [clientEngine, setClientEngine] = useState(config?.asr?.client_engine ?? "zipformer-en");
@@ -104,18 +97,40 @@ export default function SettingsSection({
   const [enrollCount, setEnrollCount] = useState(0);
   const [enrollStage, setEnrollStage] = useState<"idle" | "countdown" | "recording" | "processing">("idle");
 
-  // 加载声纹状态
+  // 加载声纹状态 / ASR 模型 / 插件元数据。
+  //
+  // 三个请求各自兜底：一个挂了不该带走另外两个。插件元数据挂了整个插件页就是
+  // 空的（宁可空，也不要退回硬编码的三个开关 —— 那样用户会以为只有三个插件）。
   useEffect(() => {
+    const warn = (what: string) => (e: unknown) => {
+      console.error(`读取${what}失败:`, e);
+      return null;
+    };
     (async () => {
-      try {
-        const [voice, models] = await Promise.all([api.getVoiceprintStatus(), api.listAsrModels()]);
-        setVoiceStatus(voice);
-        setAsrModels(models);
-      } catch (e) {
-        console.error("读取本地能力状态失败:", e);
+      const [voice, models, metas] = await Promise.all([
+        api.getVoiceprintStatus().catch(warn("声纹状态")),
+        api.listAsrModels().catch(warn("ASR 模型列表")),
+        api.listPlugins().catch(warn("插件元数据")),
+      ]);
+      if (voice) setVoiceStatus(voice);
+      if (models) setAsrModels(models);
+      if (!metas) return;
+      setPluginMeta(metas);
+      setPluginValues(initialPluginValues(metas, config?.plugins));
+      // 配置里没有 allowlist（老配置 / headless 的 /config 不返回 scene）时，
+      // 按元数据回填成「分析类插件全开」—— 与阶段 5 之前的默认行为一致。
+      if (!config?.scene?.custom?.plugin_allowlist) {
+        setSceneCustom((s) => ({ ...s, plugin_allowlist: analysisPluginIds(metas) }));
       }
     })();
+    // 只在挂载时跑一次：config 也只在挂载时读（本组件其余 state 同一约定），
+    // 设置页是从 App 的 navPage 切进来的，切进来就是一次新的挂载。
   }, []);
+
+  /** 改某个插件的某个配置键。 */
+  function setPluginField(id: string, key: string, value: boolean | number | string) {
+    setPluginValues((prev) => ({ ...prev, [id]: { ...prev[id], [key]: value } }));
+  }
 
   const modelOptions = (selected: string) => asrModels.map((m) => {
     const speed = m.speed === "realtime" ? "实时" : m.speed === "balanced" ? "平衡" : "准确优先";
@@ -178,6 +193,87 @@ export default function SettingsSection({
   const hint: React.CSSProperties = { marginTop: 4, color: "var(--muted)", fontSize: 11, lineHeight: 1.6 };
   const groupTitle: React.CSSProperties = { margin: "0 0 6px", fontSize: 13 };
 
+  /**
+   * 按元数据渲染一组插件的控件。
+   *
+   * `enabled` 用插件显示名当勾选框文案（沿用阶段 5 之前的样子）；其余键按
+   * 默认值的类型渲染，缩进一级挂在开关下面，插件关掉时置灰但仍可编辑 ——
+   * 与本页 terminology / denoise 的处理一致。
+   *
+   * `hostManaged` 的键渲染成 disabled 并注明原因：它们在装配时被场景参数
+   * 覆盖，留着可编辑就是骗用户。
+   */
+  function renderPluginGroup(metas: PluginMeta[]) {
+    return metas.map((meta) => {
+      const values = pluginValues[meta.id] ?? {};
+      const on = values.enabled !== false;
+      return (
+        <div key={meta.id} style={{ marginBottom: 4 }}>
+          {pluginFields(meta).map((f) => {
+            const locked = f.hostManaged;
+            const note = locked ? <span style={{ ...hint, marginLeft: 8, display: "inline" }}>由场景参数决定</span> : null;
+            if (f.key === "enabled") {
+              return (
+                <label key={f.key} style={{ ...labelBlock, opacity: locked ? 0.5 : 1 }}>
+                  <input
+                    type="checkbox"
+                    checked={values.enabled === true}
+                    disabled={locked}
+                    onChange={(e) => setPluginField(meta.id, f.key, e.target.checked)}
+                  />{" "}
+                  {meta.label}
+                  {note}
+                </label>
+              );
+            }
+            const dim = locked || !on;
+            return (
+              <label key={f.key} style={{ ...labelBlock, marginLeft: 20, opacity: dim ? 0.5 : 1 }}>
+                {f.kind === "bool" ? (
+                  <>
+                    <input
+                      type="checkbox"
+                      checked={values[f.key] === true}
+                      disabled={locked}
+                      onChange={(e) => setPluginField(meta.id, f.key, e.target.checked)}
+                    />{" "}
+                    {fieldLabel(f.key)}
+                  </>
+                ) : f.kind === "number" ? (
+                  <>
+                    {fieldLabel(f.key)}：
+                    <input
+                      type="number"
+                      step={Number.isInteger(f.default as number) ? 1 : 0.05}
+                      disabled={locked}
+                      value={typeof values[f.key] === "number" ? (values[f.key] as number) : (f.default as number)}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        setPluginField(meta.id, f.key, Number.isFinite(n) ? n : (f.default as number));
+                      }}
+                      style={numStyle}
+                    />
+                  </>
+                ) : (
+                  <>
+                    {fieldLabel(f.key)}：
+                    <input
+                      disabled={locked}
+                      value={typeof values[f.key] === "string" ? (values[f.key] as string) : (f.default as string)}
+                      onChange={(e) => setPluginField(meta.id, f.key, e.target.value)}
+                      style={{ ...inputStyle, marginLeft: 8 }}
+                    />
+                  </>
+                )}
+                {note}
+              </label>
+            );
+          })}
+        </div>
+      );
+    });
+  }
+
   async function handleSave() {
     setSaving(true);
     setMessage("");
@@ -195,11 +291,8 @@ export default function SettingsSection({
             },
           },
         },
-        plugins: {
-          term_explainer: { enabled: termEnabled },
-          translator: { enabled: transEnabled },
-          brief_retriever: { enabled: briefEnabled },
-        },
+        // 按元数据组装，键与值都来自 /plugins —— 组件里没有插件名
+        plugins: buildPluginUpdates(pluginMeta, pluginValues),
         knowledge_base: {
           enabled: kbEnabled,
           folder: kbFolder.trim(),
@@ -424,24 +517,26 @@ export default function SettingsSection({
               </label>
               <div style={hint}>「离线段级」模型在 VAD 段结束后对整段识别——准确率更高（尤其中英夹杂），但没有逐字增量（partial）；「流式」模型实时增量、延迟低。</div>
               <label style={labelBlock}>
-                {ANALYSIS_PLUGIN_IDS.map((id, i) => (
-                  <span key={id} style={i === 0 ? undefined : { marginLeft: 12 }}>
-                    <input
-                      type="checkbox"
-                      checked={sceneCustom.plugin_allowlist.includes(id)}
-                      onChange={(e) =>
-                        setSceneCustom({
-                          ...sceneCustom,
-                          // allowlist：勾上=加进列表，取消=从列表移除
-                          plugin_allowlist: e.target.checked
-                            ? [...sceneCustom.plugin_allowlist, id]
-                            : sceneCustom.plugin_allowlist.filter((x) => x !== id),
-                        })
-                      }
-                    />{" "}
-                    {ANALYSIS_PLUGIN_LABELS[id] ?? id}
-                  </span>
-                ))}
+                {pluginMeta
+                  .filter((m) => m.analysis)
+                  .map((m, i) => (
+                    <span key={m.id} style={i === 0 ? undefined : { marginLeft: 12 }}>
+                      <input
+                        type="checkbox"
+                        checked={sceneCustom.plugin_allowlist.includes(m.id)}
+                        onChange={(e) =>
+                          setSceneCustom({
+                            ...sceneCustom,
+                            // allowlist：勾上=加进列表，取消=从列表移除
+                            plugin_allowlist: e.target.checked
+                              ? [...sceneCustom.plugin_allowlist, m.id]
+                              : sceneCustom.plugin_allowlist.filter((x) => x !== m.id),
+                          })
+                        }
+                      />{" "}
+                      {m.label}
+                    </span>
+                  ))}
               </label>
               <label style={labelBlock}>
                 <input type="checkbox" checked={sceneCustom.speaker_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, speaker_enabled: e.target.checked })} /> 说话人识别
@@ -553,15 +648,16 @@ export default function SettingsSection({
       {tab === "plugins" && (
         <div>
           <h3 style={groupTitle}>会议分析插件</h3>
-          <label style={labelBlock}>
-            <input type="checkbox" checked={termEnabled} onChange={(e) => setTermEnabled(e.target.checked)} /> 术语解释
-          </label>
-          <label style={labelBlock}>
-            <input type="checkbox" checked={transEnabled} onChange={(e) => setTransEnabled(e.target.checked)} /> 实时翻译
-          </label>
-          <label style={labelBlock}>
-            <input type="checkbox" checked={briefEnabled} onChange={(e) => setBriefEnabled(e.target.checked)} /> 简报检索
-          </label>
+          {pluginMeta.length === 0 ? (
+            <div style={hint}>正在读取插件列表…</div>
+          ) : (
+            <>
+              {renderPluginGroup(pluginMeta.filter((m) => m.analysis))}
+              <h3 style={{ ...groupTitle, marginTop: 10 }}>基础插件</h3>
+              <div style={hint}>不受场景模式约束；关掉会影响转写与会后处理，改动前请确认。</div>
+              {renderPluginGroup(pluginMeta.filter((m) => !m.analysis))}
+            </>
+          )}
 
           <h3 style={{ ...groupTitle, marginTop: 10 }}>知识库（客户简报）</h3>
           <label style={labelBlock}>

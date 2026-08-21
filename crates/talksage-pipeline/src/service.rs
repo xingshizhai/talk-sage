@@ -923,6 +923,24 @@ mod tests {
         assert_eq!(o["short_segment"]["min_ms"], serde_json::json!(300));
     }
 
+    /// `HOST_MANAGED_KEYS` 是设置页「这个控件置灰」的依据，必须与本文件
+    /// `plugin_overrides_for` 的实际行为一致：声明为宿主裁决的键，用户写什么
+    /// 都得被压掉。漂移的表现是设置页上出现一个能改却不生效的输入框。
+    #[test]
+    fn declared_host_managed_keys_really_override_user_config() {
+        for (id, key) in talksage_plugins::HOST_MANAGED_KEYS {
+            let mut plugins = talksage_config::PluginsConfig::default();
+            // 用一个不可能与宿主值相同的哨兵：压过了就看不到它
+            plugins.merge_entry(id, &serde_json::json!({ *key: "SENTINEL" }));
+            let o = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Meeting));
+            assert_ne!(
+                o[*id][*key],
+                serde_json::json!("SENTINEL"),
+                "{id}.{key} 声明为宿主裁决，却没被 plugin_overrides_for 覆盖"
+            );
+        }
+    }
+
     /// 配置层的 allowlist 与插件层的 ANALYSIS_PLUGIN_IDS 各存一份
     /// （talksage-config 刻意不依赖 talksage-plugins）。这里锁住两者不漂移。
     #[test]

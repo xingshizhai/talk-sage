@@ -92,6 +92,21 @@ pub fn effective_plugin_configs(
     out
 }
 
+/// 由宿主裁决、用户改不动的插件配置键 —— `(插件 id, 配置键)`。
+///
+/// 装配时 `plugin_overrides_for`（talksage-pipeline）无条件覆盖它们：
+/// `short_segment.min_ms` 取场景的 `min_segment_ms`；`cross_stream_dedup.enabled`
+/// 恒为真（双流去重是基础设施，关掉就会冒出重复段）。
+///
+/// 元数据带上它，设置页才能把这些控件置灰并说明原因。否则页面上会出现一个
+/// 能改、保存也成功、运行时却永远不生效的输入框 —— 那比没有这个输入框更糟。
+///
+/// talksage-pipeline 侧有测试锁住「这里声明的键确实被覆盖」，防止两处漂移。
+pub const HOST_MANAGED_KEYS: &[(&str, &str)] = &[
+    ("short_segment", "min_ms"),
+    ("cross_stream_dedup", "enabled"),
+];
+
 /// 插件元数据：设置 UI 用它**生成**表单，而不是硬编码控件。
 ///
 /// 每项：
@@ -101,17 +116,25 @@ pub fn effective_plugin_configs(
 /// - `schema`   —— 默认配置整体。**刻意没有独立的 schema 语言**：默认值的
 ///                 JSON 类型就是控件类型（bool → 开关，number → 数字框，
 ///                 string → 文本框）。多一套 DSL 就多一处会与插件实现漂移的真相。
+/// - `host_managed` —— 该插件里由宿主裁决的键（见 `HOST_MANAGED_KEYS`），
+///                 设置页据此置灰。
 ///
 /// 顺序与 `builtin_plugins()` 一致 —— 设置页按这个顺序排。
 pub fn plugin_metadata() -> Vec<Value> {
     builtin_plugins()
         .iter()
         .map(|p| {
+            let managed: Vec<&str> = HOST_MANAGED_KEYS
+                .iter()
+                .filter(|(id, _)| *id == p.id())
+                .map(|(_, key)| *key)
+                .collect();
             serde_json::json!({
                 "id": p.id(),
                 "label": p.label(),
                 "analysis": ANALYSIS_PLUGIN_IDS.contains(&p.id()),
                 "schema": p.default_config().as_value(),
+                "host_managed": managed,
             })
         })
         .collect()
@@ -286,6 +309,36 @@ mod tests {
         let meta = plugin_metadata();
         let got: Vec<&str> = meta.iter().map(|m| m["id"].as_str().unwrap()).collect();
         assert_eq!(got, want);
+    }
+
+    /// 宿主裁决的键必须真的在对应插件的 schema 里 —— 键名写错的话，
+    /// 设置页会照常渲染出一个能改但不生效的输入框，而这正是它要防的事。
+    #[test]
+    fn host_managed_keys_exist_in_their_plugins_schema() {
+        let meta = plugin_metadata();
+        for (id, key) in HOST_MANAGED_KEYS {
+            let m = meta
+                .iter()
+                .find(|m| m["id"] == serde_json::json!(id))
+                .unwrap_or_else(|| panic!("HOST_MANAGED_KEYS 里的插件 {id} 不存在"));
+            assert!(!m["schema"][key].is_null(), "插件 {id} 的 schema 里没有 {key}");
+            assert!(
+                m["host_managed"].as_array().unwrap().contains(&serde_json::json!(key)),
+                "元数据没把 {id}.{key} 标成宿主裁决"
+            );
+        }
+    }
+
+    /// 没被声明的插件，`host_managed` 是空数组而不是缺键 ——
+    /// 前端可以无条件 `.includes()`，不必先判空。
+    #[test]
+    fn metadata_always_carries_a_host_managed_array() {
+        for m in plugin_metadata() {
+            assert!(m["host_managed"].is_array(), "{} 的 host_managed 不是数组", m["id"]);
+        }
+        let meta = plugin_metadata();
+        let webhook = meta.iter().find(|m| m["id"] == serde_json::json!("webhook")).unwrap();
+        assert_eq!(webhook["host_managed"], serde_json::json!([]));
     }
 
     /// 显示名必须唯一：两个插件同名，设置页上用户分不清在关哪个。
