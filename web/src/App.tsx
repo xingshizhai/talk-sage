@@ -221,8 +221,11 @@ export default function App() {
     };
   }, []);
 
-  // 运行状态行
+  const currentSceneLabel = config ? SCENE_LABELS[config.scene.mode] : "加载中…";
+
+  // 运行状态行：场景置顶，监听过程中始终可见。
   const healthRows: HealthRow[] = [
+    { dot: "var(--term)", label: "场景", value: currentSceneLabel },
     { dot: paused ? "var(--brief)" : listening ? "var(--live)" : "var(--muted)", label: "监听", value: paused ? "暂停" : listening ? "活跃" : "待机" },
     { dot: "var(--client)", label: "客户流(VAD)", value: "双流" },
     { dot: "var(--me)", label: "用户流", value: "paraformer" },
@@ -513,14 +516,15 @@ export default function App() {
             style={{
               border: "1px solid var(--border)",
               borderRadius: 10,
-              background: "var(--surface-2)",
-              color: "var(--text-2)",
-              padding: "3px 9px",
-              fontSize: 11,
+              background: "var(--term-soft)",
+              color: "var(--term)",
+              padding: "4px 10px",
+              fontSize: 12,
+              fontWeight: 700,
               cursor: "pointer",
             }}
           >
-            场景 · {config ? SCENE_LABELS[config.scene.mode] : "加载中…"}
+            场景 · {currentSceneLabel}
           </button>
           <span
             style={{
@@ -532,7 +536,7 @@ export default function App() {
               color: listening ? "var(--live)" : "var(--muted)",
             }}
           >
-            {listening ? "● VAD 双流活跃" : status}
+            {listening ? `● ${currentSceneLabel} · 监听中` : status}
           </span>
         </div>
 

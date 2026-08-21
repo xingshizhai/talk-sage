@@ -351,6 +351,9 @@ pub struct SessionMeta {
     pub max_rms: f32,
     /// 文本噪音评分（各段平均，0..1）。
     pub text_noise: f32,
+    /// 面向普通回放的完整会话录音。单流复用原分轨，双流为左右声道主录音。
+    #[serde(default)]
+    pub master_recording: Option<String>,
     /// 各流明细。
     pub streams: Vec<StreamMeta>,
     /// 采样时刻（Unix 秒）。
@@ -460,6 +463,7 @@ impl SessionMeta {
             avg_rms: main.avg_rms,
             max_rms: main.max_rms,
             text_noise,
+            master_recording: None,
             streams: stats,
             evaluated_at: now,
         }

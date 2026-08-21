@@ -215,7 +215,7 @@ flowchart LR
 - **有界队列**：`CaptureTx` = `sync_channel(32)`，回调只 `try_send`；满载记 overrun、丢帧，**不阻塞**系统音频回调。收尾时 overrun>0 打 warn
 - **预处理**：高通 + 块级噪声门（`Preprocessor`）；双流**不混音**，各自进 VAD
 - **流式 VAD**：silero-vad（sherpa-onnx），替代旧版固定 3 秒块
-- **录音器**：每流一份 WAV（原始 PCM）；停止路径等待文件头回填（见 §19.6 超时）
+- **录音器**：每流保留一份 mono WAV（原始 PCM）；停止路径等待文件头回填。会话收尾在质量评估前生成主录音：单流直接复用，双流按采样位置补齐后输出 stereo WAV（左=麦克风，右=系统音频）。历史页默认播放主录音，原始分轨折叠保留用于诊断与模型评估
 - **设备/权限**：设备枚举；Windows 回环走 WASAPI；macOS 系统音频仍为产品项（ScreenCaptureKit / 虚拟声卡）
 
 ### 8.2 ASR 域（talksage-asr）

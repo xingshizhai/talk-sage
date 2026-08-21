@@ -42,6 +42,12 @@ pub struct WavRecorder {
 impl WavRecorder {
     /// 创建录音文件（PCM16 mono，任意采样率）。已存在的同名 `.part` 会被覆盖。
     pub fn create(path: &Path, sample_rate: u32) -> Result<Self> {
+        Self::create_with_channels(path, sample_rate, 1)
+    }
+
+    /// 创建指定声道数的 PCM16 录音器。`write` 接收交错采样。
+    pub fn create_with_channels(path: &Path, sample_rate: u32, channels: u16) -> Result<Self> {
+        anyhow::ensure!(channels > 0, "WAV 声道数必须大于 0");
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("创建录音目录失败: {}", parent.display()))?;
@@ -57,7 +63,7 @@ impl WavRecorder {
             final_path: path.to_path_buf(),
             part_path,
             sample_rate,
-            channels: 1,
+            channels,
             data_bytes: 0,
             samples_written: 0,
         })
@@ -101,6 +107,65 @@ impl WavRecorder {
     }
 }
 
+/// 把两条 16k mono 分轨生成双声道主录音：左声道为第一条流，右声道为第二条流。
+/// 较短分轨用静音补齐。保留分轨而不做破坏性的单声道叠加，也避免同时讲话削波。
+pub fn create_stereo_master(left: &Path, right: &Path, output: &Path) -> Result<()> {
+    let (mut left_file, left_sr, left_samples) = open_mono_pcm16_data(left)?;
+    let (mut right_file, right_sr, right_samples) = open_mono_pcm16_data(right)?;
+    anyhow::ensure!(left_sr == right_sr, "分轨采样率不一致: {left_sr} != {right_sr}");
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let part = part_path_of(output);
+    let result = (|| -> Result<()> {
+        let mut out = File::create(&part)?;
+        // 先写可识别的 stereo 占位头；若进程崩溃，启动恢复能保留正确声道数。
+        write_pcm16_header(&mut out, left_sr, 2, 0)?;
+        let total_frames = left_samples.max(right_samples);
+        const FRAMES_PER_CHUNK: u64 = 4096;
+        let mut frame = 0u64;
+        while frame < total_frames {
+            let frames = (total_frames - frame).min(FRAMES_PER_CHUNK) as usize;
+            let mut left_buf = vec![0u8; frames * 2];
+            let mut right_buf = vec![0u8; frames * 2];
+            let left_frames = (left_samples.saturating_sub(frame)).min(frames as u64) as usize;
+            let right_frames = (right_samples.saturating_sub(frame)).min(frames as u64) as usize;
+            left_file.read_exact(&mut left_buf[..left_frames * 2])?;
+            right_file.read_exact(&mut right_buf[..right_frames * 2])?;
+            let mut stereo = Vec::with_capacity(frames * 4);
+            for i in 0..frames {
+                stereo.extend_from_slice(&left_buf[i * 2..i * 2 + 2]);
+                stereo.extend_from_slice(&right_buf[i * 2..i * 2 + 2]);
+            }
+            out.write_all(&stereo)?;
+            frame += frames as u64;
+        }
+        write_pcm16_header(&mut out, left_sr, 2, total_frames * 4)?;
+        out.sync_all().ok();
+        drop(out);
+        std::fs::rename(&part, output)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        std::fs::remove_file(&part).ok();
+    }
+    result
+}
+
+/// 打开本项目录制的固定头 mono PCM16 WAV，并定位到 data 起点。
+fn open_mono_pcm16_data(path: &Path) -> Result<(File, u32, u64)> {
+    let mut file = File::open(path).with_context(|| format!("打开录音分轨失败: {}", path.display()))?;
+    let mut header = [0u8; HEADER_LEN as usize];
+    file.read_exact(&mut header)?;
+    anyhow::ensure!(&header[0..4] == b"RIFF" && &header[8..12] == b"WAVE", "无效 WAV: {}", path.display());
+    let channels = u16::from_le_bytes(header[22..24].try_into().unwrap());
+    let sample_rate = u32::from_le_bytes(header[24..28].try_into().unwrap());
+    let bits = u16::from_le_bytes(header[34..36].try_into().unwrap());
+    anyhow::ensure!(channels == 1 && bits == 16 && &header[36..40] == b"data", "主录音仅支持本项目生成的 mono PCM16 分轨: {}", path.display());
+    let samples = u32::from_le_bytes(header[40..44].try_into().unwrap()) as u64 / 2;
+    Ok((file, sample_rate, samples))
+}
+
 /// 扫描录音目录，把崩溃残留的 `.part` 补头转正。返回恢复出的最终路径。
 ///
 /// 进程异常退出时 [`WavRecorder::finish`] 没跑完，`.part` 的 RIFF 头还是占位零。
@@ -137,13 +202,25 @@ fn recover_part_file(part: &Path) -> Result<Option<std::path::PathBuf>> {
         return Ok(None);
     }
     let data_bytes = len - HEADER_LEN;
-    // 采样率无法从坏头恢复，用录音固定的目标采样率。
-    let sample_rate = crate::TARGET_SAMPLE_RATE;
+    // 普通实时录音头是全零占位；会后 stereo 主录音会预写可识别的双声道头。
+    let mut existing = [0u8; HEADER_LEN as usize];
+    File::open(part)?.read_exact(&mut existing)?;
+    let valid_header = &existing[0..4] == b"RIFF" && &existing[8..12] == b"WAVE";
+    let sample_rate = if valid_header {
+        u32::from_le_bytes(existing[24..28].try_into().unwrap()).max(1)
+    } else {
+        crate::TARGET_SAMPLE_RATE
+    };
+    let channels = if valid_header {
+        u16::from_le_bytes(existing[22..24].try_into().unwrap()).max(1)
+    } else {
+        1
+    };
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .open(part)
         .with_context(|| format!("打开残留录音失败: {}", part.display()))?;
-    write_pcm16_header(&mut file, sample_rate, 1, data_bytes)?;
+    write_pcm16_header(&mut file, sample_rate, channels, data_bytes)?;
     file.sync_all().ok();
     drop(file);
     std::fs::rename(part, &final_path)
@@ -151,8 +228,8 @@ fn recover_part_file(part: &Path) -> Result<Option<std::path::PathBuf>> {
     log::info!(
         "已恢复残留录音: {}（{} 采样 ≈ {:.1}s）",
         final_path.display(),
-        data_bytes / 2,
-        data_bytes as f64 / 2.0 / sample_rate as f64
+        data_bytes / 2 / channels as u64,
+        data_bytes as f64 / 2.0 / channels as f64 / sample_rate as f64
     );
     Ok(Some(final_path))
 }
@@ -288,6 +365,49 @@ mod tests {
         assert_eq!(data_size, 200);
         // 文件总长 = 44 + 200
         assert_eq!(raw.len(), 244);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stereo_master_keeps_tracks_and_pads_the_shorter_side() {
+        let dir = std::env::temp_dir().join(format!("talksage-wav-master-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let left = dir.join("left.wav");
+        let right = dir.join("right.wav");
+        let master = dir.join("master.wav");
+        let mut l = WavRecorder::create(&left, 16000).unwrap();
+        l.write(&[0.2; 4]).unwrap();
+        l.finish().unwrap();
+        let mut r = WavRecorder::create(&right, 16000).unwrap();
+        r.write(&[-0.2; 2]).unwrap();
+        r.finish().unwrap();
+
+        create_stereo_master(&left, &right, &master).unwrap();
+        let raw = std::fs::read(&master).unwrap();
+        assert_eq!(u16::from_le_bytes(raw[22..24].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(raw[40..44].try_into().unwrap()), 16); // 4 帧 * 2 声道 * 2 bytes
+        let (_, downmixed) = read_wav(&master).unwrap();
+        assert_eq!(downmixed.len(), 4);
+        assert!(downmixed[0].abs() < 2.0 / 32768.0);
+        assert!((downmixed[3] - 0.1).abs() < 2.0 / 32768.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_preserves_a_stereo_part_header() {
+        let dir = std::env::temp_dir().join(format!("talksage-wav-stereo-recover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let final_path = dir.join("master.wav");
+        let part = part_path_of(&final_path);
+        let mut file = File::create(&part).unwrap();
+        write_pcm16_header(&mut file, 16000, 2, 0).unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+        file.write_all(&[0u8; 16]).unwrap();
+        drop(file);
+        recover_orphan_recordings(&dir).unwrap();
+        let raw = std::fs::read(&final_path).unwrap();
+        assert_eq!(u16::from_le_bytes(raw[22..24].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(raw[40..44].try_into().unwrap()), 16);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

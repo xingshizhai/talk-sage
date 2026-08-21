@@ -25,6 +25,7 @@ pub(crate) struct QualityHost {
     pub store: Arc<SessionStore>,
     pub stats: Arc<Mutex<Vec<StreamMeta>>>,
     pub texts: Arc<Mutex<Vec<String>>>,
+    pub master_recording: Arc<Mutex<Option<String>>>,
 }
 
 impl QualityDeps for QualityHost {
@@ -37,7 +38,8 @@ impl QualityDeps for QualityHost {
         let snapshot = self.config.snapshot();
         let mut params = talksage_session::QualityParams::from_config(&snapshot.quality);
         params.auto_detect = snapshot.scene.effective().noise_auto_detect;
-        let meta = talksage_session::SessionMeta::evaluate(stats, &texts, unix_secs(), &params);
+        let mut meta = talksage_session::SessionMeta::evaluate(stats, &texts, unix_secs(), &params);
+        meta.master_recording = self.master_recording.lock().unwrap().clone();
         if let Err(e) = self.store.set_session_meta(session_id, &meta) {
             // 写不进 meta 不该拖垮整条链：会话本身已经落库，报个警继续。
             log::warn!("保存会话元数据失败: {e}");
@@ -143,6 +145,7 @@ mod tests {
             store: f.store.clone(),
             stats: Arc::new(Mutex::new(stats)),
             texts: Arc::new(Mutex::new(texts)),
+            master_recording: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -162,9 +165,11 @@ mod tests {
         let f = fixture(Config::default());
         let sid = f.store.start_session(1_000).unwrap();
         let host = quality_host(&f, vec![stream(60_000, 45_000)], vec!["今天我们聊一下方案".into()]);
+        *host.master_recording.lock().unwrap() = Some("session-1_master.wav".into());
         let label = host.evaluate_and_store(sid).unwrap().expect("有统计就该有结论");
         let meta = f.store.get_session(sid).unwrap().meta.expect("meta 应已落库");
         assert_eq!(meta.quality_label(), label, "返回的标签应与落库的一致");
+        assert_eq!(meta.master_recording.as_deref(), Some("session-1_master.wav"));
     }
 
     /// 第二道闸：`[webhooks]` 关闭时不推送。插件自身的 enabled 管不到这里 ——

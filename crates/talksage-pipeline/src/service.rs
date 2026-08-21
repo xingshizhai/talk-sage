@@ -90,6 +90,8 @@ pub struct RunningListen {
     hooks: HookRegistry,
     /// 独立 SQLite writer；必须在 finalizer 之前 drain。
     session_writer: Option<SessionWriter>,
+    stats: Arc<Mutex<Vec<talksage_session::StreamMeta>>>,
+    master_recording: Arc<Mutex<Option<String>>>,
 }
 
 impl RunningListen {
@@ -441,6 +443,7 @@ impl TalkSageService {
     pub fn start(&self, req: StartListen, on_event: EventSink) -> Result<RunningListen> {
         let stats = Arc::new(Mutex::new(Vec::new()));
         let texts = Arc::new(Mutex::new(Vec::new()));
+        let master_recording = Arc::new(Mutex::new(None));
         let persist = req.persist;
         let sessions = if persist { self.sessions.clone() } else { None };
 
@@ -454,6 +457,7 @@ impl TalkSageService {
                     store: store.clone(),
                     stats: stats.clone(),
                     texts: texts.clone(),
+                    master_recording: master_recording.clone(),
                 }) as Arc<dyn QualityDeps>),
                 Some(Arc::new(WebhookHost {
                     config: self.config.clone(),
@@ -511,6 +515,8 @@ impl TalkSageService {
             session_id,
             hooks,
             session_writer,
+            stats,
+            master_recording,
         })
     }
 
@@ -529,6 +535,8 @@ impl TalkSageService {
             return Ok(Some(sid));
         };
         let _ = store.end_session(sid, unix_secs());
+        let master = build_master_recording(sid, &running.stats.lock().unwrap());
+        *running.master_recording.lock().unwrap() = master;
         // finalizer 之间不经由 context 传值：webhook 的载荷是从库里现取的会话
         // 详情，meta 已由链上游的 session_quality 落库（顺序不变量见 builtin_plugins）。
         let report = running
@@ -538,6 +546,33 @@ impl TalkSageService {
             log::warn!("会话 #{sid} 收尾有 {} 项失败: {:?}", report.failed.len(), report.failed);
         }
         Ok(Some(sid))
+    }
+}
+
+/// 生成面向历史回放的主录音。单流直接复用原始录音；双流生成左右声道 WAV。
+fn build_master_recording(sid: i64, stats: &[talksage_session::StreamMeta]) -> Option<String> {
+    let recordings = stats
+        .iter()
+        .filter_map(|s| s.recording.as_deref())
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .collect::<Vec<_>>();
+    match recordings.as_slice() {
+        [] => None,
+        [single] => Some(single.display().to_string()),
+        [left, right, ..] => {
+            let output = left.parent()?.join(format!("session-{sid}_master.wav"));
+            match talksage_audio::wav::create_stereo_master(left, right, &output) {
+                Ok(()) => {
+                    log::info!("会话 #{sid} 完整双声道录音已生成: {}", output.display());
+                    Some(output.display().to_string())
+                }
+                Err(e) => {
+                    log::warn!("会话 #{sid} 完整录音生成失败，保留原始分轨: {e}");
+                    None
+                }
+            }
+        }
     }
 }
 
@@ -645,6 +680,29 @@ mod tests {
             TalkSageService::new(Arc::new(cfg), sessions, EnginePool::new()),
             dir,
         )
+    }
+
+    #[test]
+    fn master_recording_reuses_one_track_and_combines_two_tracks() {
+        let dir = tempfile_dir::TempDir::new();
+        let left = dir.path().join("mic.wav");
+        let right = dir.path().join("system.wav");
+        for (path, value) in [(&left, 0.1), (&right, -0.1)] {
+            let mut recorder = talksage_audio::wav::WavRecorder::create(path, 16000).unwrap();
+            recorder.write(&vec![value; 160]).unwrap();
+            recorder.finish().unwrap();
+        }
+        let stream = |label: &str, path: &std::path::Path| talksage_session::StreamMeta {
+            speaker_label: label.into(),
+            recording: Some(path.display().to_string()),
+            ..Default::default()
+        };
+        assert_eq!(build_master_recording(7, &[stream("我", &left)]), Some(left.display().to_string()));
+        let master = build_master_recording(7, &[stream("我", &left), stream("对方", &right)]).unwrap();
+        let master = PathBuf::from(master);
+        assert!(master.is_file());
+        let raw = std::fs::read(master).unwrap();
+        assert_eq!(u16::from_le_bytes(raw[22..24].try_into().unwrap()), 2);
     }
 
     /// 避免给测试加 tempfile 依赖：手写临时目录。

@@ -243,6 +243,8 @@ export interface SessionMeta {
   avg_rms: number;
   max_rms: number;
   text_noise: number;
+  /** 默认回放文件：单流复用分轨，双流为左右声道完整录音。 */
+  master_recording?: string | null;
   streams: StreamMeta[];
   evaluated_at: number;
 }

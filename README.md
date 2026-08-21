@@ -30,7 +30,7 @@
 - **Speaker attribution** — explicit `off / channel / voiceprint` policy instead of a boolean. Channel attribution labels microphone/system-audio roles without loading a model; voiceprint mode identifies the enrolled owner and clusters other speakers as 「客户1」「客户2」…
 - **Live meeting intelligence** — term/acronym explanations, real-time translation (en↔zh), rule-based key-point aggregation (questions / requirements / decisions / actions / technical, with numeric & time heuristics), knowledge-base brief retrieval; History offers **AI-extracted key points** (LLM, needs config)
 - **Meeting minutes** — template-based generation via any OpenAI-compatible LLM (DeepSeek, Kimi, Ollama, …)
-- **Recording & testing loop** — every listening session saves raw PCM wav per stream; `talksage trim` removes silence with the same VAD; `scripts/recording_loop.ps1` trims + replays for regression
+- **Recording & testing loop** — every session keeps raw mono PCM per input stream and exposes one main recording for playback (single-stream reuse; dual-stream stereo with microphone left/system audio right); `talksage trim` supports regression preparation
 - **Session quality assessment** — automatic noise/silence detection per session (configurable thresholds + auto background-noise calibration); noisy sessions skip downstream analysis
 - **Runtime noise control** — adjust the mic noise gate live from the left panel *while listening*, no restart
 - **History** — SQLite sessions with search, per-segment duration/RMS stats, quality badges

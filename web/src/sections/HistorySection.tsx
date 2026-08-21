@@ -125,10 +125,12 @@ export default function HistorySection({
 
   /** 判断段是否处于播放高亮：段在录音中的位置 ≈ (ts_ms - duration_ms - started_at*1000)/1000。 */
   function segActive(speaker: string, tsMs: number, idx: number, durationMs: number | undefined): boolean {
-    if (!playCursor || playCursor.speaker !== speaker || !detail) return false;
+    if (!playCursor || (playCursor.speaker !== "*" && playCursor.speaker !== speaker) || !detail) return false;
     const t = playCursor.time;
     const start = (tsMs - (durationMs ?? 0) - detail.started_at * 1000) / 1000;
-    const rest = detail.segments.slice(idx + 1).find((s) => s.speaker_label === speaker);
+    const rest = detail.segments
+      .slice(idx + 1)
+      .find((s) => playCursor.speaker === "*" || s.speaker_label === speaker);
     const nextStart = rest ? (rest.ts_ms - (rest.duration_ms ?? 0) - detail.started_at * 1000) / 1000 : Infinity;
     return t >= start && t < nextStart;
   }
@@ -235,33 +237,46 @@ export default function HistorySection({
             </div>
           )}
 
-          {/* 回放：历史录音（按流播放，转写同步高亮） */}
+          {/* 回放：完整会话为主，原始输入分轨保留用于诊断和模型评估。 */}
           {(() => {
             const recs = detail.meta?.streams.filter((s) => s.recording) ?? [];
-            if (recs.length === 0) return null;
+            const master = detail.meta?.master_recording ?? (recs.length === 1 ? recs[0].recording : null);
+            if (!master && recs.length === 0) return null;
+            const masterUrl = recordingUrl(master);
             return (
               <div style={{ marginTop: 8, padding: "7px 9px", borderRadius: 6, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 6, color: "var(--text-2)" }}>回放（录音）</div>
-                {recs.map((s) => {
-                  const url = recordingUrl(s.recording);
-                  if (!url) return null;
-                  return (
-                    <div key={s.speaker_label} style={{ marginBottom: 8 }}>
-                      <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2, fontFamily: "monospace" }}>
-                        [{s.speaker_label}] {Math.round(s.total_ms / 1000)}s · {s.recording!.split(/[\\/]/).pop()}
-                      </div>
-                      <audio
-                        controls
-                        preload="metadata"
-                        src={url}
-                        style={{ width: "100%", height: 30 }}
-                        onTimeUpdate={(e) => onPlay(s.speaker_label, (e.target as HTMLAudioElement).currentTime)}
-                        onEnded={() => setPlayCursor(null)}
-                      />
+                <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 6, color: "var(--text-2)" }}>回放（完整会话）</div>
+                {masterUrl && (
+                  <audio
+                    controls
+                    preload="metadata"
+                    src={masterUrl}
+                    style={{ width: "100%", height: 32 }}
+                    onTimeUpdate={(e) => onPlay("*", (e.target as HTMLAudioElement).currentTime)}
+                    onEnded={() => setPlayCursor(null)}
+                  />
+                )}
+                {!masterUrl && <div style={{ fontSize: 10, color: "var(--muted)" }}>该旧会话没有完整主录音，请展开下方原始分轨播放。</div>}
+                <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 3 }}>播放时下方对应时间的转写会同步高亮；双流录音左声道为麦克风，右声道为系统音频。</div>
+                {recs.length > 0 && (
+                  <details style={{ marginTop: 8 }}>
+                    <summary style={{ cursor: "pointer", fontSize: 10, color: "var(--text-2)", fontWeight: 700 }}>原始输入分轨（{recs.length}）</summary>
+                    <div style={{ marginTop: 6 }}>
+                      {recs.map((s, i) => {
+                        const url = recordingUrl(s.recording);
+                        if (!url) return null;
+                        return (
+                          <div key={`${s.recording}-${i}`} style={{ marginBottom: 8 }}>
+                            <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2, fontFamily: "monospace" }}>
+                              [{s.speaker_label}] {Math.round(s.total_ms / 1000)}s · {s.recording!.split(/[\\/]/).pop()}
+                            </div>
+                            <audio controls preload="metadata" src={url} style={{ width: "100%", height: 30 }} onTimeUpdate={(e) => onPlay(s.speaker_label, (e.target as HTMLAudioElement).currentTime)} onEnded={() => setPlayCursor(null)} />
+                          </div>
+                        );
+                      })}
                     </div>
-                  );
-                })}
-                <div style={{ fontSize: 10, color: "var(--muted)" }}>播放时下方对应说话人的转写会同步高亮。</div>
+                  </details>
+                )}
               </div>
             );
           })()}
