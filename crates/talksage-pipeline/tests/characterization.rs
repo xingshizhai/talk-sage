@@ -57,12 +57,24 @@ fn normalize(evs: &[DomainEvent]) -> String {
     let mut out = String::new();
     for ev in evs {
         match ev {
-            DomainEvent::Segment { speaker_label, text, is_partial: false, duration_ms, .. } => {
-                out.push_str(&format!("final\t{speaker_label}\t{duration_ms}\t{text}\n"));
+            // 只记「有一个 final 段、属于谁」，不记文本与时长。
+            //
+            // 转写文本与段时长取决于 models/ 里恰好存在哪些模型文件 —— 引擎在
+            // 目录含 fp32 时会自动优先用 fp32（见 talksage-asr 的 EngineKind），
+            // 而 models/ 是 gitignore 的。把它们写进 golden 会让基线随机器变化，
+            // 且失败信息会诱导人「重新生成 golden」，把机器差异洗成新基线。
+            //
+            // 本测试的职责是「重构前后行为一不一样」，不是「识别得准不准」——
+            // 后者归 evaluation/ 语料与 scripts/evaluate.py（CER/WER）。
+            DomainEvent::Segment { speaker_label, is_partial: false, .. } => {
+                out.push_str(&format!("final\t{speaker_label}\n"));
             }
+            // partial 条数随线程调度与模型浮动，连续多条折叠成一个标记：
+            // 只锁「这里有增量输出」，不锁具体条数。
             DomainEvent::Segment { is_partial: true, .. } => {
-                // partial 数量随线程调度浮动，只记类型不记内容
-                out.push_str("partial\n");
+                if !out.ends_with("partial…\n") {
+                    out.push_str("partial…\n");
+                }
             }
             DomainEvent::Status { stage, .. } => out.push_str(&format!("status\t{stage:?}\n")),
             DomainEvent::Term { status, .. } => out.push_str(&format!("term\t{status:?}\n")),

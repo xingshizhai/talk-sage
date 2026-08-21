@@ -1,23 +1,14 @@
 status	AsrLoading
 status	AsrReady
 status	Recording
-partial
-partial
-partial
-final	我	2400	昨天是 mon
+partial…
+final	我
 metrics
-partial
-partial
-partial
-partial
-final	我	3200	today denis li 班二
+partial…
+final	我
 metrics
-partial
-partial
-partial
-partial
-partial
-final	我	3153	the day after tomorrow 是星期
+partial…
+final	我
 metrics
 stats	我	3
 status	Idle
