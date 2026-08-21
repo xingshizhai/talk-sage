@@ -78,6 +78,7 @@ pub fn transcribe_file(
                 "short_segment".to_string(),
                 serde_json::json!({ "min_ms": 0 }),
             )]),
+            &talksage_plugins::PluginContext::new(),
         ),
     };
 

@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn en_to_zh_direction() {
         let mock = MockProvider { response: "我们需要 NPI 样品".into() };
-        let ctx = PluginContext { kb: None, llm: Some(std::sync::Arc::new(mock)) };
+        let ctx = PluginContext { kb: None, llm: Some(std::sync::Arc::new(mock)), ..PluginContext::new() };
         let p = TranslatorPlugin::new();
         assert!(p.should_trigger(&seg(1, "We need NPI samples")));
         match p.run(&seg(1, "We need NPI samples"), &ctx) {
@@ -103,7 +103,7 @@ mod tests {
     #[test]
     fn zh_to_en_direction() {
         let mock = MockProvider { response: "We need NPI samples".into() };
-        let ctx = PluginContext { kb: None, llm: Some(std::sync::Arc::new(mock)) };
+        let ctx = PluginContext { kb: None, llm: Some(std::sync::Arc::new(mock)), ..PluginContext::new() };
         let p = TranslatorPlugin::new();
         match p.run(&seg(0, "我们需要 NPI 样品"), &ctx) {
             Some(DomainEvent::Translation { direction: TranslationDirection::ZhEn, .. }) => {}
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn no_llm_means_no_translation() {
         let p = TranslatorPlugin::new();
-        let ctx = PluginContext { kb: None, llm: None };
+        let ctx = PluginContext { kb: None, llm: None, ..PluginContext::new() };
         assert!(p.run(&seg(1, "We need NPI"), &ctx).is_none());
     }
 }

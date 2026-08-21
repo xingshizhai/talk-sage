@@ -124,10 +124,14 @@ pub struct FinalizeReport {
 
 /// 插件：拥有身份与默认配置，在 register() 里把自己挂进钩子。
 /// 插件不拥有注册表，只能注册进去（对应 Cordis 的 seam 模型）。
+///
+/// `ctx` 是宿主能力的唯一入口。钩子一旦进了 `HookRegistry` 就是
+/// `Arc<dyn ...>` —— 既不可变也不能 downcast，事后无法再注入。所以需要
+/// 宿主依赖的插件（finalizer 尤其）必须在 register 时就把它装进自己。
 pub trait Plugin: Send + Sync {
     fn id(&self) -> &'static str;
     fn default_config(&self) -> PluginConfig;
-    fn register(&self, cfg: &PluginConfig, hooks: &mut HookRegistry);
+    fn register(&self, cfg: &PluginConfig, ctx: &PluginContext, hooks: &mut HookRegistry);
 }
 
 /// 钩子集合。顺序即执行顺序。

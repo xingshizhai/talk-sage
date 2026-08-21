@@ -196,6 +196,7 @@ mod tests {
         let ctx = PluginContext {
             kb: None,
             llm: Some(std::sync::Arc::new(mock)),
+            ..PluginContext::new()
         };
         let p = TermExplainerPlugin::new(0.0);
         let _ = p.run(&seg(1, "We need NPI samples"), &ctx);
@@ -209,6 +210,7 @@ mod tests {
         let ctx = PluginContext {
             kb: None,
             llm: Some(std::sync::Arc::new(mock)),
+            ..PluginContext::new()
         };
         let p = TermExplainerPlugin::new(0.0);
         match p.run(&seg(1, "NPI status?"), &ctx) {

@@ -369,7 +369,17 @@ impl TalkSageService {
             "cross_stream_dedup".into(),
             serde_json::json!({ "enabled": true }),
         );
-        let hooks = talksage_plugins::build_registry(&talksage_plugins::builtin_plugins(), &plugin_overrides);
+        let plugin_ctx = PluginContext {
+            kb,
+            llm: Self::build_llm(&self.config),
+            quality: None,
+            webhook: None,
+        };
+        let hooks = talksage_plugins::build_registry(
+            &talksage_plugins::builtin_plugins(),
+            &plugin_overrides,
+            &plugin_ctx,
+        );
 
         Ok(LivePipelineConfig {
             vad_model,
@@ -386,10 +396,7 @@ impl TalkSageService {
             },
             client,
             plugins,
-            plugin_ctx: PluginContext {
-                kb,
-                llm: Self::build_llm(&self.config),
-            },
+            plugin_ctx,
             recording_dir,
             runtime: Arc::new(RuntimeParams::with_noise_level(req.noise_level)),
             speaker,

@@ -9,6 +9,7 @@ use serde_json::json;
 use talksage_core::DomainEvent;
 
 use crate::registry::{EventFilter, HookRegistry, Plugin, PluginConfig};
+use crate::PluginContext;
 
 /// 默认最短提交时长（ms）。0 = 关闭。
 const DEFAULT_MIN_MS: u64 = 0;
@@ -48,7 +49,7 @@ impl Plugin for ShortSegmentPlugin {
         PluginConfig::from_value(json!({ "enabled": true, "min_ms": DEFAULT_MIN_MS }))
     }
 
-    fn register(&self, cfg: &PluginConfig, hooks: &mut HookRegistry) {
+    fn register(&self, cfg: &PluginConfig, _ctx: &PluginContext, hooks: &mut HookRegistry) {
         hooks.add_filter(Arc::new(ShortSegmentFilter {
             min_ms: cfg.get_u64("min_ms", DEFAULT_MIN_MS),
         }));
@@ -114,7 +115,7 @@ mod tests {
         let mut cfg = p.default_config();
         cfg.merge(&json!({"min_ms": 500}));
         let mut hooks = HookRegistry::default();
-        p.register(&cfg, &mut hooks);
+        p.register(&cfg, &PluginContext::new(), &mut hooks);
         assert_eq!(hooks.filter_count(), 1);
         assert!(hooks.apply_filters(seg(400, false)).is_none(), "400ms < 配置的 500ms 应被吞");
     }

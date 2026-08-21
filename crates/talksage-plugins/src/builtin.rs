@@ -8,6 +8,7 @@ use crate::conversation_metrics::ConversationMetricsPlugin;
 use crate::cross_stream_dedup::CrossStreamDedupPlugin;
 use crate::registry::{HookRegistry, Plugin};
 use crate::short_segment::ShortSegmentPlugin;
+use crate::PluginContext;
 
 /// 内置插件清单。
 ///
@@ -24,9 +25,13 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
 }
 
 /// 按配置装配钩子。overrides 的键是插件 id。
+///
+/// `ctx` 携带宿主能力（知识库 / LLM / 会后依赖），原样透给每个 `register`。
+/// 不需要宿主能力的插件忽略它即可。
 pub fn build_registry(
     plugins: &[Box<dyn Plugin>],
     overrides: &HashMap<String, Value>,
+    ctx: &PluginContext,
 ) -> HookRegistry {
     let mut hooks = HookRegistry::default();
     for p in plugins {
@@ -38,7 +43,7 @@ pub fn build_registry(
             log::debug!("插件[{}] 已禁用，跳过注册", p.id());
             continue;
         }
-        p.register(&cfg, &mut hooks);
+        p.register(&cfg, ctx, &mut hooks);
     }
     hooks
 }
@@ -84,8 +89,9 @@ mod tests {
     fn build_registry_skips_disabled_plugins() {
         let mut overrides = HashMap::new();
         overrides.insert("cross_stream_dedup".to_string(), serde_json::json!({"enabled": false}));
-        let hooks = build_registry(&builtin_plugins(), &overrides);
-        let all = build_registry(&builtin_plugins(), &HashMap::new());
+        let ctx = PluginContext::new();
+        let hooks = build_registry(&builtin_plugins(), &overrides, &ctx);
+        let all = build_registry(&builtin_plugins(), &HashMap::new(), &ctx);
         assert_eq!(hooks.filter_count() + 1, all.filter_count(), "关掉一个插件应少一个 filter");
     }
 
@@ -93,7 +99,7 @@ mod tests {
     fn build_registry_applies_user_overrides() {
         let mut overrides = HashMap::new();
         overrides.insert("short_segment".to_string(), serde_json::json!({"min_ms": 400}));
-        let hooks = build_registry(&builtin_plugins(), &overrides);
+        let hooks = build_registry(&builtin_plugins(), &overrides, &PluginContext::new());
         let short = DomainEvent::Segment {
             speaker_id: 0, speaker_label: "我".into(), text: "喂".into(),
             is_partial: false, ts_ms: 0, duration_ms: 200, rms: 0.1,
