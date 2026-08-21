@@ -17,7 +17,7 @@ use talksage_asr::{EngineKind, EnginePool, SherpaStreamingEngine};
 use talksage_audio::{AudioHub, Preprocessor};
 use talksage_config::{DenoiseConfig, VadConfig};
 use talksage_core::{AudioClock, DomainEvent, StatusStage, TranscriptSegment};
-use talksage_plugins::AnalyzerPlugin;
+use talksage_plugins::SegmentObserver;
 
 pub mod offline;
 pub mod runtime;
@@ -123,7 +123,7 @@ pub struct LivePipelineConfig {
     /// 客户流（英文，可选）。
     pub client: Option<StreamConfig>,
     /// 会议辅助插件（final 段后触发）。
-    pub plugins: Vec<Arc<dyn AnalyzerPlugin>>,
+    pub plugins: Vec<Arc<dyn SegmentObserver>>,
     /// 插件上下文（知识库/LLM 共享）。
     pub plugin_ctx: talksage_plugins::PluginContext,
     /// 录音目录（Some 时监听期间把每条流的原始音频保存为 `{ts}_{speaker_label}.wav`）。
