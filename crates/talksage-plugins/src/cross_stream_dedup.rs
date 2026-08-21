@@ -11,6 +11,7 @@ use serde_json::json;
 use talksage_core::DomainEvent;
 
 use crate::registry::{EventFilter, HookRegistry, Plugin, PluginConfig};
+use crate::PluginContext;
 
 /// 回声比对的历史窗口容量（条）。
 pub const HISTORY_CAP: usize = 32;
@@ -68,7 +69,7 @@ impl Plugin for CrossStreamDedupPlugin {
         PluginConfig::from_value(json!({ "enabled": true }))
     }
 
-    fn register(&self, _cfg: &PluginConfig, hooks: &mut HookRegistry) {
+    fn register(&self, _cfg: &PluginConfig, _ctx: &PluginContext, hooks: &mut HookRegistry) {
         hooks.add_filter(Arc::new(CrossStreamDedupFilter::default()));
     }
 }
@@ -146,7 +147,7 @@ mod tests {
         let p = CrossStreamDedupPlugin;
         assert_eq!(p.id(), "cross_stream_dedup");
         let mut hooks = HookRegistry::default();
-        p.register(&p.default_config(), &mut hooks);
+        p.register(&p.default_config(), &PluginContext::new(), &mut hooks);
         assert_eq!(hooks.filter_count(), 1);
     }
 }

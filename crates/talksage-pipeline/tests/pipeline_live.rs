@@ -20,6 +20,7 @@ fn hooks_with_min_commit_ms(min_ms: u64) -> talksage_plugins::HookRegistry {
             "short_segment".to_string(),
             serde_json::json!({ "min_ms": min_ms }),
         )]),
+        &talksage_plugins::PluginContext::new(),
     )
 }
 
@@ -585,6 +586,7 @@ fn plugins_emit_term_and_translation_events() {
     let ctx = talksage_plugins::PluginContext {
         kb: None,
         llm: Some(Arc::new(mock)),
+        ..talksage_plugins::PluginContext::new()
     };
     let plugins: Vec<Arc<dyn talksage_plugins::SegmentObserver>> = vec![
         Arc::new(talksage_plugins::term_explainer::TermExplainerPlugin::new(0.0)),

@@ -151,7 +151,7 @@ StreamWorker 产生 final 段
 **S2. 钩子顺序 = `builtin_plugins()` 的列表顺序。** 不引入优先级数字或声明式依赖。顺序敏感的有两处，均由列表位置保证：
 
 - filter 链：`short_segment` 必须在 `cross_stream_dedup` 之前（便宜的先跑，且 dedup 需要看两条流的历史）
-- finalizer 链：`session_quality` 必须在 `webhook` 之前（它写入 `FinalizeContext.quality`，webhook 载荷要带质量结论）
+- finalizer 链：`session_quality` 必须在 `webhook` 之前（前者把质量 meta 写进会话行，后者重新读这一行来拼载荷；耦合走数据库，不走 `FinalizeContext` —— 那是个只读引用，finalizer 之间不经由它传值）
 
 写在一个列表里比分散声明更容易审查；§6 的注册表不变量测试会锁住这两条相对顺序。
 

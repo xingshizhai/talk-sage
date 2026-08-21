@@ -10,6 +10,7 @@ use serde_json::json;
 use talksage_core::{DomainEvent, NudgeEngine, TranscriptSegment};
 
 use crate::registry::{HookRegistry, Plugin, PluginConfig, SegmentObserver};
+use crate::PluginContext;
 
 /// 跨段累计的会话指标 + 提示引擎。
 pub struct ConversationMetricsObserver {
@@ -76,7 +77,7 @@ impl Plugin for ConversationMetricsPlugin {
         PluginConfig::from_value(json!({ "enabled": true }))
     }
 
-    fn register(&self, _cfg: &PluginConfig, hooks: &mut HookRegistry) {
+    fn register(&self, _cfg: &PluginConfig, _ctx: &PluginContext, hooks: &mut HookRegistry) {
         hooks.add_observer(Arc::new(ConversationMetricsObserver::default()));
     }
 }
@@ -151,7 +152,7 @@ mod tests {
         let p = ConversationMetricsPlugin;
         assert_eq!(p.id(), "conversation_metrics");
         let mut hooks = HookRegistry::default();
-        p.register(&p.default_config(), &mut hooks);
+        p.register(&p.default_config(), &PluginContext::new(), &mut hooks);
         assert_eq!(hooks.observers().len(), 1);
     }
 }

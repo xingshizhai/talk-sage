@@ -20,6 +20,7 @@ use talksage_config::{DenoiseConfig, EndpointConfig, VadConfig};
 use talksage_core::{AudioClock, DomainEvent, StatusStage, TranscriptSegment};
 use talksage_plugins::SegmentObserver;
 
+pub mod finalize;
 pub mod offline;
 pub mod runtime;
 pub mod service;

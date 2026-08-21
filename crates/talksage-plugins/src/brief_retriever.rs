@@ -107,7 +107,7 @@ mod tests {
         std::fs::write(dir.join("client.md"), "# 客户\n\n客户关注 NPI 样品交期与 MOQ 价格。").unwrap();
         let mut kb = KnowledgeBase::new();
         kb.index_folder(Path::new(&dir.to_string_lossy().to_string()));
-        let ctx = PluginContext { kb: Some(Arc::new(kb)), llm: None };
+        let ctx = PluginContext { kb: Some(Arc::new(kb)), llm: None, ..PluginContext::new() };
         let p = BriefRetrieverPlugin::new(0.0, 0.05);
         assert!(p.should_trigger(&seg(1, "NPI samples MOQ")));
         let ev = p.run(&seg(1, "NPI samples MOQ"), &ctx).expect("应有简报");
@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn no_hit_returns_none() {
-        let ctx = PluginContext { kb: None, llm: None };
+        let ctx = PluginContext { kb: None, llm: None, ..PluginContext::new() };
         let p = BriefRetrieverPlugin::new(0.0, 0.05);
         assert!(p.run(&seg(1, "hello world"), &ctx).is_none());
     }

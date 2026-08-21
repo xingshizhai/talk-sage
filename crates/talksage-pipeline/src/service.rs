@@ -13,10 +13,11 @@ use talksage_core::{DomainEvent, ResultStatus, TranscriptSegment};
 use talksage_llm::{LLMProvider, OpenAICompatProvider};
 use talksage_plugins::{
     brief_retriever::BriefRetrieverPlugin, term_explainer::TermExplainerPlugin, translator::TranslatorPlugin,
-    SegmentObserver, PluginContext,
+    HookRegistry, QualityDeps, SegmentObserver, PluginContext, WebhookDeps,
 };
 use talksage_session::{SessionStore, StreamMeta};
 
+use crate::finalize::{QualityHost, WebhookHost};
 use crate::speaker::{self, DEFAULT_THRESHOLD};
 use crate::{AudioInput, EventSink, LivePipelineConfig, RuntimeParams, SessionRuntime, SpeakerConfig, StreamConfig};
 
@@ -84,8 +85,9 @@ impl StartListen {
 pub struct RunningListen {
     runtime: SessionRuntime,
     session_id: Option<i64>,
-    stats: Arc<Mutex<Vec<StreamMeta>>>,
-    texts: Arc<Mutex<Vec<String>>>,
+    /// 本次会话的钩子表（与管道内跑的是同一批实例）。`finish()` 用它跑
+    /// finalizer 链 —— 依赖已在 register 时注入，此处只能调用，不能再改。
+    hooks: HookRegistry,
 }
 
 impl RunningListen {
@@ -268,8 +270,19 @@ impl TalkSageService {
         }
     }
 
+    /// 不带会后依赖的装配（配置自检 / 不落库的场景）：finalizer 照常注册，
+    /// 但没有宿主可调用，等于空转。
     pub fn build_live_config(&self, req: &StartListen) -> Result<LivePipelineConfig> {
-        let model_dir = Self::resolve_models_dir().ok_or_else(|| anyhow!("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）"))?;
+        self.build_live_config_with(req, None, None)
+    }
+
+    fn build_live_config_with(
+        &self,
+        req: &StartListen,
+        quality: Option<Arc<dyn QualityDeps>>,
+        webhook: Option<Arc<dyn WebhookDeps>>,
+    ) -> Result<LivePipelineConfig> {
+        let model_dir =Self::resolve_models_dir().ok_or_else(|| anyhow!("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）"))?;
         let snapshot = self.config.snapshot();
         let terminology = snapshot.asr.terminology.clone();
         let engine_options = talksage_asr::EngineOptions {
@@ -401,7 +414,24 @@ impl TalkSageService {
             "cross_stream_dedup".into(),
             serde_json::json!({ "enabled": true }),
         );
-        let hooks = talksage_plugins::build_registry(&talksage_plugins::builtin_plugins(), &plugin_overrides);
+        let plugin_ctx = PluginContext {
+            kb,
+            llm: Self::build_llm(&self.config),
+            quality,
+            webhook,
+        };
+        // webhook 默认关闭（会把会话内容发到外部）。这里只在「本次会话确实会落库、
+        // 有东西可推」时把 finalizer 装上；装上不等于会发 —— 真正发不发由
+        // [webhooks] 在会后再判一次（见 WebhookHost::push）。两道闸互不代替。
+        plugin_overrides.insert(
+            "webhook".into(),
+            serde_json::json!({ "enabled": plugin_ctx.webhook.is_some() }),
+        );
+        let hooks = talksage_plugins::build_registry(
+            &talksage_plugins::builtin_plugins(),
+            &plugin_overrides,
+            &plugin_ctx,
+        );
 
         Ok(LivePipelineConfig {
             vad_model,
@@ -422,10 +452,7 @@ impl TalkSageService {
             },
             client,
             plugins,
-            plugin_ctx: PluginContext {
-                kb,
-                llm: Self::build_llm(&self.config),
-            },
+            plugin_ctx,
             recording_dir,
             runtime: Arc::new(RuntimeParams::with_noise_level(req.noise_level)),
             speaker,
@@ -436,11 +463,30 @@ impl TalkSageService {
 
     /// 启动监听。`on_event` 由适配器提供（IPC emit / WS broadcast / 打印）。
     pub fn start(&self, req: StartListen, on_event: EventSink) -> Result<RunningListen> {
-        let cfg = self.build_live_config(&req)?;
         let stats = Arc::new(Mutex::new(Vec::new()));
         let texts = Arc::new(Mutex::new(Vec::new()));
         let persist = req.persist;
         let sessions = if persist { self.sessions.clone() } else { None };
+
+        // 会后依赖按会话构造，在装配注册表之前 —— finalizer 一旦进了 HookRegistry
+        // 就是不可变的 Arc，只有 register 这一个注入时机。不落库就没有依赖，
+        // finalizer 空转。
+        let (quality, webhook) = match &sessions {
+            Some(store) => (
+                Some(Arc::new(QualityHost {
+                    config: self.config.clone(),
+                    store: store.clone(),
+                    stats: stats.clone(),
+                    texts: texts.clone(),
+                }) as Arc<dyn QualityDeps>),
+                Some(Arc::new(WebhookHost {
+                    config: self.config.clone(),
+                    store: store.clone(),
+                }) as Arc<dyn WebhookDeps>),
+            ),
+            None => (None, None),
+        };
+        let cfg = self.build_live_config_with(&req, quality, webhook)?;
 
         let session_id = if let Some(store) = &sessions {
             let now = unix_secs();
@@ -464,6 +510,8 @@ impl TalkSageService {
             on_event(ev);
         });
 
+        // 与管道内跑的是同一批实例（HookRegistry 克隆的是 Arc）。
+        let hooks = cfg.hooks.clone();
         let mut runtime = SessionRuntime::new(cfg);
         if let Err(e) = runtime.start(sink) {
             if let (Some(store), Some(sid)) = (&sessions, session_id) {
@@ -474,12 +522,13 @@ impl TalkSageService {
         Ok(RunningListen {
             runtime,
             session_id,
-            stats,
-            texts,
+            hooks,
         })
     }
 
-    /// 停止管道、评估质量、触发 webhook。
+    /// 停止管道并跑会后 finalizer 链（质量评估、webhook）。
+    ///
+    /// 具体做什么由注册表决定，这里只负责「停 → 落库 → 收尾」这三步的次序。
     pub fn finish(&self, mut running: RunningListen) -> Result<Option<i64>> {
         running.runtime.stop();
         let Some(sid) = running.session_id else {
@@ -488,49 +537,20 @@ impl TalkSageService {
         let Some(store) = &self.sessions else {
             return Ok(Some(sid));
         };
-        let now = unix_secs();
-        let _ = store.end_session(sid, now);
-        let stats = running.stats.lock().unwrap().clone();
-        let texts = running.texts.lock().unwrap().clone();
-        if !stats.is_empty() {
-            let snapshot = self.config.snapshot();
-            let mut params = talksage_session::QualityParams::from_config(&snapshot.quality);
-            params.auto_detect = snapshot.scene.effective().noise_auto_detect;
-            let meta = talksage_session::SessionMeta::evaluate(stats, &texts, now, &params);
-            if let Err(e) = store.set_session_meta(sid, &meta) {
-                log::warn!("保存会话元数据失败: {e}");
-            }
-            log::info!(
-                "会话 #{sid} 质量评估: {}（时长 {}s，语音占比 {:.0}%，文本噪音 {:.2}，跳过下游分析={}）",
-                meta.quality_label(),
-                meta.duration_ms / 1000,
-                meta.speech_ratio * 100.0,
-                meta.text_noise,
-                meta.skipped_analysis,
-            );
-        }
-        let wh_cfg = self.config.snapshot().webhooks;
-        if wh_cfg.enabled && !wh_cfg.urls.is_empty() {
-            let sessions = store.clone();
-            std::thread::spawn(move || {
-                if let Ok(detail) = sessions.get_session(sid) {
-                    let results = talksage_session::trigger_meeting_webhooks(&detail, &wh_cfg);
-                    for r in &results {
-                        log::info!(
-                            "webhook {}: {}（{}）",
-                            if r.ok { "成功" } else { "失败" },
-                            r.url,
-                            r.message
-                        );
-                    }
-                }
-            });
+        let _ = store.end_session(sid, unix_secs());
+        // finalizer 之间不经由 context 传值：webhook 的载荷是从库里现取的会话
+        // 详情，meta 已由链上游的 session_quality 落库（顺序不变量见 builtin_plugins）。
+        let report = running
+            .hooks
+            .run_finalizers(&talksage_plugins::FinalizeContext { session_id: sid });
+        if !report.failed.is_empty() {
+            log::warn!("会话 #{sid} 收尾有 {} 项失败: {:?}", report.failed.len(), report.failed);
         }
         Ok(Some(sid))
     }
 }
 
-fn unix_secs() -> i64 {
+pub(crate) fn unix_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
