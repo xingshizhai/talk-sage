@@ -272,9 +272,15 @@ npx tauri build
 ### 6.2 macOS（dmg）
 
 ```bash
-cd web
-npm run tauri build        # 产物在 src-tauri/target/release/bundle/dmg/
+./scripts/talksage.sh doctor
+./scripts/talksage.sh build
+./scripts/talksage.sh package
 ```
+
+- 日常运行：`./scripts/talksage.sh run`
+- 全量测试：`./scripts/talksage.sh test`
+- Rust 构建产物统一位于 workspace 根 `target/`；不要为 `web/src-tauri` 另设 target 目录，否则会重复占用磁盘
+- macOS 当前支持麦克风和文件输入；系统音频回环尚未实现，不会静默改用第二路麦克风
 
 ### 6.3 打包说明
 
@@ -326,4 +332,4 @@ talk-sage/
 └── target/                  # Rust 构建产物（debug/release、bundle/）
 ```
 
-详细架构见 `docs/architecture-v2.md`，测试说明见 `docs/testing.md`。
+详细架构见 `docs/architecture-v2.md`，测试分层、模型评估与发布门禁见 `docs/testing.md`。

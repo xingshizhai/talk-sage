@@ -148,24 +148,28 @@ Details: [docs/RECORDING.md](docs/RECORDING.md)
 
 ![拓思者 architecture](docs/architecture.png)
 
-A Rust workspace (single binary, no Python) with a clean domain-event bus shared by every carrier:
+A Rust workspace (single binary, no Python) with one application service and a transport-neutral domain-event bus:
 
 ```
-AudioHub (cpal / WASAPI loopback) → Preprocessor (denoise/highpass/noise gate)
-        → VAD (silero) → streaming ASR (sherpa-onnx) → final segment
-        → speaker identification (wespeaker) → plugins (term/translate/brief/keypoint)
-        → DomainEvent (serde) → Tauri IPC or WS → React UI
-        → session SQLite (segments + stats + quality meta)
+Audio input (mic / Windows loopback / wav) → bounded capture queues
+        → fair dual-stream scheduler → Preprocessor → VAD → ASR
+        → segment lifecycle → speaker attribution → EventFilter chain
+        → DomainEvent → Tauri IPC / WebSocket / CLI
+        ├── bounded SessionWriter → SQLite + WAV metadata
+        └── bounded PluginExecutor → observer results
+stop → writer barrier → session finalizers (quality / webhook)
 ```
+
+`TalkSageService` is the single composition root used by the desktop app, headless server, CLI listen/import, and offline transcription. Each stream owns its VAD, ASR engine, sample clock, endpoint state, statistics, and speaker assignment. SQLite and LLM work stay off the audio path; queues are bounded so slow consumers cannot grow memory without limit.
 
 | Crate | Responsibility |
 |---|---|
-| `talksage-core` | Domain events, session quality, text-noise scoring |
+| `talksage-core` | Domain events, sample clock, transcript state, speaker attribution, metrics |
 | `talksage-audio` | Mic/loopback capture, resample, denoise, wav IO, silence trim |
 | `talksage-asr` | sherpa-onnx streaming engine wrapper |
-| `talksage-pipeline` | VAD segmentation, dual streams, recording, runtime noise level, speaker ID |
-| `talksage-plugins` | Term explainer / translator / brief retriever |
-| `talksage-session` | SQLite storage + quality evaluation |
+| `talksage-pipeline` | Shared service, fair dual-stream scheduling, segment lifecycle, bounded plugin/persistence workers |
+| `talksage-plugins` | Registry with filters, segment observers, finalizers, config metadata, and 8 built-ins |
+| `talksage-session` | SQLite storage, compatible schema migration, quality evaluation |
 | `talksage-notes` | Minutes templates + generator |
 | `talksage-server` | axum headless service (REST + WS + SPA) |
 | `talksage-cli` | Launcher: listen / trim / record / import / serve / doctor / bench |
@@ -174,16 +178,18 @@ AudioHub (cpal / WASAPI loopback) → Preprocessor (denoise/highpass/noise gate)
 ## Testing
 
 ```bash
-.\scripts\run_tests.ps1        # cargo test (unit + real-model integration) + vitest
+./scripts/talksage.sh test      # macOS/Linux: Rust + frontend + script tests
 cargo test --workspace         # Rust: unit + live model tests (auto-skip if models missing)
-cd web && npx vitest run       # frontend: 27 tests
+cd web && npm test             # frontend: 60 tests (current suite)
 ```
 
-Real-model integration tests cover: Chinese/English ASR recognition, dual-stream events, recording files, **speaker identification** (owner vs new speaker), silence trim, server API, and the **13:57 noisy-session quality case**.
+Windows 使用 `.\scripts\run_tests.ps1` 或 `.\scripts\talksage.ps1 test`。
+
+Real-model integration tests cover Chinese/English ASR, dual-stream fairness and events, recording files, structured speaker attribution, silence trim, server API, and noisy-session quality. Model-dependent tests skip with an explicit message when their model files are absent.
 
 ## Documentation
 
-- [architecture-v2.md](docs/architecture-v2.md) — v2 design: dual carriers, shared service, sample clock, bounded capture
+- [architecture-v2.md](docs/architecture-v2.md) — current architecture: shared service, bounded workers, plugins, persistence, and sample clock
 - [BUILDING.md](docs/BUILDING.md) — build & packaging guide
 - [RECORDING.md](docs/RECORDING.md) — recording / trim / regression loop
 - [LOGGING.md](docs/LOGGING.md) — structured logging & debugging

@@ -1,7 +1,7 @@
 # TalkSage v2 架构设计（推翻重设计）
 
 **日期：** 2026-08（初版）；2026-08-20 修订（共享服务 / 采样时钟 / 有界采集）
-**状态：** 已实施。M0–M3 主路径可用；架构优化阶段 1–3 已落地（见 §19）。阶段 4（版本化协议 / 多 task 拆分）按需再做。
+**状态：** 当前实现基线。M0–M3 主路径可用；共享服务、模块拆分、有界采集、异步持久化、插件注册表与有界插件执行器均已落地（见 §19）。版本化增量协议仍为后续产品项。
 **对照：** 旧 Python/PySide6 实现（v1）已随 v2 重写从仓库移除（git 历史可查）
 
 ---
@@ -33,7 +33,7 @@ TalkSage 是一款**实时个人 AI 会议助理**：在视频会议或面对面
 | 部署 | 先单机；**架构预留团队/多设备** | 传输层可插拔、workspace/auth 抽象 |
 | 会议形态 | 视频会议（系统回环）+ 面对面（纯麦）都要 | 双路链路都要稳，回环可缺省 |
 | 实时性 | 越快越好，至少跟上会话速度 | **流式 ASR 必选**，非块式 |
-| 平台 | Windows + macOS（macOS 支持 Apple GPU） | 回环双平台（WASAPI / ScreenCaptureKit） |
+| 平台 | Windows + macOS | Windows 支持 WASAPI 回环；macOS 当前支持麦克风/文件，系统音频为后续项 |
 | 功能 | 术语解释、简报检索、**实时翻译**、**说话人分离**、**录音回放**、**纪要模板化** | pipeline 与事件模型扩展 |
 | 硬件 | CPU 独立运行；有 GPU 优先（NVIDIA CUDA + Apple Metal） | 推理后端自动探测 |
 | 界面 | **Tauri 2 原生壳 + React UI**；headless 服务模式预留 | 一套 UI 两种载体 |
@@ -112,7 +112,7 @@ flowchart TB
 | Web 框架 | **axum**（仅 headless 模式） | tokio 生态，WebSocket/静态托管一体 |
 | ASR 运行时 | **sherpa-onnx**（k2-fsa） | C API + Rust 绑定；支持 streaming paraformer（中文）、streaming zipformer/whisper（英文）、SenseVoice（导入/重转写高质量后端）、说话人 embedding；CPU/CUDA/CoreML 多后端 |
 | 前端 | **Vite + React + TypeScript** | 流式列表/虚拟化/分区表达力强，HMR 快 |
-| 音频采集 | cpal / 平台 API（WASAPI、ScreenCaptureKit） | 与 Meetily 同栈 |
+| 音频采集 | cpal + Windows WASAPI loopback | macOS ScreenCaptureKit / 虚拟声卡尚未接线 |
 | VAD | sherpa-onnx 内置 VAD（或 silero-vad Rust 绑定） | 流式端点检测 |
 | 存储 | **SQLite**（rusqlite/sqlx）+ Markdown 导出 | 轻量、单文件、可检索 |
 | LLM | OpenAI 兼容 HTTP 客户端（DeepSeek/Kimi/Groq/Ollama…） | 与旧版一致，抽象 Provider |
@@ -184,8 +184,10 @@ flowchart LR
     swClient --> vad2[VAD + ASR]
     vad1 --> ts[TranscriptState]
     vad2 --> ts
-    ts -->|committed| plugins[插件骨架同步 / LLM 独立线程]
-    ts -->|committed| sqlite[SQLite]
+    ts -->|committed| filters[EventFilter 链]
+    filters --> plugins[骨架同步 / 有界 PluginExecutor]
+    filters --> writer[有界 SessionWriter]
+    writer --> sqlite[SQLite]
     ts -->|Segment + Snapshot| ui[React UI]
 ```
 
@@ -229,25 +231,23 @@ flowchart LR
 ### 8.3 管道与插件（talksage-pipeline / talksage-plugins）
 
 - **入口**：`TalkSageService::start` / `finish`；内部 `SessionRuntime` 包装 `LivePipeline`（适配器不得 `LivePipeline::new`）
-- **插件抽象**：`AnalyzerPlugin`：`should_trigger`、`skeleton`（同步、无 HTTP）、`run`（独立线程，可含 LLM）；默认 `accepts_speculative() = false`，只消费 committed
-- **插件清单**：
-  - `term_explainer`：英文缩写 → 本地骨架 + LLM 终稿（冷却 + 会话去重）
-  - `brief_retriever`：客户发言 → 知识库片段（冷却）
-  - `translator`：中英互译（`complete`，非 token 流式）
-- **会后**：纪要 / 三段式智能纪要在 `talksage-notes`；Webhook 在 `stop` 之后后台线程，不占实时路径
-- **落库**：final 段 / 术语 / 翻译 的 SQLite 写入集中在 Service 的 `persist_domain_event`（独立 SessionWriter task 后置）
+- **统一接缝**：`EventFilter` 处理同步纯函数过滤；`SegmentObserver` 处理 committed 段，骨架同步而慢任务进入执行器；`SessionFinalizer` 在停止、flush、写入屏障之后运行
+- **内置插件（8 个）**：`short_segment`、`cross_stream_dedup`、`conversation_metrics`、`term_explainer`、`translator`、`brief_retriever`、`session_quality`、`webhook`。顺序由注册表定义，设置页由插件元数据生成
+- **慢路径隔离**：单会话固定 2 个 worker、有界队列 32；满载丢弃新的慢任务，panic 隔离，15 秒后的结果丢弃。同步骨架和实时转写不受慢 LLM 拖累
+- **落库**：committed 段、术语、翻译、流统计进入容量 256 的 `SessionWriter`；SQLite 串行写入。停止时通过 FIFO `Shutdown` 排空队列，再运行 finalizer
+- **会后**：纪要 / 三段式智能纪要在 `talksage-notes`；质量评估与 Webhook 是 finalizer，后者默认关闭
 
 ### 8.4 会话域（talksage-session）
 
-- SQLite schema（沿旧版扩展）：`sessions`（含录音文件路径、workspace、user）、`segments`（含 speaker_id、embedding 摘要）、`terms`、`translations`、`key_points`、`notes`
+- SQLite schema（沿旧版扩展）：`sessions`（含录音文件路径、workspace、user）、`segments`（含 speaker_id 与可选 `speaker_attribution` JSON）、`terms`、`translations`、`key_points`、`notes`
 - Markdown 导出（增量追加，不再全量重写）
 - 历史检索：SQL LIKE + 可选全文索引（预留）
-- 迁移机制：schema_version + WAL checkpoint 清理（参考 Meetily `database/manager.rs` 的 WAL 恢复与旧库迁移）
+- 兼容迁移：启动时以幂等 `ALTER TABLE` 补齐新增列；旧 segment 没有结构化归属时，根据历史 label 推断角色并把来源标为 unknown
 
 ### 8.5 LLM 域（talksage-llm）
 
 - `LLMProvider` trait：`complete`（OpenAI 兼容：DeepSeek/Kimi/Groq/Ollama…）
-- `ureq` 请求超时 15s；插件 `run` 在独立线程，停止后 `cancel` 则丢弃迟到结果。音频回调禁止 HTTP
+- `ureq` 请求超时 15s；插件 `run` 在固定大小执行器中运行，停止、取消或超时后丢弃迟到结果。音频回调禁止 HTTP
 - token 级 `stream` 仍为预留（翻译/术语目前一次 `complete`）
 
 ### 8.6 纪要模板化（talksage-plugins/notes）
@@ -265,7 +265,7 @@ flowchart LR
 
 ## 9. 事件协议（与传输无关）
 
-所有领域事件为纯数据（serde 序列化），IPC 与 WS 传同一结构。`DomainEvent::delivery_class()` 标明可靠性（实现可后置到独立 writer）：
+所有领域事件为纯数据（serde 序列化），IPC 与 WS 传同一结构。`DomainEvent::delivery_class()` 标明可靠性；durable 事件由独立 writer 持久化：
 
 | DeliveryClass | 含义 | 典型事件 |
 |---|---|---|
@@ -394,7 +394,7 @@ token = ""
 | **M1 实时转写** | 采集（麦+回环）→ 流式 VAD → streaming 双引擎 → 增量上屏（说话人双流着色） | 核心价值闭环 |
 | **M2 会议辅助** | 术语/简报/要点/上下文 + 翻译插件 + SQLite 会话 + 历史页 | 旧版功能等价 + 翻译 |
 | **M3 产品化** | 录音回放、重转写、纪要模板化、设置页/向导、双平台打包 | 可日常使用 |
-| **M4（预留）** | 多设备鉴权、版本化 Delta/resync、macOS 系统音频 | 浏览器断网恢复不丢 committed；未出现该需求前阶段 1–3 即可发布 |
+| **M4（预留）** | 多设备鉴权、版本化 Delta/resync、macOS 系统音频 | 浏览器断网恢复不丢 committed；不阻塞当前单机版本发布 |
 
 ---
 
@@ -454,6 +454,9 @@ token = ""
 - ~~固定语料转写评测（WER/RTF/延迟）~~ ✅ `talksage bench`（EnginePool 热启动 + core::cer/wer）
 - ~~最小提交时长 / ASR 合并参数~~ ✅ `audio.min_segment_ms`（见 §18.7）
 - ~~入口统一 / 采样时钟 / 有界采集~~ ✅ 2026-08-20 阶段 1–3（见 §19）
+- ~~统一插件注册表 / 配置元数据~~ ✅ 2026-08-20 阶段 1–5
+- ~~独立 SessionWriter / 有界插件执行器 / Pipeline 模块拆分~~ ✅ 2026-08-21（见 §19）
+- ~~结构化说话人归属 / SQLite 兼容迁移~~ ✅ 2026-08-21（见 §19.7）
 - headless 多会话：ServerState 从单管道 → 会话表（每会话一个 Runtime，共享 EnginePool）
 - 免注册说话人分离（sherpa diarization）：与现声纹方案互补
 - 版本化 DTO / Delta / 序号 resync：仅当长会议 WS 或浏览器断网恢复成为真实需求
@@ -497,9 +500,9 @@ token = ""
 
 ---
 
-## 19. 架构演进 v2.2（2026-08-20）：共享服务、时钟与背压
+## 19. 当前架构基线（2026-08-21）：共享服务、可控并发与持久化屏障
 
-阶段 1–3 已落地（提交 `8b87c67`）。**零个新 crate**；`LivePipeline` 仍在，由兼容层包住。Whisper / Qwen3 继续走 VAD 切段 + `finish()`，不叠 AlignAtt。
+优化阶段均已落地，未新增 crate；`LivePipeline` 保留为实时内核，由 `SessionRuntime` 和 `TalkSageService` 包装。Whisper / Qwen3 继续走 VAD 切段 + `finish()`，不叠 AlignAtt。
 
 ### 19.1 为何改
 
@@ -536,20 +539,26 @@ revision / processed_until_sample / committed_until_sample
 
 每条 `StreamWorker` 一个 `AudioClock`。`ts_ms = origin_ms + samples_to_ms(end_sample)`，`duration_ms` 由段采样数换算。墙上时钟只测耗时。
 
-### 19.5 有界采集
+### 19.5 有界采集与公平调度
 
-`CaptureTx`：`sync_channel(32)` + `try_send`。满载 overrun（第 1 次及每 32 次打日志）并丢帧，**不阻塞** cpal / WASAPI 回调。VAD→ASR / 分析 / UI 仍走现有线程，不铺六条 channel。
+`CaptureTx`：`sync_channel(32)` + `try_send`。满载 overrun（第 1 次及每 32 次打日志）并丢帧，**不阻塞** cpal / WASAPI 回调。Pipeline 用非阻塞轮询与 round-robin 改变首选流，避免固定偏向 user；文件输入由 deadline pacer 驱动，暂停恢复后不会追赶积压时钟。
 
-### 19.6 停止与 LLM
+### 19.6 停止、慢插件与持久化
 
 - `stop_with_timeout` 默认 5s：`AtomicBool` 取消 + 旁路 `join`；超时 warn 并返回 `false`，不卡 UI。ASR `finish()` 不可中断，超时是安全网。
-- 插件骨架同步、本地、无 HTTP；`run` 独立线程。`ureq` 15s 超时；会话已停或超时则丢弃结果。
-- 独立 SessionWriter task **未做**：落库仍在 Service 的事件 sink 里（pipeline 线程上写 committed）。
+- 插件骨架同步、本地、无 HTTP；慢 `run` 进入每会话 2-worker / 32-job 的有界执行器。队列溢出、panic、取消和迟到结果均隔离，不阻塞音频线程。
+- `SessionWriter` 用容量 256 的 FIFO 队列和独立 SQLite 线程持久化 durable 事件。正常结束先 drain writer，再执行只读 finalizer，保证质量评估和 Webhook 能看到完整会话。
+- `LivePipeline` 已拆出 endpoint、segment lifecycle、input scheduler、statistics、speaker assignment、plugin executor 等模块；`lib.rs` 只保留编排与公共类型。
 
-### 19.7 明确不做（现阶段）
+### 19.7 说话人归属与兼容数据
+
+- `SpeakerAttribution` 将音频来源、角色、身份和置信度结构化，避免业务继续解析“我/客户 N”等展示文本。
+- 过滤器之后才提交 speaker assignment，防止被短段过滤或跨流去重吞掉的段污染声纹状态。
+- SQLite 的 `speaker_attribution` 为可选 JSON；旧数据库自动补列，旧行读取时降级推断并标记未知来源。
+
+### 19.8 明确不做（现阶段）
 
 - 把 TalkSage 做成多用户 STT 服务器；拆 `talksage-protocol` / 六个 Tokio task
 - AlignAtt / token 级 CommitPolicy
-- 有界队列铺到 VAD→ASR / 分析 / UI
+- 把 VAD、ASR、UI 每一步都拆成独立 task；当前拆分以真实背压边界为准
 - 版本化 Delta + 序号 resync（阶段 4，按需）
-

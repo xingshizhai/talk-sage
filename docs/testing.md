@@ -1,75 +1,105 @@
-# TalkSage v2 自动化测试
+# TalkSage 自动化测试与评估
 
-**全自动验证**：核心链路（音频 → VAD 分段 → 流式 ASR → 领域事件 → 前端行聚合）全部可由
-wav 文件确定性驱动，无需人工交互，适合 CI。
+测试按“纯逻辑 → 边界组件 → 真实模型 → 前端 → 基准评估”分层。核心链路可由 WAV 文件确定性驱动；涉及模型、设备或网络的测试明确区分，避免把“跳过”误认为“已验证”。
 
-## 1. 测试分层
+## 1. 快速运行
 
-| 层 | 工具 | 位置 | 内容 |
-|---|---|---|---|
-| Rust 单元测试 | cargo test | `crates/*/src` 内 `#[cfg(test)]` | 事件序列化、配置分层、引擎名解析、重采样/分块、知识库检索、插件（缩写/骨架/翻译方向） |
-| Rust 集成测试 | cargo test | `crates/*/tests/` | **真实模型**加载 + 文件输入全链路事件断言、双流、插件事件 |
-| 前端单元测试 | Vitest | `web/src/**/*.test.ts` | 转写行聚合逻辑（partial/final/双说话人） |
-
-集成测试**依赖仓库内模型**（`models/`，见下）；模型缺失时自动跳过（打印提示，不失败）。
-
-## 2. 运行命令
+macOS / Linux：
 
 ```bash
-# Rust 全量（单元 + 集成）
-$env:SHERPA_ONNX_ARCHIVE_DIR = "$PWD\.tools\sherpa-onnx-archives"   # 构建期：sherpa-onnx 预编译库
-cargo test --workspace
-
-# 前端
-cd web && npm install --ignore-scripts && npx vitest run
-
-# 一键全量（PowerShell）
-scripts/run_tests.ps1        # cargo test --workspace + vitest run
+./scripts/talksage.sh test
 ```
 
-## 3. 测试覆盖明细
+Windows：
 
-### Rust 单元测试
-- `talksage-core`：DomainEvent JSON roundtrip、ResultStatus 区分
-- `talksage-config`：默认值加载、用户文件覆盖、环境变量覆盖
-- `talksage-asr`：EngineKind 解析（zipformer-en / paraformer-zh）
-- `talksage-audio`：重采样（同率透传 / 48k→16k 长度 / 线性插值）、分块（单声道整块 / 立体声混 mono / 不足块滞留）
+```powershell
+.\scripts\run_tests.ps1
+# 或
+.\scripts\talksage.ps1 test
+```
 
-### Rust 集成测试（真实模型，模型缺失跳过）
-- `talksage-asr/tests/asr_live.rs`：paraformer-zh 流式识别中文音频非空
-- `talksage-pipeline/tests/pipeline_live.rs`：
-  - 文件输入 → 状态事件链（AsrLoading→AsrReady→Recording→Idle）+ final 转写非空
-  - partial 增量事件存在且先于 final
-  - **双流**：user（中文文件）+ client（英文文件）→ 两个 speaker 都产出 final
-  - **插件**：mock LLM + translator → 真实识别链路产生 Translation 事件
+分开运行：
 
-### 插件测试（talksage-plugins，单元）
-- term_explainer：缩写提取、全大写输出忽略、非客户段忽略、骨架事件、run 后去重、mock LLM final
-- brief_retriever：知识库命中产出 Brief 事件、无命中返回 None
-- translator：EnZh / ZhEn 方向、无 LLM 不翻译
+```bash
+cargo test --workspace
+cd web && npm test
+```
 
-### 前端测试（Vitest）
-- `web/src/lib/transcript.test.ts`（6 用例）：
-  - partial 原地更新不新增行
-  - final 固化未完成行
-  - 无 partial 的 final 直接新增行
-  - 双说话人交替各自独立行
-  - 每句 final 后重新 partial 新起一行
-  - key 稳定复用
+macOS 首次构建、运行和依赖检查统一使用 `./scripts/talksage.sh doctor|build|run|test`。脚本会复用 workspace 根目录的 Cargo target，避免从不同目录重复产生一套 Rust 编译产物。
 
-## 4. 依赖与模型准备（CI / 新机器）
+## 2. 测试分层
 
-| 项 | 来源 | 说明 |
+| 层 | 位置 | 重点 |
 |---|---|---|
-| sherpa-onnx 预编译库 | GitHub Releases `sherpa-onnx-v1.13.5-win-x64-static-MT-Release-lib.tar.bz2` | 设 `SHERPA_ONNX_ARCHIVE_DIR` 指向含该文件的目录 |
-| 模型 | `scripts/download_models.py all`（经代理下载） | `models/sherpa-onnx-streaming-paraformer-zh`、`...-zipformer-en-2023-06-26` |
-| silero VAD | `scripts/download_models.py` 之外，`models/silero-vad/silero_vad.onnx` | 0.64MB |
-| 测试音频 | 模型仓库自带 `test_wavs/0.wav`（已随模型下载） | 中文 10s / 英文 6.6s |
+| 核心单元测试 | `crates/*/src` | 事件协议、采样时钟、配置合并、音频处理、端点状态、统计、说话人归属、数据库迁移 |
+| 管道/插件测试 | `talksage-pipeline`、`talksage-plugins` | 有界队列、双流公平性、过滤器顺序、observer/finalizer 隔离、停止与 drain 语义 |
+| 真实模型集成测试 | `crates/*/tests` | WAV → VAD → ASR → final event → recording / plugins / speaker attribution |
+| 服务测试 | `talksage-server` | REST、WebSocket、OpenAI 兼容接口和会话 API |
+| 前端测试 | `web/src/**/*.test.ts` | partial/final 聚合、智能断句、设置持久化、插件元数据、重点标记 |
+| 评估基准 | `scripts/evaluate.py`、`talksage bench` | CER/WER、RTF、首字延迟、设备/场景元数据和模型横向比较 |
 
-> 模型根目录探测顺序：`TALKSAGE_MODELS_DIR` → 相对 `CARGO_MANIFEST_DIR` 的 `../../models` → `models`。
+当前测试规模会随代码变化；不要在 CI 中依赖固定总数。2026-08-21 的基线为：pipeline 47、plugins 63、session 17、frontend 60。新增架构能力应至少有对应的确定性测试。
 
-## 5. 已知取舍
+## 3. 新架构的关键不变量
 
-- 集成测试跳过策略：模型缺失时 `eprintln` 跳过（不失败），保证无模型环境 `cargo test` 仍绿。
-- 双流集成测试约 20s（两个文件各自模拟实时节奏）。
-- VAD 收尾：输入结束/停止监听时**强制 flush 当前语音段**（sherpa silero VAD 对纯静音收尾不触发段完成，已通过 `StreamWorker::shutdown` 处理并测试覆盖）。
+- 音频回调只做有界 `try_send`；队列满可报告 overrun，但不得阻塞回调。
+- 双流使用 round-robin 非阻塞轮询；一条空闲或繁忙的流不得饿死另一条。
+- 文件输入按 deadline 节拍推进；暂停恢复后不得快速追赶暂停期间的积压。
+- partial 只更新 hypothesis；只有 final 经过 `EventFilter` 并进入 committed、observer 与持久化。
+- 被短段过滤或跨流去重吞掉的段，不得提交说话人状态或污染统计。
+- 慢插件使用固定 worker 和有界队列；队列满、panic、取消、超时不得阻塞实时转写。
+- `SessionWriter` 按 FIFO 串行写 SQLite；`finish` 返回前必须排空已提交事件，finalizer 随后才能读取会话。
+- 新数据库保存结构化 `speaker_attribution`；旧数据库自动补列，旧行仍可读取。
+- RMS 是实际均方根 `sqrt(mean(x²))`，统计必须使用真实样本数，不能把块平均再次平均。
+
+## 4. 真实模型与测试音频
+
+模型目录探测顺序：`TALKSAGE_MODELS_DIR` → workspace `models/`。使用：
+
+```bash
+python3 scripts/download_models.py all
+talksage bench --dir corpus --engine paraformer-zh
+talksage bench --dir corpus --engine zipformer-en
+```
+
+真实模型测试缺少模型时会打印跳过原因而不是失败。发布前必须在模型齐全的机器上执行一次，并检查输出中没有意外 skip。
+
+基准音频建议保留以下维度及人工校对文本：
+
+- 普通话：短句、停顿断句、句尾弱音、数字和银行卡等安全词。
+- 专业术语：产品名、缩写、中英混说和用户词表命中。
+- 英语：不同语速与口音。
+- 声学条件：近讲、远讲、低音量、背景噪声、扬声器回声。
+- 设备路径：麦克风、Windows 回环、WAV 文件；macOS 当前只自动验证麦克风/文件，系统音频回环仍是产品项。
+
+音频与标注建议用同名文件组织，例如 `sample.wav` + `sample.txt`，并记录设备、采样率、语言、场景和预期角色。真实会议录音进入仓库前必须脱敏并确认授权。
+
+## 5. 评价指标
+
+模型比较至少记录：
+
+| 指标 | 用途 |
+|---|---|
+| CER / WER | 中文字符、英文单词准确率 |
+| RTF | 推理耗时 / 音频时长；实时场景必须稳定小于 1 |
+| 首字延迟 | 用户感知的响应速度 |
+| final 延迟 | 停顿后提交完整句子的速度 |
+| 句尾召回 | 检查停止/端点 flush 是否丢最后一个字 |
+| 断句 F1 | 检查停顿和标点边界 |
+| 术语准确率 | 用户词表和专业词识别能力 |
+| speaker role accuracy | `owner/client/unknown` 结构化归属准确率 |
+| overrun / dropped plugin jobs | 设备或慢插件压力下的稳定性 |
+
+模型选择不要只看 CER：本应用优先满足实时性，再在可接受的 RTF 与内存范围内比较准确率、断句和术语表现。
+
+## 6. CI 与本机差异
+
+- 纯单元测试不依赖麦克风、GPU、模型或公网，应始终执行。
+- 真实模型测试可在普通 CI 跳过，但发布门禁必须有模型环境的独立任务。
+- 麦克风权限、默认设备、回环设备和 GUI 需要目标操作系统上的 smoke test，不能由 WAV 集成测试替代。
+- 某些服务测试需要绑定本地端口；受限 sandbox 禁止 bind 时，应在正常本机/CI 环境复验，而不是删除该测试。
+- LLM 与 Webhook 测试使用 mock；真实外部服务只做可选 smoke test，避免测试产生费用或发送用户数据。
+
+## 7. 回归检查单
+
+改动音频/VAD/ASR：运行 audio、asr、pipeline 和固定语料 benchmark；改动插件/持久化：运行 plugins、pipeline、session；改动事件字段：同时运行 core、server、Tauri 类型生成/编译和 frontend；改动停止流程：验证最后一个字、WAV 可播放、writer drain、finalizer 可见完整数据。

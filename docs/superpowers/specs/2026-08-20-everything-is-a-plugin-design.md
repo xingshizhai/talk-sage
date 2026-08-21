@@ -1,9 +1,11 @@
 # TalkSage 插件化架构设计（everything is a plugin）
 
 **日期：** 2026-08-20
-**状态：** 已评审，待实施
+**状态：** 已实施（阶段 1–5）；本文保留为历史设计依据
 **对照：** [architecture-v2.md](../../architecture-v2.md)（已实施的 v2 骨架）
 **参考：** deepseek-harness / Cordis 的 capability seam 模型
+
+> 当前实现说明（2026-08-21）：三类钩子、8 个内置插件、配置元数据驱动设置页均已落地。原设计把每个慢任务描述为“独立线程”，实现进一步收敛为每会话固定 2 个 worker、容量 32 的有界 `PluginExecutor`；持久化由容量 256 的 `SessionWriter` 串行完成。运行时事实以 [architecture-v2.md](../../architecture-v2.md#19-当前架构基线2026-08-21共享服务可控并发与持久化屏障) 为准。
 
 ---
 
