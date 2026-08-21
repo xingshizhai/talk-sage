@@ -18,7 +18,7 @@
 | 会话指标 / 教练提示 | `pipeline/src/lib.rs` 调度 | 与采集/VAD/ASR 挤在同一个 1130 行文件 |
 | 会话质量评估 | `session/src/lib.rs:428` + `service.rs` | 判定与调度分离，难改 |
 | webhook | `service.rs` | — |
-| Markdown 导出 | `server/src/lib.rs` **和** `web/src-tauri/src/lib.rs` | 两份实现 |
+| Markdown 导出 | `server/src/lib.rs` 与 `web/src-tauri/src/lib.rs` 的 handler | ~~两份实现~~ **勘误：并非重复。** 实现只有一份（`talksage_session::export_markdown`），两个 handler 是薄封装，差异为真实产品差异（桌面端额外落文件）。无需处理 |
 
 后果有三：
 
@@ -33,7 +33,6 @@
 - 把上述 8 个硬编码功能搬到统一的插件接缝，另有 3 个现有插件（术语/翻译/简报）改名接入，合计 11 个插件
 - 加插件的成本降到「加 1 个文件 + 注册表里 1 行」
 - 用类型系统表达快/慢路径的性能契约
-- 消除 server / tauri 的导出实现重复
 
 **非目标（本轮明确不做）**
 
