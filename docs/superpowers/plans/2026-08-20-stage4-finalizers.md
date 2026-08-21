@@ -1,10 +1,10 @@
-# 阶段 4：会话收尾钩子 + 导出去重
+# 阶段 4：会话收尾钩子（SessionFinalizer）
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 建立 `SessionFinalizer` 钩子，把 `finish()` 里硬编码的质量评估与 webhook 搬上去；另外把 server 与 tauri 各一份的导出/纪要实现收敛到 `TalkSageService`。
+**Goal:** 建立 `SessionFinalizer` 钩子，把 `finish()` 里硬编码的质量评估与 webhook 搬上去。
 
-**Architecture:** `HookRegistry` 增加 `finalizers` 字段。`finish()` 停管道、落库、构造 `FinalizeContext`，然后依次调用 finalizer，逐个独立、互不阻塞。导出与纪要**不是** finalizer（见下），走另一条路。
+**Architecture:** `HookRegistry` 增加 `finalizers` 字段。`finish()` 停管道、落库、构造 `FinalizeContext`，然后依次调用 finalizer，逐个独立、互不阻塞。导出与纪要**不是** finalizer，且不存在需要处理的重复 —— 见下方范围修正。
 
 **Tech Stack:** Rust 2021，现有 crate，不新增依赖、不新增 crate。
 
@@ -25,7 +25,7 @@
 
 后两者是 `GET /session/{id}/export`、`POST /session/{id}/trio-notes` 及对应 Tauri 命令。把它们做成 finalizer，等于每次会话结束自动导出并调 LLM 烧 token，与「用户点击才生成」的现有产品行为相抵触。
 
-它们的真实问题是**重复实现**（server 与 tauri 各一份），解法是抽成 `TalkSageService` 共享方法 —— 与插件接缝无关。spec 已加勘误。
+设计文档还称它们「server 与 tauri 各一份实现」，这一条同样不成立 —— 见下方已取消的 Task 5。spec 两处均已加勘误。
 
 因此本计划只做 finalizer 钩子（Task 1–4）。原拟的 Task 5「导出去重」在核对代码后取消 —— 见下方说明，那里并不存在重复实现。
 
