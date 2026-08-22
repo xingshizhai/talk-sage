@@ -82,8 +82,13 @@ export default function App() {
   // 会中提示（规则 + 冷却；借鉴 Call.md nudge-engine）
   const [nudges, setNudges] = useState<NudgeEvent[]>([]);
   const [showDebug, setShowDebug] = useState(false);
+  // 关闭窗口确认（监听中点击 X → 弹窗确认；避免误关丢掉未收尾的会话）
+  const [confirmClose, setConfirmClose] = useState(false);
   const [noiseLevel, setNoiseLevel] = useState(0); // 0..100（UI 百分比）
   const prevNoiseRef = useRef(-1);
+  // onCloseRequested 只注册一次，用 ref 取最新监听状态，避免闭包过期
+  const listeningRef = useRef(listening);
+  listeningRef.current = listening;
   const accumulatorRef = useRef(new TranscriptAccumulator());
   const pointsRef = useRef(new KeyPointAggregator());
   const lastTranslationRef = useRef<Record<string, string>>({});
@@ -108,6 +113,23 @@ export default function App() {
       };
       document.addEventListener("visibilitychange", onVisibility);
       minimizeListener = () => document.removeEventListener("visibilitychange", onVisibility);
+    }
+    // 关闭窗口守卫：监听中点击 X 不允许直接关闭，弹确认对话框。
+    // 确认后先优雅停止（落库 + 录音收尾），再 destroy（destroy 不触发
+    // close-requested，避免再次进入守卫死循环）。
+    let closeGuard: (() => void) | undefined;
+    if (isTauri) {
+      getCurrentWindow()
+        .onCloseRequested((event) => {
+          if (listeningRef.current) {
+            event.preventDefault();
+            setConfirmClose(true);
+          }
+        })
+        .then((fn) => {
+          closeGuard = fn;
+        })
+        .catch((err) => console.error("注册关闭守卫失败:", err));
     }
     const off = api.onEvent((ev: DomainEvent) => {
       if (ev.type === "status") {
@@ -217,6 +239,7 @@ export default function App() {
     });
     return () => {
       minimizeListener?.();
+      closeGuard?.();
       off();
     };
   }, []);
@@ -437,6 +460,21 @@ export default function App() {
       setStatus(`错误: ${e}`);
     }
   }, [listening, paused]);
+
+  /** 确认关闭：先优雅停止监听（会话落库、录音收尾），再销毁窗口。 */
+  const handleConfirmClose = useCallback(async () => {
+    setConfirmClose(false);
+    try {
+      if (listeningRef.current) {
+        await api.stopListen();
+        setListening(false);
+        setPaused(false);
+      }
+    } catch (e) {
+      console.error("退出前停止监听失败:", e);
+    }
+    getCurrentWindow().destroy().catch((err) => console.error("关闭窗口失败:", err));
+  }, []);
 
   // 应用内快捷键：Cmd/Ctrl+Shift+L 开始/停止；监听期间 Space 暂停/继续。
   // 输入框、文本域和可编辑内容中不接管按键，避免影响正常输入。
@@ -689,6 +727,55 @@ export default function App() {
       )}
 
       {showDebug && <DebugWindow events={rawEvents} readLogs={api.readLogs} onClose={() => setShowDebug(false)} />}
+
+      {/* 监听中关闭窗口的确认对话框（桌面端 X / Cmd+Q 触发 close-requested） */}
+      {confirmClose && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+          onClick={() => setConfirmClose(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 380,
+              maxWidth: "calc(100vw - 48px)",
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 12,
+              padding: "18px 20px",
+              boxSizing: "border-box",
+              boxShadow: "0 8px 30px rgba(0,0,0,0.35)",
+            }}
+          >
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8, color: "var(--text)" }}>正在监听中</div>
+            <div style={{ fontSize: 13, lineHeight: 1.7, color: "var(--text-2)", marginBottom: 16 }}>
+              当前会话仍在实时监听，直接关闭会中断转写与录音。确定要停止监听并退出吗？
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button
+                onClick={() => setConfirmClose(false)}
+                style={{ fontSize: 12, padding: "6px 14px", borderRadius: 8, cursor: "pointer", background: "var(--surface-2)", color: "var(--text)", border: "1px solid var(--border)" }}
+              >
+                继续监听
+              </button>
+              <button
+                onClick={() => void handleConfirmClose()}
+                style={{ fontSize: 12, padding: "6px 14px", borderRadius: 8, cursor: "pointer", background: "var(--danger)", color: "#fff", border: "none" }}
+              >
+                停止并退出
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
