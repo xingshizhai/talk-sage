@@ -464,16 +464,24 @@ export default function App() {
   /** 确认关闭：先优雅停止监听（会话落库、录音收尾），再销毁窗口。 */
   const handleConfirmClose = useCallback(async () => {
     setConfirmClose(false);
+    const win = getCurrentWindow();
     try {
       if (listeningRef.current) {
-        await api.stopListen();
+        // 后端 stop_listen 已移出主线程（不再冻结窗口），但仍可能因 finalizer
+        // （webhook 等）耗时数秒——显示状态避免用户以为卡死。
+        setStatus("正在停止并保存…");
+        // 兜底：即使后端异常挂起，也必须在超时后强制退出，不能把用户困在假死里。
+        await Promise.race([
+          api.stopListen().catch((e) => console.error("退出前停止监听失败:", e)),
+          new Promise((resolve) => setTimeout(resolve, 15000)),
+        ]);
         setListening(false);
         setPaused(false);
       }
-    } catch (e) {
-      console.error("退出前停止监听失败:", e);
+    } finally {
+      // destroy 不触发 close-requested，不会再次进入守卫循环。
+      win.destroy().catch((err) => console.error("关闭窗口失败:", err));
     }
-    getCurrentWindow().destroy().catch((err) => console.error("关闭窗口失败:", err));
   }, []);
 
   // 应用内快捷键：Cmd/Ctrl+Shift+L 开始/停止；监听期间 Space 暂停/继续。

@@ -30,8 +30,8 @@ pub struct AppState {
     sessions: Arc<SessionStore>,
     /// 共享用例入口（装配 Pipeline / 落库 / 质量评估）。
     service: TalkSageService,
-    /// 当前监听（None = 未监听）。
-    running: Mutex<Option<RunningListen>>,
+    /// 当前监听（None = 未监听）。Arc 便于移入 spawn_blocking 闭包。
+    running: Arc<Mutex<Option<RunningListen>>>,
 }
 
 /// 版本。
@@ -316,34 +316,55 @@ fn ping(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 开始实时监听（麦克风 → VAD → ASR → 事件推送）。
+///
+/// async + spawn_blocking：`service.start` 要加载模型/装配管道，可能耗时数秒；
+/// 同步 command 会占住 Tauri 主线程（窗口消息循环冻结，UI 假死）。
 #[tauri::command]
-fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
-    if guard.is_some() {
-        return Err("已在监听中".into());
-    }
+async fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let app = app.clone();
-    let running = state
-        .service
-        .start(
-            StartListen::desktop(),
-            Arc::new(move |ev: DomainEvent| {
-                let _ = app.emit("talksage://event", ev);
-            }),
-        )
-        .map_err(|e| e.to_string())?;
-    *guard = Some(running);
-    Ok(())
+    let service = state.service.clone();
+    let running = state.running.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 检查 + start + 写入整体持锁，语义与同步版本一致；但这是在阻塞线程池
+        // 里，不占主线程，窗口照常响应。
+        let mut guard = running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+        if guard.is_some() {
+            return Err("已在监听中".into());
+        }
+        let started = service
+            .start(
+                StartListen::desktop(),
+                Arc::new(move |ev: DomainEvent| {
+                    let _ = app.emit("talksage://event", ev);
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+        *guard = Some(started);
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 停止实时监听。
+///
+/// async + spawn_blocking：`finish` 是重活（join 管道线程 ≤5s + 落库 + 双流主录音
+/// 生成 + finalizer 可能网络等待），同步 command 会冻结窗口 → 前端「停止并退出」
+/// 的 destroy() 永远执行不到（监听停了但程序不退、再点关闭无效）。移出主线程后
+/// invoke 立即返回，前端可继续销毁窗口。
 #[tauri::command]
-fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
-    if let Some(running) = guard.take() {
-        state.service.finish(running).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+async fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let running = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?.take();
+    let Some(running) = running else {
+        return Ok(());
+    };
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.finish(running).map_err(|e| e.to_string())?;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 暂停或继续当前监听；会话与模型保持存活。
@@ -384,49 +405,58 @@ fn get_voiceprint_status(state: tauri::State<'_, AppState>) -> serde_json::Value
 }
 
 /// 注册主人声音：录制麦克风 `seconds` 秒 → 提取声纹 → 保存。
+///
+/// async + spawn_blocking：录制循环 + 声纹提取可能耗时数秒到十几秒，同步 command
+/// 会冻结窗口（与 stop_listen 同类的"假死"）。
 #[tauri::command]
-fn enroll_voice(seconds: u32, state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+async fn enroll_voice(seconds: u32, state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
     // 正在监听时不允许注册（麦克风被占用）
-    if state.running.lock().unwrap().is_some() {
+    if state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?.is_some() {
         return Err("请先停止监听再录制声音".into());
     }
     let model = speaker_model_path();
     if !model.is_file() {
         return Err(format!("缺少声纹模型: {}", model.display()));
     }
-    let identifier = talksage_pipeline::speaker::SpeakerIdentifier::new(
-        &model,
-        None,
-        talksage_pipeline::speaker::DEFAULT_THRESHOLD,
-    )
-    .ok_or("声纹模型加载失败")?;
-
     let gain_db = state.config.snapshot().audio.input_gain_db;
-    let (mut hub, rx) = AudioHub::new_with_gain(100, gain_db);
-    hub.start(None).map_err(|e| format!("启动麦克风失败: {e}"))?;
-    log::info!("声纹注册：录制 {} 秒…", seconds);
-    let mut audio: Vec<f32> = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(seconds.max(3) as u64);
-    while Instant::now() < deadline {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(c) => audio.extend_from_slice(&c),
-            Err(_) => {}
-        }
-    }
-    hub.stop();
+    let data_dir = state.config.data_dir().to_path_buf();
+    let seconds = seconds.max(3);
+    tauri::async_runtime::spawn_blocking(move || {
+        let identifier = talksage_pipeline::speaker::SpeakerIdentifier::new(
+            &model,
+            None,
+            talksage_pipeline::speaker::DEFAULT_THRESHOLD,
+        )
+        .ok_or("声纹模型加载失败")?;
 
-    let (emb, voiced_samples, windows) = identifier.enrollment_profile(&audio).ok_or(
-        "有效人声不足或录音质量较差；请在安静环境连续朗读，避免长时间停顿",
-    )?;
-    talksage_pipeline::speaker::save_owner_embedding(state.config.data_dir(), &emb)
-        .map_err(|e| format!("保存声纹失败: {e}"))?;
-    log::info!("声纹注册完成: dim={} samples={}", emb.len(), audio.len());
-    Ok(serde_json::json!({
-        "ok": true,
-        "dim": emb.len(),
-        "voiced_ms": voiced_samples * 1000 / 16000,
-        "windows": windows,
-    }))
+        let (mut hub, rx) = AudioHub::new_with_gain(100, gain_db);
+        hub.start(None).map_err(|e| format!("启动麦克风失败: {e}"))?;
+        log::info!("声纹注册：录制 {seconds} 秒…");
+        let mut audio: Vec<f32> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(seconds as u64);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(c) => audio.extend_from_slice(&c),
+                Err(_) => {}
+            }
+        }
+        hub.stop();
+
+        let (emb, voiced_samples, windows) = identifier.enrollment_profile(&audio).ok_or(
+            "有效人声不足或录音质量较差；请在安静环境连续朗读，避免长时间停顿",
+        )?;
+        talksage_pipeline::speaker::save_owner_embedding(&data_dir, &emb)
+            .map_err(|e| format!("保存声纹失败: {e}"))?;
+        log::info!("声纹注册完成: dim={} samples={}", emb.len(), audio.len());
+        Ok::<serde_json::Value, String>(serde_json::json!({
+            "ok": true,
+            "dim": emb.len(),
+            "voiced_ms": voiced_samples * 1000 / 16000,
+            "windows": windows,
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 删除已注册的主人声纹。
@@ -585,7 +615,7 @@ pub fn run() {
             config,
             sessions,
             service,
-            running: Mutex::new(None),
+            running: Arc::new(Mutex::new(None)),
         })
         .invoke_handler(tauri::generate_handler![
             get_version,

@@ -564,22 +564,29 @@ async fn start_listen_api(State(state): State<ServerState>, headers: axum::http:
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
-    let mut guard = state.running.lock().unwrap();
-    if guard.is_some() {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "已在监听中" }))).into_response();
-    }
+    // start 要加载模型/装配管道（可能数秒），放进阻塞线程池，别占 tokio worker。
     let events = state.events.clone();
-    match state.service.start(
-        StartListen::desktop(),
-        Arc::new(move |ev| {
-            let _ = events.send(ev);
-        }),
-    ) {
-        Ok(running) => {
-            *guard = Some(running);
-            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+    let service = state.service.clone();
+    let running = state.running.clone();
+    match tokio::task::spawn_blocking(move || {
+        let mut guard = running.lock().unwrap();
+        if guard.is_some() {
+            return Err(anyhow::anyhow!("已在监听中"));
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+        let started = service.start(
+            StartListen::desktop(),
+            Arc::new(move |ev| {
+                let _ = events.send(ev);
+            }),
+        )?;
+        *guard = Some(started);
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    {
+        Ok(Ok(())) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
 }
 
@@ -589,9 +596,15 @@ async fn stop_listen_api(State(state): State<ServerState>, headers: axum::http::
     }
     let running = state.running.lock().unwrap().take();
     if let Some(running) = running {
-        if let Err(e) = state.service.finish(running) {
-            log::warn!("停止监听收尾失败: {e}");
-        }
+        // finish 是重活（join ≤5s + 落库 + 主录音 + finalizer），放阻塞线程池，
+        // 避免占住 tokio worker 拖慢其他请求。
+        let service = state.service.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(e) = service.finish(running) {
+                log::warn!("停止监听收尾失败: {e}");
+            }
+        })
+        .await;
     }
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
 }
