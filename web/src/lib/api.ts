@@ -182,6 +182,13 @@ export type DomainEvent =
   | { type: "metrics"; metrics: ConversationMetrics }
   | { type: "nudge"; nudge: NudgeEvent }
   | {
+      type: "model_progress";
+      engine: string;
+      stage: "downloading" | "extracting" | "done" | "error";
+      percent?: number;
+      message?: string;
+    }
+  | {
       type: "snapshot";
       revision: number;
       committed: { speaker_id: number; speaker_label: string; speaker_attribution?: SpeakerAttribution; text: string; ts_ms: number; duration_ms?: number }[];
@@ -307,6 +314,12 @@ export interface AsrModelInfo {
   speed: "realtime" | "balanced" | "accurate";
   description: string;
   installed: boolean;
+  /** 已安装目录磁盘占用（MB）。 */
+  size_mb?: number;
+  /** 下载预估大小（MB）。 */
+  download_size_mb?: number;
+  /** 是否正在下载（残留 .part/.staging）。 */
+  downloading?: boolean;
 }
 
 /** 应用 API 表面。 */
@@ -314,6 +327,10 @@ export interface AppApi {
   getVersion(): Promise<string>;
   getConfig(): Promise<AppConfig>;
   listAsrModels(): Promise<AsrModelInfo[]>;
+  /** 下载/安装 ASR 引擎（进度经 model_progress 事件推送）。 */
+  downloadModel(engine: string): Promise<void>;
+  /** 删除 ASR 引擎模型目录。 */
+  removeModel(engine: string): Promise<void>;
   /** 插件元数据（设置页据此生成插件表单）。 */
   listPlugins(): Promise<PluginMeta[]>;
   /** 按当前配置和宿主能力预检插件注册状态。 */

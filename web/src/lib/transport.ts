@@ -46,6 +46,14 @@ export const ipcApi: AppApi = {
     return invoke<AsrModelInfo[]>("list_asr_models");
   },
 
+  async downloadModel(engine: string): Promise<void> {
+    await invoke("download_model", { engine });
+  },
+
+  async removeModel(engine: string): Promise<void> {
+    await invoke("remove_model", { engine });
+  },
+
   async listPlugins(): Promise<PluginMeta[]> {
     return invoke<PluginMeta[]>("list_plugins");
   },
@@ -169,6 +177,14 @@ export const httpApi: AppApi = {
 
   async listAsrModels(): Promise<AsrModelInfo[]> {
     return req<AsrModelInfo[]>("/asr/models");
+  },
+
+  async downloadModel(engine: string): Promise<void> {
+    await req(`/asr/models/${encodeURIComponent(engine)}/download`, { method: "POST" });
+  },
+
+  async removeModel(engine: string): Promise<void> {
+    await req(`/asr/models/${encodeURIComponent(engine)}/remove`, { method: "POST" });
   },
 
   async listPlugins(): Promise<PluginMeta[]> {

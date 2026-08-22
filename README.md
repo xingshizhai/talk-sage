@@ -54,12 +54,17 @@
 - **Python 3** (model download script, stdlib only)
 - Windows: **VS 2022 Build Tools** (C++ workload) for Tauri & sherpa-onnx linking
 
-### 1. Get the models (~1.2 GB)
+### 1. Get the models
+
+**Option A — in-app (recommended)**: Settings → ASR → Model management, click "Download" per engine (stop listening first; progress is shown and downloads run in the background).
+
+**Option B — command line** (batch / offline):
 
 ```bash
 # via an HTTP/HTTPS proxy if your network requires one:
 # export https_proxy=http://127.0.0.1:10808 http_proxy=http://127.0.0.1:10808
-python scripts/download_models.py all
+python scripts/download_models.py all          # everything
+python scripts/download_models.py qwen3-asr    # a single engine
 ```
 
 This downloads into `models/`:
@@ -68,11 +73,12 @@ This downloads into `models/`:
 |---|---|
 | `sherpa-onnx-streaming-paraformer-zh` | Chinese streaming ASR (fp32 included, auto-preferred) |
 | `sherpa-onnx-streaming-zipformer-en-2023-06-26` | English streaming ASR |
+| `sherpa-onnx-qwen3-asr-0.6b` | Qwen3-ASR 0.6B offline segment-level (int8, ~878 MB; distributed via official GitHub release, HF repo is gated) |
 | `sherpa-onnx-whisper-base` / `sherpa-onnx-whisper-small` | Offline segment-level ASR (multilingual, accurate for mixed zh/en) |
 | `silero-vad/silero_vad.onnx` | Voice activity detection |
 | `wespeaker/wespeaker_zh_cnceleb_resnet34.onnx` | Speaker embedding (voiceprint) |
 
-Models are selectable per stream in **Settings → Scene → Custom → my engine / client engine**: streaming (paraformer-zh / zipformer-en, real-time partials) or offline segment-level (whisper-base / whisper-small, result after each VAD segment; Qwen3-ASR once its model repo is public).
+Models are selectable per stream in **Settings → Scene → Custom → my engine / client engine**: streaming (paraformer-zh / zipformer-en, real-time partials) or offline segment-level (whisper-base / whisper-small / Qwen3-ASR, result after each VAD segment).
 
 ### 2. Build
 

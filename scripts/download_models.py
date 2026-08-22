@@ -1,6 +1,6 @@
-"""下载 sherpa-onnx streaming 模型。
+"""下载 sherpa-onnx 模型（流式 ASR / 离线 ASR / VAD / 声纹）。
 
-用法: python scripts/download_models.py [paraformer-zh | zipformer-en | wespeaker | all] [--proxy URL]
+用法: python scripts/download_models.py [paraformer-zh | zipformer-en | whisper-base | whisper-small | qwen3-asr | silero-vad | wespeaker | diarization | all] [--proxy URL]
 
 代理策略（默认直连）：
   1. --proxy 显式指定；2. 环境变量 https_proxy / HTTPS_PROXY；3. 都没有则直连。
@@ -77,13 +77,21 @@ TARGETS: dict[str, list[tuple[str | None, str, str]]] = {
         ("csukuangfj/sherpa-onnx-whisper-small", "small-decoder.int8.onnx", ""),
         ("csukuangfj/sherpa-onnx-whisper-small", "small-tokens.txt", ""),
     ],
-    # Qwen3-ASR 0.6B（离线，段级；中英等多语言）。官方仓库暂未公开，模型可用后放到
-    # models/sherpa-onnx-qwen3-asr-0.6b/（conv_frontend.onnx / encoder.onnx / decoder.onnx / tokenizer.json）。
+    # Qwen3-ASR 0.6B（离线，段级；中英等多语言）。官方 HF 仓库为 gated（401），
+    # sherpa-onnx 官方发布 int8 版本到 GitHub release（含 conv_frontend / encoder.int8 /
+    # decoder.int8 / tokenizer/ 目录，878MB）。这里下载 tar.bz2 解压到
+    # models/sherpa-onnx-qwen3-asr-0.6b/（目录名与代码 EngineKind::model_dir_name 对齐）。
     "qwen3-asr": [],
 }
 
 DIARIZATION_ARCHIVE_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
 DIARIZATION_DIR = "sherpa-onnx-pyannote-segmentation-3-0"
+
+# Qwen3-ASR 0.6B int8（sherpa-onnx 官方 GitHub release；HF 仓库 gated）。
+# 解压后顶层目录 sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25/，含
+# conv_frontend.onnx / encoder.int8.onnx / decoder.int8.onnx / tokenizer/（vocab.json 等）。
+QWEN3_ASR_ARCHIVE_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2"
+QWEN3_ASR_DIR = "sherpa-onnx-qwen3-asr-0.6b"
 
 
 def download(repo: str | None, filename: str, url: str, group: str) -> Path:
@@ -127,6 +135,56 @@ def download_diarization_model() -> None:
                 target.write(chunk)
     archive.unlink(missing_ok=True)
     print(f"  extracted model.int8.onnx ({model.stat().st_size / 1e6:.1f} MB)")
+
+
+def download_qwen3_asr_model() -> None:
+    """下载并解压 Qwen3-ASR 0.6B int8 到 models/sherpa-onnx-qwen3-asr-0.6b/。
+
+    官方包顶层目录名带版本（sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25），
+    这里统一解压到与代码约定一致的目录名（EngineKind::model_dir_name）。
+    """
+    out_dir = OUT_ROOT / QWEN3_ASR_DIR
+    required = ["conv_frontend.onnx", "encoder.int8.onnx", "decoder.int8.onnx"]
+    if all((out_dir / name).is_file() for name in required) and (out_dir / "tokenizer").is_dir():
+        print("  skip (exists) qwen3-asr 0.6B int8")
+        return
+    archive = OUT_ROOT / "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2"
+    download(None, archive.name, QWEN3_ASR_ARCHIVE_URL, ".")
+    staging = OUT_ROOT / "sherpa-onnx-qwen3-asr-0.6b.staging"
+    if staging.exists():
+        import shutil
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive, "r:bz2") as bundle:
+        # 顶层目录 strip：sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25/* → staging/*
+        prefix = None
+        for member in bundle.getmembers():
+            top = member.name.split("/", 1)[0]
+            prefix = prefix or top
+            new_name = member.name[len(prefix):].lstrip("/")
+            if not new_name:
+                continue
+            if member.isdir():
+                (staging / new_name).mkdir(parents=True, exist_ok=True)
+            elif member.isfile():
+                source = bundle.extractfile(member)
+                if source is None:
+                    raise RuntimeError(f"归档缺少 {member.name}")
+                target = staging / new_name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "wb") as f:
+                    while chunk := source.read(262144):
+                        f.write(chunk)
+            else:
+                print(f"  warn: 跳过特殊条目 {member.name}")
+    archive.unlink(missing_ok=True)
+    # staging → 正式目录（若已存在旧版，先移除）
+    if out_dir.exists():
+        import shutil
+        shutil.rmtree(out_dir)
+    staging.rename(out_dir)
+    total = sum(p.stat().st_size for p in out_dir.rglob("*") if p.is_file())
+    print(f"  extracted qwen3-asr 0.6B int8 -> {out_dir} ({total / 1e6:.1f} MB)")
 
 
 def _read_varint(data: bytes, pos: int) -> tuple[int, int]:
@@ -215,6 +273,8 @@ def main() -> None:
                 download(repo, filename, url, name)
             if name == "diarization":
                 download_diarization_model()
+            if name == "qwen3-asr":
+                download_qwen3_asr_model()
             if name == "zipformer-en":
                 model_dir = OUT_ROOT / "sherpa-onnx-streaming-zipformer-en-2023-06-26"
                 bpe_model = model_dir / "bpe.model"

@@ -104,9 +104,87 @@ fn list_asr_models() -> Vec<serde_json::Value> {
                 "speed": p.speed,
                 "description": p.description,
                 "installed": root.as_ref().is_some_and(|r| kind.is_available(r)),
+                "size_mb": root.as_ref().map(|r| talksage_asr::models::installed_size_mb(kind, r)).unwrap_or(0),
+                "download_size_mb": talksage_asr::models::download_size_mb(kind),
+                "downloading": root.as_ref().is_some_and(|r| talksage_asr::models::is_downloading(kind, r)),
             })
         })
         .collect()
+}
+
+/// 下载/安装 ASR 引擎（后台线程；进度经 `talksage://event` 推送 ModelProgress）。
+#[tauri::command]
+async fn download_model(
+    engine: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let kind = EngineKind::from_name(&engine).ok_or_else(|| format!("未知引擎: {engine}"))?;
+    if state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?.is_some() {
+        return Err("请先停止监听再安装模型".into());
+    }
+    let Some(root) = TalkSageService::resolve_models_dir() else {
+        return Err("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）".into());
+    };
+    let app = app.clone();
+    let engine_id = kind.display_name().to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let emit_app = app.clone();
+        let emit_engine = engine_id.clone();
+        let emit = move |stage: &str, percent: u32, message: &str| {
+            let _ = emit_app.emit(
+                "talksage://event",
+                DomainEvent::ModelProgress {
+                    engine: emit_engine.clone(),
+                    stage: stage.into(),
+                    percent,
+                    message: message.into(),
+                },
+            );
+        };
+        emit("downloading", 0, "开始下载…");
+        // 进度闭包自持 AppHandle 克隆，避免借用 emit
+        let progress_app = app.clone();
+        let progress_engine = engine_id.clone();
+        let progress = move |received: u64, total: u64| {
+            let percent = if total > 0 { ((received as f64 / total as f64) * 100.0) as u32 } else { 0 };
+            let _ = progress_app.emit(
+                "talksage://event",
+                DomainEvent::ModelProgress {
+                    engine: progress_engine.clone(),
+                    stage: "downloading".into(),
+                    percent,
+                    message: String::new(),
+                },
+            );
+        };
+        let result = talksage_asr::models::download_engine(kind, &root, Some(&progress));
+        match result {
+            Ok(()) => {
+                emit("done", 100, "安装完成");
+                Ok(())
+            }
+            Err(e) => {
+                emit("error", 0, &e.to_string());
+                Err(e.to_string())
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 删除 ASR 引擎模型目录。
+#[tauri::command]
+fn remove_model(engine: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let kind = EngineKind::from_name(&engine).ok_or_else(|| format!("未知引擎: {engine}"))?;
+    if state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?.is_some() {
+        return Err("请先停止监听再删除模型".into());
+    }
+    let Some(root) = TalkSageService::resolve_models_dir() else {
+        return Err("未找到 models/ 目录".into());
+    };
+    talksage_asr::models::remove_engine(kind, &root).map_err(|e| format!("删除失败: {e}"))
 }
 
 /// 保存配置（前端设置面板提交，写入 talksage.toml）。
@@ -623,6 +701,8 @@ pub fn run() {
             list_plugins,
             list_plugin_status,
             list_asr_models,
+            download_model,
+            remove_model,
             save_config,
             ping,
             start_listen,

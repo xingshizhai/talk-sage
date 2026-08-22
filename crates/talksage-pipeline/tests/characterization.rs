@@ -164,6 +164,10 @@ fn assert_golden(name: &str, actual: &str) {
             path.display()
         )
     });
+    // 文本 golden 不做平台换行比对：Windows autocrlf 会把仓库里的 LF 检出成
+    // CRLF，而 normalize() 恒用 LF —— 换行差异不该让特征化测试红。
+    let actual = actual.replace("\r\n", "\n");
+    let expected = expected.replace("\r\n", "\n");
     assert_eq!(
         actual, expected,
         "事件序列与 golden 不一致。若为预期内的行为变更，用 TALKSAGE_UPDATE_GOLDEN=1 更新并在提交信息里说明原因。"

@@ -54,18 +54,23 @@
 - **Python 3**（模型下载脚本，仅用标准库）
 - Windows：**VS 2022 Build Tools**（含 C++ 工作负载，用于 Tauri 与 sherpa-onnx 静态链接）
 
-### 1. 下载模型（约 1.2GB）
+### 1. 下载模型
+
+**方式 A：应用内安装（推荐）** — 打开设置 → ASR 转写 → 模型管理，点「下载」即可；
+安装/删除前需先停止监听，下载在后台进行并可看到进度条。
+
+**方式 B：命令行脚本**（批量/离线环境）：
 
 ```bash
 # 需要代理时：
 # export https_proxy=http://127.0.0.1:10808 http_proxy=http://127.0.0.1:10808
-python scripts/download_models.py all
+python scripts/download_models.py all          # 全部
+python scripts/download_models.py qwen3-asr    # 单个
 ```
 
 模型：可多选（设置 → 场景模式 → 自定义 → 我的引擎/客户引擎）：
 - **流式（实时增量）**：中文 paraformer-zh（含 fp32 更准）、英文 zipformer-en
-- **离线段级（更准，段结束出结果）**：Whisper base / Whisper small（多语言，中英夹杂会议效果好）、Qwen3-ASR（模型仓库开放后可用）
-- 其余：silero VAD、wespeaker 声纹
+- **离线段级（更准，段结束出结果）**：Whisper base / Whisper small（多语言，中英夹杂会议效果好）、Qwen3-ASR（约 878MB，官方 GitHub release 分发，HF 仓库为受限私有）
 
 下载到 `models/`：
 
@@ -73,6 +78,8 @@ python scripts/download_models.py all
 |---|---|
 | `sherpa-onnx-streaming-paraformer-zh` | 中文流式 ASR |
 | `sherpa-onnx-streaming-zipformer-en-2023-06-26` | 英文流式 ASR |
+| `sherpa-onnx-qwen3-asr-0.6b` | Qwen3-ASR 0.6B 离线段级（int8） |
+| `sherpa-onnx-whisper-base` / `sherpa-onnx-whisper-small` | Whisper 离线段级（多语言） |
 | `silero-vad/silero_vad.onnx` | 语音活动检测（VAD） |
 | `wespeaker/wespeaker_zh_cnceleb_resnet34.onnx` | 声纹模型（说话人识别） |
 

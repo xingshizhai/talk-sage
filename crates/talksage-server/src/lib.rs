@@ -83,6 +83,8 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/plugins", get(list_plugins_api))
         .route("/plugins/status", get(plugin_status_api))
         .route("/asr/models", get(asr_models_api))
+        .route("/asr/models/{engine}/download", axum::routing::post(download_model_api))
+        .route("/asr/models/{engine}/remove", axum::routing::post(remove_model_api))
         .route("/sessions", get(list_sessions_api))
         .route("/search", get(search_api))
         .route("/session/{id}", get(get_session_api).delete(delete_session_api))
@@ -202,9 +204,91 @@ async fn asr_models_api(State(state): State<ServerState>, headers: axum::http::H
             "id": kind.display_name(), "label": p.label, "languages": p.languages,
             "streaming": p.streaming, "speed": p.speed, "description": p.description,
             "installed": root.as_ref().is_some_and(|r| kind.is_available(r)),
+            "size_mb": root.as_ref().map(|r| talksage_asr::models::installed_size_mb(kind, r)).unwrap_or(0),
+            "download_size_mb": talksage_asr::models::download_size_mb(kind),
+            "downloading": root.as_ref().is_some_and(|r| talksage_asr::models::is_downloading(kind, r)),
         })
     }).collect();
     Json(models).into_response()
+}
+
+/// 下载/安装 ASR 引擎（后台线程；进度经 WS 广播 ModelProgress）。
+async fn download_model_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath(engine): AxumPath<String>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let kind = match EngineKind::from_name(&engine) {
+        Some(k) => k,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("未知引擎: {engine}") }))).into_response(),
+    };
+    if state.running.lock().unwrap().is_some() {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "请先停止监听再安装模型" }))).into_response();
+    }
+    let Some(root) = resolve_models_dir() else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "未找到 models/ 目录" }))).into_response();
+    };
+    let engine_id = kind.display_name().to_string();
+    let events = state.events.clone();
+    tokio::task::spawn_blocking(move || {
+        let emit_events = events.clone();
+        let emit_engine = engine_id.clone();
+        let emit = move |stage: &str, percent: u32, message: &str| {
+            let _ = emit_events.send(DomainEvent::ModelProgress {
+                engine: emit_engine.clone(),
+                stage: stage.into(),
+                percent,
+                message: message.into(),
+            });
+        };
+        emit("downloading", 0, "开始下载…");
+        // 进度闭包自持发送器克隆，避免借用 emit
+        let progress_events = events.clone();
+        let progress_engine = engine_id.clone();
+        let progress = move |received: u64, total: u64| {
+            let percent = if total > 0 { ((received as f64 / total as f64) * 100.0) as u32 } else { 0 };
+            let _ = progress_events.send(DomainEvent::ModelProgress {
+                engine: progress_engine.clone(),
+                stage: "downloading".into(),
+                percent,
+                message: String::new(),
+            });
+        };
+        let result = talksage_asr::models::download_engine(kind, &root, Some(&progress));
+        match result {
+            Ok(()) => emit("done", 100, "安装完成"),
+            Err(e) => emit("error", 0, &e.to_string()),
+        }
+    });
+    (StatusCode::ACCEPTED, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+/// 删除 ASR 引擎模型目录。
+async fn remove_model_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath(engine): AxumPath<String>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let kind = match EngineKind::from_name(&engine) {
+        Some(k) => k,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("未知引擎: {engine}") }))).into_response(),
+    };
+    if state.running.lock().unwrap().is_some() {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "请先停止监听再删除模型" }))).into_response();
+    }
+    let Some(root) = resolve_models_dir() else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "未找到 models/ 目录" }))).into_response();
+    };
+    match talksage_asr::models::remove_engine(kind, &root) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
 }
 
 /// 保存配置（设置面板提交）。

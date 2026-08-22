@@ -198,6 +198,19 @@ pub enum DomainEvent {
     Nudge {
         nudge: Nudge,
     },
+    /// 模型下载进度（应用内「转写引擎」安装/卸载）。
+    ModelProgress {
+        /// 引擎 id（EngineKind::display_name）。
+        engine: String,
+        /// 阶段：downloading | extracting | done | error。
+        stage: String,
+        /// 进度 0..100（stage=downloading 时有效）。
+        #[serde(default)]
+        percent: u32,
+        /// 人类可读消息（错误信息在 stage=error 时给出）。
+        #[serde(default)]
+        message: String,
+    },
 }
 
 /// 事件投递等级（文档化语义；独立 SessionWriter 可后置）。
@@ -230,7 +243,8 @@ impl DomainEvent {
             | DomainEvent::Brief { .. }
             | DomainEvent::State { .. }
             | DomainEvent::Metrics { .. }
-            | DomainEvent::Nudge { .. } => DeliveryClass::Replayable,
+            | DomainEvent::Nudge { .. }
+            | DomainEvent::ModelProgress { .. } => DeliveryClass::Replayable,
         }
     }
 }

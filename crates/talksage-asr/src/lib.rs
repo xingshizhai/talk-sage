@@ -17,6 +17,9 @@ use sherpa_onnx::{
     OnlineRecognizer, OnlineRecognizerConfig, OnlineStream, OnlineTransducerModelConfig,
 };
 
+/// 模型管理（下载 / 删除 / 磁盘占用；应用内「转写引擎」页使用）。
+pub mod models;
+
 /// 段级识别引擎接口（统一流式与离线段级模型）。
 ///
 /// - 流式（paraformer/zipformer）：`accept` 逐块返回增量文本，`finish` 返回最终文本。
@@ -170,7 +173,14 @@ impl EngineKind {
                 let stem = if self == Self::WhisperBase { "base" } else { "small" };
                 has(&format!("{stem}-tokens.txt")) && ((has(&format!("{stem}-encoder.onnx")) && has(&format!("{stem}-decoder.onnx"))) || (has(&format!("{stem}-encoder.int8.onnx")) && has(&format!("{stem}-decoder.int8.onnx"))))
             }
-            Self::Qwen3Asr => has("conv_frontend.onnx") && has("encoder.onnx") && has("decoder.onnx") && has("tokenizer.json"),
+            Self::Qwen3Asr => {
+                // 官方包为 int8 布局（encoder.int8.onnx / decoder.int8.onnx / tokenizer/ 目录）；
+                // 兼容早期约定的 fp32 布局（encoder.onnx / decoder.onnx / tokenizer.json）。
+                has("conv_frontend.onnx")
+                    && ((has("encoder.onnx") && has("decoder.onnx"))
+                        || (has("encoder.int8.onnx") && has("decoder.int8.onnx")))
+                    && (has("tokenizer.json") || dir.join("tokenizer").is_dir())
+            }
         }
     }
 }
@@ -378,25 +388,40 @@ impl OfflineSegmentEngine {
                     ..Default::default()
                 }
             }
-            EngineKind::Qwen3Asr => OfflineModelConfig {
-                qwen3_asr: OfflineQwen3ASRModelConfig {
-                    conv_frontend: Some(model_dir.join("conv_frontend.onnx").to_string_lossy().into()),
-                    encoder: Some(model_dir.join("encoder.onnx").to_string_lossy().into()),
-                    decoder: Some(model_dir.join("decoder.onnx").to_string_lossy().into()),
-                    tokenizer: Some(model_dir.join("tokenizer.json").to_string_lossy().into()),
-                    max_total_len: 512,
-                    max_new_tokens: 256,
-                    temperature: 0.0,
-                    top_p: 1.0,
-                    seed: 42,
-                    hotwords: (!options.hotwords.is_empty()).then(|| options.hotwords.join(", ")),
-                },
-                num_threads,
-                debug: false,
-                provider: Some("cpu".into()),
-                model_type: Some("qwen3_asr".into()),
-                ..Default::default()
-            },
+            EngineKind::Qwen3Asr => {
+                // 官方 int8 布局优先；兼容早期 fp32 约定。
+                let (enc, dec) = if model_dir.join("encoder.onnx").is_file() {
+                    ("encoder.onnx", "decoder.onnx")
+                } else {
+                    ("encoder.int8.onnx", "decoder.int8.onnx")
+                };
+                // sherpa-onnx 的 QwenAsrTokenizer 期望 tokenizer **目录**
+                // （内含 vocab.json / merges.txt / tokenizer_config.json）；旧约定为单文件。
+                let tokenizer = if model_dir.join("tokenizer").is_dir() {
+                    model_dir.join("tokenizer")
+                } else {
+                    model_dir.join("tokenizer.json")
+                };
+                OfflineModelConfig {
+                    qwen3_asr: OfflineQwen3ASRModelConfig {
+                        conv_frontend: Some(model_dir.join("conv_frontend.onnx").to_string_lossy().into()),
+                        encoder: Some(model_dir.join(enc).to_string_lossy().into()),
+                        decoder: Some(model_dir.join(dec).to_string_lossy().into()),
+                        tokenizer: Some(tokenizer.to_string_lossy().into()),
+                        max_total_len: 512,
+                        max_new_tokens: 256,
+                        temperature: 0.0,
+                        top_p: 1.0,
+                        seed: 42,
+                        hotwords: (!options.hotwords.is_empty()).then(|| options.hotwords.join(", ")),
+                    },
+                    num_threads,
+                    debug: false,
+                    provider: Some("cpu".into()),
+                    model_type: Some("qwen3_asr".into()),
+                    ..Default::default()
+                }
+            }
             _ => anyhow::bail!("{} 不是离线引擎", kind.display_name()),
         };
         let config = OfflineRecognizerConfig {

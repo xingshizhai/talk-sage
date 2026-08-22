@@ -4108,9 +4108,12 @@ name = "talksage-asr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bzip2",
  "log",
  "sherpa-onnx",
  "talksage-core",
+ "tar",
+ "ureq",
 ]
 
 [[package]]
