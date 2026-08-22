@@ -354,6 +354,8 @@ export interface AppApi {
   removeVoiceprint(): Promise<void>;
   /** 最小化到系统托盘（Windows；隐藏主窗口）。 */
   minimizeToTray(): Promise<void>;
+  /** 退出应用（桌面；不依赖窗口关闭权限，最可靠）。 */
+  quitApp(): Promise<void>;
   /** 历史：会话列表。 */
   listSessions(): Promise<SessionRecord[]>;
   /** 历史：全文检索。 */

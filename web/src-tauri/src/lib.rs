@@ -713,6 +713,7 @@ pub fn run() {
             enroll_voice,
             remove_voiceprint,
             minimize_to_tray,
+            quit_app,
             list_sessions,
             search_sessions,
             get_session,
@@ -848,6 +849,15 @@ fn minimize_to_tray(app: tauri::AppHandle) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// 退出应用（不依赖窗口 close/destroy 的 ACL 权限，最可靠的退出路径）。
+///
+/// 前端「停止并退出」确认后调用；`exit(0)` 直接结束进程，绕过
+/// close-requested 守卫，也不会因 window destroy 权限缺失而卡住。
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 /// 切换主窗口显示/隐藏（托盘左键点击）。

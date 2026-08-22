@@ -120,11 +120,16 @@ export default function App() {
     let closeGuard: (() => void) | undefined;
     if (isTauri) {
       getCurrentWindow()
-        .onCloseRequested((event) => {
+        .onCloseRequested(async (event) => {
           if (listeningRef.current) {
+            // 监听中：拦截关闭，弹确认对话框
             event.preventDefault();
             setConfirmClose(true);
+            return;
           }
+          // 未监听：不 preventDefault，由 Tauri wrapper 自动 destroy 关闭。
+          // （wrapper：handler 返回后若未 preventDefault 则自动 destroy。
+          // 不要再手动 destroy，避免双重关闭。）
         })
         .then((fn) => {
           closeGuard = fn;
@@ -461,7 +466,7 @@ export default function App() {
     }
   }, [listening, paused]);
 
-  /** 确认关闭：先优雅停止监听（会话落库、录音收尾），再销毁窗口。 */
+  /** 确认关闭：先优雅停止监听（会话落库、录音收尾），再退出应用。 */
   const handleConfirmClose = useCallback(async () => {
     setConfirmClose(false);
     const win = getCurrentWindow();
@@ -479,8 +484,14 @@ export default function App() {
         setPaused(false);
       }
     } finally {
-      // destroy 不触发 close-requested，不会再次进入守卫循环。
-      win.destroy().catch((err) => console.error("关闭窗口失败:", err));
+      // 优先优雅销毁窗口；destroy 不触发 close-requested，不会再次进入守卫循环。
+      // 若 destroy 因 ACL 或其他原因失败，回退到 Rust 侧 app.exit（最可靠）。
+      try {
+        await win.destroy();
+      } catch (err) {
+        console.error("销毁窗口失败，改用应用退出:", err);
+        await api.quitApp().catch((e) => console.error("应用退出失败:", e));
+      }
     }
   }, []);
 

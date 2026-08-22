@@ -102,6 +102,10 @@ export const ipcApi: AppApi = {
     await invoke("minimize_to_tray");
   },
 
+  async quitApp(): Promise<void> {
+    await invoke("quit_app");
+  },
+
   async listSessions(): Promise<SessionRecord[]> {
     return invoke("list_sessions");
   },
@@ -250,6 +254,10 @@ export const httpApi: AppApi = {
 
   async minimizeToTray(): Promise<void> {
     // headless（浏览器）无桌面窗口，最小化到托盘无意义
+  },
+
+  async quitApp(): Promise<void> {
+    // headless（浏览器）由宿主管理窗口，前端无法退出
   },
 
   async listSessions(): Promise<SessionRecord[]> {
