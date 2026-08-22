@@ -316,12 +316,32 @@ fn multipart_wav(wav_bytes: &[u8], model: &str) -> Vec<u8> {
 async fn openai_models_lists_engines() {
     let (status, body) = get("/v1/models").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("paraformer-zh"), "body={body}");
-    assert!(body.contains("zipformer-en"), "body={body}");
+    assert!(body.contains("\"object\":\"list\""), "body={body}");
+    // 该端点只列「已安装」引擎：无模型时列表为空是正确行为；有模型时
+    // 应包含引擎（与 models_root 判定一致，避免在 CI 无模型环境误报）。
+    let Some(root) = models_root() else {
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
+    };
+    if root.join("sherpa-onnx-streaming-paraformer-zh").is_dir() {
+        assert!(body.contains("paraformer-zh"), "body={body}");
+    }
+    if root.join("sherpa-onnx-streaming-zipformer-en-2023-06-26").is_dir() {
+        assert!(body.contains("zipformer-en"), "body={body}");
+    }
 }
 
 #[tokio::test]
 async fn openai_transcribe_rejects_non_wav() {
+    // 非法 wav 的校验发生在「引擎路径就绪」之后：无模型时先返回 503，
+    // 该测试在无模型环境跳过（与项目模型测试约定一致）。
+    let Some(root) = models_root() else {
+        return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
+    };
+    if !root.join("silero-vad").join("silero_vad.onnx").is_file()
+        || !root.join("sherpa-onnx-streaming-paraformer-zh").is_dir()
+    {
+        return skip("模型不完整（需要 VAD + paraformer-zh）");
+    }
     let body = multipart_wav(b"this is definitely not a wav file", "paraformer-zh");
     let resp = app()
         .oneshot(
