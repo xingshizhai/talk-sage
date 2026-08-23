@@ -196,9 +196,10 @@ pub struct SherpaStreamingEngine {
 /// 在线模型需要右侧声学上下文才能确认句尾 token。直接调用
 /// `input_finished()` 虽会排空已经就绪的帧，却不会替缺失的右上下文补帧，
 /// Paraformer 因此容易吞掉最后一个中文字符。这里补的是模型输入，不是实际
-/// 录音，所以不会延长会话时间戳，也不会让用户额外等待 1600ms。取两个
-/// Paraformer 大块的长度，可覆盖流切分落在任意块内的位置。
-const STREAMING_TAIL_PADDING_MS: usize = 1600;
+/// 录音，所以不会延长会话时间戳，也不会让用户额外等待。取 4 个解码步长
+/// （实测 Paraformer 流式解码延迟约 600ms/步），覆盖 VAD 切段落在任意
+/// chunk 边界、以及尾字尚未解码完的情况。
+const STREAMING_TAIL_PADDING_MS: usize = 2400;
 
 fn streaming_tail_padding_samples(sample_rate: i32) -> usize {
     sample_rate.max(0) as usize * STREAMING_TAIL_PADDING_MS / 1000
@@ -312,8 +313,19 @@ impl StreamingASREngine for SherpaStreamingEngine {
     }
 
     fn finish(&mut self) {
+        // 补足右上下文：分段补帧并反复解码，直到引擎不再 ready。
+        // 一次性补完再 decode 的问题：若补帧后仍差几帧才满一个 chunk，
+        // is_ready 为 false 会提前退出循环，尾字留在缓冲里。分段补帧 +
+        // 每轮都检查，确保最后一个 chunk 被完整消费。
         let padding = vec![0.0; streaming_tail_padding_samples(self.sample_rate)];
-        self.stream.accept_waveform(self.sample_rate, &padding);
+        // 分 4 段喂入，每段后都尝试解码（每段约 600ms = 一个解码步长）
+        let step = padding.len() / 4;
+        for slice in padding.chunks(step.max(1)) {
+            self.stream.accept_waveform(self.sample_rate, slice);
+            while self.recognizer.is_ready(&self.stream) {
+                self.recognizer.decode(&self.stream);
+            }
+        }
         self.stream.input_finished();
         while self.recognizer.is_ready(&self.stream) {
             self.recognizer.decode(&self.stream);
@@ -482,8 +494,9 @@ pub fn create_engine_with_options(kind: EngineKind, model_dir: &Path, num_thread
 mod tests {
     #[test]
     fn streaming_finish_adds_right_context_without_changing_audio_clock() {
-        assert_eq!(super::streaming_tail_padding_samples(16_000), 25_600);
-        assert_eq!(super::streaming_tail_padding_samples(8_000), 12_800);
+        // 2400ms 尾补帧（4 个 ~600ms 解码步长，覆盖 VAD 切段落在任意 chunk 边界）
+        assert_eq!(super::streaming_tail_padding_samples(16_000), 38_400);
+        assert_eq!(super::streaming_tail_padding_samples(8_000), 19_200);
     }
 
     use super::*;

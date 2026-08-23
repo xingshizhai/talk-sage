@@ -160,7 +160,9 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             vad_preset: VadPreset::Sensitive, // 灵敏：抓短句/弱语音（日常对话碎句多）
             vad_threshold: None,
             vad_min_speech_ms: None,
-            vad_min_silence_ms: None,
+            // 段尾静音 600ms：Sensitive 预设的 300ms 会在尾字韵母衰减时过早切段，
+            // 导致一句话最后一个字被吞（流式 ASR 解码有 ~600ms 步进延迟）。
+            vad_min_silence_ms: Some(600),
             vad_max_speech_ms: None,
             denoise_enabled: false, // 生活噪音多变，弱信号优先，默认不开门限
             denoise_gate: 0.008,
@@ -1296,6 +1298,8 @@ min_segment_ms = 600
         assert_eq!(dictation.vad_preset, VadPreset::Sensitive);
         assert!(!dictation.client_enabled, "听写场景应单流");
         assert!(dictation.plugin_allowlist.is_empty(), "听写场景应关闭分析插件");
+        // 段尾静音 600ms：防止尾字韵母衰减时 VAD 过早切段吞掉句尾字（回归网）
+        assert_eq!(dictation.vad_min_silence_ms, Some(600), "听写场景应使用较保守的段尾静音");
         assert_eq!(translation.translation_mode, TranslationMode::Bidirectional);
         assert_eq!(meeting.speaker_mode, SpeakerMode::Voiceprint);
         assert_eq!(lecture.vad_max_speech_ms, Some(60_000));
