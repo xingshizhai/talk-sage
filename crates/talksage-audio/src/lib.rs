@@ -253,10 +253,35 @@ impl AudioHub {
     }
 
     /// 启动麦克风采集。`device_name` 为 None 时用系统默认输入设备。
+    ///
+    /// WASAPI 初始化偶发后端错误（如 0x800706BE，音频引擎/设备瞬时波动），
+    /// 这里自动重试一次（延迟 300ms），并区分「后端临时失败」与「设备不可用」，
+    /// 让上层能给用户可操作的提示而不是裸抛错误码。
     pub fn start(&mut self, device_name: Option<&str>) -> Result<()> {
         if self.stream.is_some() {
             return Ok(());
         }
+        match self.try_start(device_name) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if is_transient_audio_backend_error(&e) {
+                    log::warn!("音频后端瞬时错误（{e}），300ms 后重试…");
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    return self.try_start(device_name).map_err(|retry_err| {
+                        anyhow::anyhow!(
+                            "麦克风启动失败（已自动重试一次）：{retry_err}。\
+                             请检查：① 麦克风是否被其他应用独占；② Windows 音频服务是否正常；\
+                             ③ 插拔或重启一次麦克风设备。"
+                        )
+                    });
+                }
+                Err(anyhow::anyhow!("麦克风启动失败：{e}。请检查麦克风是否已连接、是否被其他应用占用。"))
+            }
+        }
+    }
+
+    /// 单次尝试启动麦克风采集（不重试）。
+    fn try_start(&mut self, device_name: Option<&str>) -> Result<()> {
         let host = cpal::default_host();
         let device = match device_name {
             Some(name) => host
@@ -265,7 +290,7 @@ impl AudioHub {
                 .ok_or_else(|| anyhow::anyhow!("未找到输入设备: {name}"))?,
             None => host
                 .default_input_device()
-                .ok_or_else(|| anyhow::anyhow!("无默认输入设备"))?,
+                .ok_or_else(|| anyhow::anyhow!("未找到默认输入设备（请检查麦克风是否连接/启用）"))?,
         };
         let config = device.default_input_config()?;
         let src_sr = config.sample_rate().0;
@@ -309,6 +334,17 @@ impl AudioHub {
                     None,
                 )?
             }
+            cpal::SampleFormat::U16 => {
+                device.build_input_stream(
+                    &config.into(),
+                    move |data: &[u16], _| {
+                        let f: Vec<f32> = data.iter().map(|&s| (s as f32 / 32767.0) * 2.0 - 1.0).collect();
+                        collect_and_send(&f, channels, input_gain, &mut resampler, &mut pending, chunk_samples, &tx);
+                    },
+                    err_fn,
+                    None,
+                )?
+            }
             other => anyhow::bail!("不支持的采样格式: {other:?}"),
         };
 
@@ -328,6 +364,18 @@ impl AudioHub {
     pub fn overruns(&self) -> u64 {
         self.tx.overruns()
     }
+}
+
+/// 是否为「瞬时性」音频后端错误（值得自动重试）。
+///
+/// Windows WASAPI 偶发 `A backend-specific error has occurred: 远程过程调用失败。
+/// (0x800706BE)`——RPC 调用失败通常是音频引擎/设备瞬时波动（服务重启、
+/// 设备切换、独占冲突解除），重试一次即可恢复；持续失败才是真故障。
+/// 设备失效（0x88890004 AUDCLNT_E_DEVICE_INVALIDATED）等确定性错误不在此列。
+fn is_transient_audio_backend_error(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    // 0x800706BE = RPC_S_CALL_FAILED（WASAPI 会话 RPC 瞬时失败）
+    msg.contains("backend-specific") || msg.contains("0x800706BE") || msg.contains("RPC_S_CALL_FAILED")
 }
 
 /// 采集回调公共逻辑：mono 化 → 重采样 → 按块发送。
@@ -403,6 +451,24 @@ mod tests {
         assert_eq!(out[0], 0.0);
         assert!((out[1] - 5.0).abs() < 1e-5); // 采样点 0.5 → 线性插值 5.0
         assert_eq!(out[2], 10.0);
+    }
+
+    #[test]
+    fn transient_backend_error_is_detected() {
+        // Windows WASAPI 瞬时 RPC 失败（0x800706BE）应被识别为可重试
+        assert!(is_transient_audio_backend_error(&anyhow::anyhow!(
+            "A backend-specific error has occurred: 远程过程调用失败。 (0x800706BE)"
+        )));
+        assert!(is_transient_audio_backend_error(&anyhow::anyhow!(
+            "backend-specific error 0x800706BE"
+        )));
+        // 设备不可用等确定性错误不应误判为重试
+        assert!(!is_transient_audio_backend_error(&anyhow::anyhow!(
+            "未找到默认输入设备（请检查麦克风是否连接/启用）"
+        )));
+        assert!(!is_transient_audio_backend_error(&anyhow::anyhow!(
+            "设备被其他应用独占: 0x88890004"
+        )));
     }
 
     #[test]

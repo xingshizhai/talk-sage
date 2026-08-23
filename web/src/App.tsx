@@ -453,7 +453,12 @@ export default function App() {
         await api.startListen();
       }
     } catch (e) {
-      setStatus(`错误: ${e}`);
+      const msg = String(e).replace(/^Error: /, "");
+      setStatus(`错误: ${msg}`);
+      if (!listening) {
+        // 启动失败：原因可能很关键（麦克风被占/模型缺失），弹窗让用户看到处理建议
+        window.alert(`启动失败：${msg}`);
+      }
     }
   }, [listening, resetLiveSession]);
 
