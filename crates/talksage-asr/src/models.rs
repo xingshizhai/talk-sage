@@ -196,44 +196,11 @@ fn download_qwen3_asr(
     // 归档下载到 models/<dir>.tar.bz2
     let archive = models_root.join(format!("{}.tar.bz2", EngineKind::Qwen3Asr.model_dir_name()));
     download_file(URL, &archive, progress, cancel)?;
-    // 解压（tar.bz2 → staging/，剥离顶层目录）
-    let file = std::fs::File::open(&archive)?;
-    let decoder = bzip2::read::MultiBzDecoder::new(file);
-    let mut ar = tar::Archive::new(decoder);
-    let mut top: Option<String> = None;
-    let entries: Vec<_> = ar
-        .entries()?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("读取归档失败: {e}"))?;
-    for entry in entries {
-        if cancelled(cancel) {
-            let _ = std::fs::remove_dir_all(&staging);
-            let _ = std::fs::remove_file(&archive);
-            return Err(anyhow::Error::new(DownloadCancelled));
-        }
-        let path = entry.path()?.into_owned();
-        let mut parts = path.components();
-        let head = parts.next().map(|c| c.as_os_str().to_string_lossy().into_owned());
-        if top.is_none() {
-            top = head;
-        }
-        let rel: PathBuf = parts.as_path().to_path_buf();
-        if rel.as_os_str().is_empty() {
-            continue;
-        }
-        let dest = staging.join(&rel);
-        if entry.header().entry_type().is_dir() {
-            std::fs::create_dir_all(&dest)?;
-        } else if entry.header().entry_type().is_file() {
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut out = std::fs::File::create(&dest)?;
-            let mut reader = entry;
-            std::io::copy(&mut reader, &mut out)?;
-        }
+    if let Err(e) = unpack_tar_bz2_strip_top(&archive, &staging, cancel) {
+        let _ = std::fs::remove_dir_all(&staging);
+        let _ = std::fs::remove_file(&archive);
+        return Err(e);
     }
-    drop(ar);
     // 校验关键文件存在且**非空**（0 字节 = 下载/解压失败，会触发 native 崩溃）
     let nonempty = |p: &Path| p.is_file() && p.metadata().map(|m| m.len() > 0).unwrap_or(false);
     if !nonempty(&staging.join("conv_frontend.onnx"))
@@ -261,6 +228,45 @@ fn download_qwen3_asr(
     Ok(())
 }
 
+/// 解压 tar.bz2 到 staging，剥掉归档顶层目录。
+///
+/// `tar` 条目共享同一顺序流：必须读完当前条目再 `next()`。先 collect 再拷贝
+/// 会把未读 payload skip 掉，得到 0 字节文件（模型管理里 Qwen 下载「总是失败」）。
+fn unpack_tar_bz2_strip_top(
+    archive: &Path,
+    staging: &Path,
+    cancel: Option<&AtomicBool>,
+) -> anyhow::Result<()> {
+    let file = std::fs::File::open(archive)?;
+    let decoder = bzip2::read::MultiBzDecoder::new(file);
+    let mut ar = tar::Archive::new(decoder);
+    // 不可 collect：Entries 共享同一顺序流，next() 会 skip 上一条未读 payload。
+    for entry in ar.entries().map_err(|e| anyhow::anyhow!("读取归档失败: {e}"))? {
+        if cancelled(cancel) {
+            return Err(anyhow::Error::new(DownloadCancelled));
+        }
+        let mut entry = entry.map_err(|e| anyhow::anyhow!("读取归档失败: {e}"))?;
+        let path = entry.path()?.into_owned();
+        let mut parts = path.components();
+        let _head = parts.next();
+        let rel: PathBuf = parts.as_path().to_path_buf();
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let dest = staging.join(&rel);
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&dest)?;
+        } else if entry.header().entry_type().is_file() {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut out = std::fs::File::create(&dest)?;
+            std::io::copy(&mut entry, &mut out)?;
+        }
+    }
+    Ok(())
+}
+
 /// 流式下载单个文件到目标路径（进度回调；不覆盖已存在的非空文件）。
 /// `cancel` 置位时尽快停止：删除 `.part` 临时文件并返回 [`DownloadCancelled`]。
 pub fn download_file(
@@ -282,6 +288,7 @@ pub fn download_file(
         return Err(anyhow::Error::new(DownloadCancelled));
     }
     let resp = ureq::get(url)
+        // `proxy-from-env`：读取 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY（与 Python 下载脚本一致）
         .timeout(std::time::Duration::from_secs(900))
         .call()
         .map_err(|e| anyhow::anyhow!("下载失败 {url}: {e}"))?;
@@ -427,5 +434,115 @@ mod tests {
             }
         }
         result;
+    }
+
+    #[test]
+    fn download_file_uses_http_proxy_from_env() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let proxy = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("代理应收到连接");
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]);
+            assert!(
+                req.contains("GET http://download.test.invalid/model.bin"),
+                "HTTP 代理应收到绝对 URI，实际: {req}"
+            );
+            let body = b"onnx";
+            let _ = stream.write_all(
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
+                    .as_bytes(),
+            );
+            let _ = stream.write_all(body);
+        });
+
+        let keys = [
+            "ALL_PROXY",
+            "all_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        let proxy_url = format!("http://{proxy_addr}");
+        std::env::set_var("HTTP_PROXY", &proxy_url);
+        std::env::set_var("http_proxy", &proxy_url);
+
+        let result = (|| {
+            let tmp = std::env::temp_dir().join(format!("talksage-proxy-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let target = tmp.join("model.bin");
+            download_file("http://download.test.invalid/model.bin", &target, None, None)
+                .expect("走代理时应下载成功");
+            assert_eq!(std::fs::read(&target).unwrap(), b"onnx");
+            let _ = std::fs::remove_dir_all(&tmp);
+        })();
+
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        result;
+        proxy.join().expect("代理线程异常");
+    }
+
+    fn write_qwen_like_archive(path: &Path) {
+        let file = std::fs::File::create(path).unwrap();
+        let encoder = bzip2::write::BzEncoder::new(file, bzip2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let top = "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25";
+        for (rel, data) in [
+            ("conv_frontend.onnx", vec![0x11u8; 65536]),
+            ("encoder.int8.onnx", vec![0x22u8; 65536]),
+            ("decoder.int8.onnx", vec![0x33u8; 65536]),
+            ("tokenizer/vocab.json", b"{\"a\":1}".to_vec()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("{top}/{rel}"), data.as_slice())
+                .unwrap();
+        }
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap();
+    }
+
+    #[test]
+    fn unpack_qwen_archive_keeps_file_payloads() {
+        let tmp = std::env::temp_dir().join(format!("talksage-qwen-unpack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let archive = tmp.join("qwen.tar.bz2");
+        let staging = tmp.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        write_qwen_like_archive(&archive);
+        unpack_tar_bz2_strip_top(&archive, &staging, None).unwrap();
+        let blob = |name: &str, byte: u8| {
+            let data = std::fs::read(staging.join(name)).unwrap();
+            assert_eq!(data.len(), 65536, "{name} 长度不对");
+            assert!(
+                data.iter().all(|&b| b == byte),
+                "{name} 内容损坏（tar 条目必须边读边处理，不能先 collect）"
+            );
+        };
+        blob("conv_frontend.onnx", 0x11);
+        blob("encoder.int8.onnx", 0x22);
+        blob("decoder.int8.onnx", 0x33);
+        let vocab = staging.join("tokenizer").join("vocab.json");
+        assert!(vocab.is_file() && vocab.metadata().unwrap().len() > 0);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

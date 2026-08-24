@@ -10,6 +10,6 @@ talksage-core = { path = "../talksage-core" }
 anyhow = { workspace = true }
 sherpa-onnx = "1.13"
 log = "0.4"
-ureq = { version = "2" }
+ureq = { version = "2", features = ["proxy-from-env"] }
 bzip2 = "0.4"
 tar = "0.4"

@@ -110,6 +110,8 @@ $env:https_proxy = "http://127.0.0.1:10808"
 $env:http_proxy  = "http://127.0.0.1:10808"
 ```
 
+在此之后运行 `.\scripts\talksage.ps1 dev`（或已启动的桌面应用）时，**模型管理里的引擎下载**同样走这些代理（`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`）。Webhook 出站仍直连，不受代理影响。
+
 ### 2.2 本机 schannel TLS 故障时的 cargo 代理（仅 Windows 有此问题）
 
 部分 Windows 机器 schannel 损坏（`SEC_E_NO_CREDENTIALS`），cargo/git/curl 全部 TLS 失败。此时使用仓库自带的**明文 HTTP 代理**：
