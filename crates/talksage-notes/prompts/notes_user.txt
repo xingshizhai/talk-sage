@@ -1,0 +1,19 @@
+## 模板
+{template_structure}
+
+## 模板分节指令
+{template_instructions}
+
+## 会中要点（整理依据）
+{key_points}
+
+## 转写（核对用）
+{transcript}
+
+## 术语
+{terms}
+
+## 翻译参考
+{translations}
+
+请生成纪要。

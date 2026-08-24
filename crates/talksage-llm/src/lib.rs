@@ -1,5 +1,9 @@
 //! TalkSage v2 LLM Provider 抽象（OpenAI 兼容端点：DeepSeek/Kimi/Groq/Ollama…）。
 
+mod prompt;
+
+pub use prompt::render_prompt;
+
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -25,7 +29,11 @@ pub struct OpenAICompatProvider {
 }
 
 impl OpenAICompatProvider {
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>, base_url: impl Into<String>) -> Self {
+    pub fn new(
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Self {
         Self {
             api_key: api_key.into(),
             model: model.into(),

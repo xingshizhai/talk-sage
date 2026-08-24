@@ -130,8 +130,8 @@ talksage/
 │   ├── talksage-audio/        # AudioHub / LoopbackCapture、有界采集队列、WAV
 │   ├── talksage-asr/          # SegmentEngine（流式 + 离线段级）+ EnginePool
 │   ├── talksage-pipeline/     # TalkSageService、SessionRuntime、LivePipeline、speaker
-│   ├── talksage-plugins/      # term_explainer / brief_retriever / translator
-│   ├── talksage-notes/        # 会后纪要 / 三段式智能纪要
+│   ├── talksage-plugins/      # 会中插件；LLM prompt 在 crate 内 prompts/
+│   ├── talksage-notes/        # 会后纪要；LLM prompt 在 crate 内 prompts/
 │   ├── talksage-session/      # SQLite + Markdown 导出 + 录音索引 + 质量评估
 │   ├── talksage-llm/          # OpenAI 兼容 Provider（complete，15s 超时）
 │   ├── talksage-knowledge/    # 简报知识库检索（Jaccard，预留向量）
@@ -232,10 +232,11 @@ flowchart LR
 
 - **入口**：`TalkSageService::start` / `finish`；内部 `SessionRuntime` 包装 `LivePipeline`（适配器不得 `LivePipeline::new`）
 - **统一接缝**：`EventFilter` 处理同步纯函数过滤；`SegmentObserver` 处理 committed 段，骨架同步而慢任务进入执行器；`SessionFinalizer` 在停止、flush、写入屏障之后运行
-- **内置插件（8 个）**：`short_segment`、`cross_stream_dedup`、`conversation_metrics`、`term_explainer`、`translator`、`brief_retriever`、`session_quality`、`webhook`。顺序由注册表定义，设置页由插件元数据生成
+- **内置插件**：`short_segment`、`cross_stream_dedup`、`conversation_metrics`、`term_explainer`、`translator`、`brief_retriever`、`key_point_extractor`、`session_quality`、`webhook`。顺序由注册表定义，设置页由插件元数据生成
+- **LLM prompt 归调用方**：会中用 LLM 的插件（目前 `term_explainer` / `translator`）自带 `prompts/<id>_*.txt`，与配置 schema、设置页标签同一所有权。宿主只注入 `LLMProvider`，不设中央 prompt 目录——加 LLM 插件仍是「实现 + `builtin.rs` 一行 + 自己的 prompt 文件」。`brief_retriever` / `key_point_extractor` 走本地规则，无 prompt。约定见 §8.5
 - **慢路径隔离**：单会话固定 2 个 worker、有界队列 32；满载丢弃新的慢任务，panic 隔离，15 秒后的结果丢弃。同步骨架和实时转写不受慢 LLM 拖累
 - **落库**：committed 段、术语、翻译、流统计进入容量 256 的 `SessionWriter`；SQLite 串行写入。停止时通过 FIFO `Shutdown` 排空队列，再运行 finalizer
-- **会后**：纪要 / 三段式智能纪要在 `talksage-notes`；质量评估与 Webhook 是 finalizer，后者默认关闭
+- **会后**：纪要 / 三段式智能纪要在 `talksage-notes`（不是 plugin）；质量评估与 Webhook 是 finalizer，后者默认关闭
 
 ### 8.4 会话域（talksage-session）
 
@@ -249,12 +250,16 @@ flowchart LR
 - `LLMProvider` trait：`complete`（OpenAI 兼容：DeepSeek/Kimi/Groq/Ollama…）
 - `ureq` 请求超时 15s；插件 `run` 在固定大小执行器中运行，停止、取消或超时后丢弃迟到结果。音频回调禁止 HTTP
 - token 级 `stream` 仍为预留（翻译/术语目前一次 `complete`）
+- **Prompt 约定（谁调用、谁持有）**：不设 `talksage-prompts` crate，也不把会中/会后文案收进同一目录。正文是 crate 内 `.txt`，编译期 `include_str!`；动态段用 `talksage_llm::render_prompt` 填 `{name}`（未声明的 `{...}` 原样保留，便于 system prompt 写 JSON 示例）。运行时覆盖（用户改 txt、免重编译）未做。
+  - 会中：`crates/talksage-plugins/prompts/`（`term_explainer_*` / `translator_*`）
+  - 会后：`crates/talksage-notes/prompts/`（纪要 / 三段式 / 要点整理）
 
-### 8.6 纪要模板化（talksage-plugins/notes）
+### 8.6 纪要模板化（talksage-notes）
 
 - JSON 模板定义（沿用 Meetily `summary/templates/types.rs` 的 schema：name/description/sections[title/instruction/format/item_format]）
 - 内置模板：标准会议 / 谈判记录 / 技术评审 / 每日站会
 - 运行时校验 + 自动生成分节 LLM 指令 + 表格化 Action Items（owner/due/转写引用/时间戳）
+- 角色 prompt 在 `talksage-notes/prompts/`；模板分节 instruction 仍在 `builtin_templates()`（模板数据，不是 LLM 角色 prompt）
 
 ### 8.7 知识库（talksage-knowledge）
 

@@ -4,34 +4,34 @@
 //! - `skeleton`：本地即时（骨架，同步发）；`run`：可含 LLM 调用（pipeline 在独立线程执行）。
 //! - 依赖（知识库/LLM）经 `PluginContext` 注入（Arc 共享），插件不自行持有。
 
+mod prompts;
+
 pub mod brief_retriever;
-pub mod term_explainer;
-pub mod translator;
-pub mod registry;
-pub mod short_segment;
-pub mod cross_stream_dedup;
 pub mod builtin;
 pub mod conversation_metrics;
-pub mod session_quality;
-pub mod webhook;
+pub mod cross_stream_dedup;
 pub mod key_point_extractor;
+pub mod registry;
+pub mod session_quality;
+pub mod short_segment;
+pub mod term_explainer;
+pub mod translator;
+pub mod webhook;
 
 pub use builtin::{
     analysis_plugin_ids, build_registry, build_registry_with_report, builtin_plugins,
-    effective_plugin_configs, evaluate_plugin_registrations, host_managed_keys,
-    plugin_metadata, validate_plugin_updates, RegistryBuild,
+    effective_plugin_configs, evaluate_plugin_registrations, host_managed_keys, plugin_metadata,
+    validate_plugin_updates, RegistryBuild,
 };
 
 pub use registry::{
-    EventFilter, FinalizeContext, FinalizeReport, HookRegistry, Plugin, PluginConfig,
-    CapabilityAvailability, PluginCapability, PluginCategory, PluginConfigIssue,
-    PluginDescriptor, PluginPhase, PluginRegistration, RegistrationStatus,
+    CapabilityAvailability, EventFilter, FinalizeContext, FinalizeReport, HookRegistry, Plugin,
+    PluginCapability, PluginCategory, PluginConfig, PluginConfigIssue, PluginDescriptor,
+    PluginPhase, PluginRegistration, RegistrationStatus, SegmentObserver, SessionFinalizer,
     DEFAULT_FINALIZER_TIMEOUT,
-    SegmentObserver, SessionFinalizer,
 };
 pub use session_quality::QualityDeps;
 pub use webhook::WebhookDeps;
-
 
 use std::sync::Arc;
 
@@ -74,7 +74,13 @@ pub struct PluginContext {
 
 impl PluginContext {
     pub fn new() -> Self {
-        Self { kb: None, llm: None, quality: None, webhook: None, translation: None }
+        Self {
+            kb: None,
+            llm: None,
+            quality: None,
+            webhook: None,
+            translation: None,
+        }
     }
 
     pub fn has_capability(&self, capability: PluginCapability) -> bool {

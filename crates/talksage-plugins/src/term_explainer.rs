@@ -5,11 +5,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use talksage_core::{DomainEvent, ResultStatus, TranscriptSegment};
+use talksage_llm::render_prompt;
 
-use super::{SegmentObserver, PluginContext};
-
-const SYSTEM_PROMPT: &str = "你是硬件制造业与商务谈判领域的专家助手。用户在与英文客户洽谈。\
-    请解释对话中出现的专业术语/缩写。简洁，中文，每行格式：缩写 = 中文全称（英文全称），一句话说明含义。";
+use super::{prompts, PluginContext, SegmentObserver};
 
 fn now() -> f64 {
     SystemTime::now()
@@ -94,7 +92,9 @@ impl SegmentObserver for TermExplainerPlugin {
     }
 
     fn should_trigger(&self, seg: &TranscriptSegment) -> bool {
-        seg.speaker_id != 0 && !self.unseen_acronyms(&seg.text).is_empty() && !self.cooldown_active()
+        seg.speaker_id != 0
+            && !self.unseen_acronyms(&seg.text).is_empty()
+            && !self.cooldown_active()
     }
 
     fn skeleton(&self, seg: &TranscriptSegment) -> Vec<DomainEvent> {
@@ -116,20 +116,35 @@ impl SegmentObserver for TermExplainerPlugin {
         }]
     }
 
-    fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> anyhow::Result<Option<DomainEvent>> {
+    fn run(
+        &self,
+        seg: &TranscriptSegment,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<Option<DomainEvent>> {
         let acronyms = find_acronyms(&seg.text);
         if acronyms.is_empty() {
             return Ok(None);
         }
-        let Some(llm) = ctx.llm.as_ref() else { return Ok(None) };
-        let prompt = format!("客户说：\"{}\"\n\n请解释其中出现的术语/缩写：{}", seg.text, acronyms.join(", "));
-        let content = llm.complete(&prompt, SYSTEM_PROMPT)?;
+        let Some(llm) = ctx.llm.as_ref() else {
+            return Ok(None);
+        };
+        let acronyms_joined = acronyms.join(", ");
+        let prompt = render_prompt(
+            prompts::TERM_EXPLAINER_USER,
+            &[("text", &seg.text), ("acronyms", &acronyms_joined)],
+        );
+        let content = llm.complete(&prompt, prompts::TERM_EXPLAINER_SYSTEM)?;
         if content.trim().is_empty() {
             return Ok(None);
         }
         self.reserve(&acronyms);
         // 复用骨架 result_id，前端按 id 原地更新
-        let result_id = self.pending_result_id.lock().unwrap().take().unwrap_or_else(|| format!("term-{}", now() as u64));
+        let result_id = self
+            .pending_result_id
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| format!("term-{}", now() as u64));
         Ok(Some(DomainEvent::Term {
             result_id,
             status: ResultStatus::Final,
@@ -145,10 +160,14 @@ pub struct TermExplainerPluginDef;
 impl crate::registry::Plugin for TermExplainerPluginDef {
     fn descriptor(&self) -> &'static crate::PluginDescriptor {
         static D: crate::PluginDescriptor = crate::PluginDescriptor {
-            id: "term_explainer", label: "术语解释",
+            id: "term_explainer",
+            label: "术语解释",
             description: "使用 LLM 解释会话中的专业术语和缩写",
-            category: crate::PluginCategory::Analysis, phase: crate::PluginPhase::Observer,
-            capabilities: &[crate::PluginCapability::Llm], host_managed: &[], after: &[],
+            category: crate::PluginCategory::Analysis,
+            phase: crate::PluginPhase::Observer,
+            capabilities: &[crate::PluginCapability::Llm],
+            host_managed: &[],
+            after: &[],
         };
         &D
     }
@@ -218,7 +237,11 @@ mod tests {
         let mut skels = p.skeleton(&seg(1, "We need NPI samples"));
         assert!(!skels.is_empty(), "应有骨架");
         match skels.remove(0) {
-            DomainEvent::Term { status: ResultStatus::Skeleton, content, .. } => {
+            DomainEvent::Term {
+                status: ResultStatus::Skeleton,
+                content,
+                ..
+            } => {
                 assert!(content.contains("NPI"));
             }
             other => panic!("unexpected: {other:?}"),
@@ -227,7 +250,9 @@ mod tests {
 
     #[test]
     fn run_reserves_acronyms_for_dedup() {
-        let mock = MockProvider { response: "NPI = New Product Introduction".into() };
+        let mock = MockProvider {
+            response: "NPI = New Product Introduction".into(),
+        };
         let ctx = PluginContext {
             kb: None,
             llm: Some(std::sync::Arc::new(mock)),
@@ -241,7 +266,9 @@ mod tests {
 
     #[test]
     fn run_uses_ctx_llm_for_final() {
-        let mock = MockProvider { response: "NPI = New Product Introduction（新产品导入）".into() };
+        let mock = MockProvider {
+            response: "NPI = New Product Introduction（新产品导入）".into(),
+        };
         let ctx = PluginContext {
             kb: None,
             llm: Some(std::sync::Arc::new(mock)),
@@ -249,7 +276,11 @@ mod tests {
         };
         let p = TermExplainerPlugin::new(0.0);
         match p.run(&seg(1, "NPI status?"), &ctx).unwrap() {
-            Some(DomainEvent::Term { status: ResultStatus::Final, content, .. }) => {
+            Some(DomainEvent::Term {
+                status: ResultStatus::Final,
+                content,
+                ..
+            }) => {
                 assert!(content.contains("NPI"));
             }
             other => panic!("应有 final: {other:?}"),

@@ -1,0 +1,8 @@
+{context}
+## 会中要点（整理依据）
+{key_points}
+
+## 转写（核对说话人）
+{transcript}
+
+请整理。

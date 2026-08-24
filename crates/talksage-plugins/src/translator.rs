@@ -3,10 +3,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use talksage_core::{DomainEvent, ResultStatus, TranscriptSegment, TranslationDirection};
+use talksage_llm::render_prompt;
 
-use super::{LiveTranslationMode, PluginContext, SegmentObserver};
-
-const SYSTEM_PROMPT: &str = "你是商务会议同声翻译。把用户输入翻译成目标语言，只输出译文，不要解释。";
+use super::{prompts, LiveTranslationMode, PluginContext, SegmentObserver};
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -43,9 +42,17 @@ impl SegmentObserver for TranslatorPlugin {
         Vec::new()
     }
 
-    fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> anyhow::Result<Option<DomainEvent>> {
-        let Some(llm) = ctx.llm.as_ref() else { return Ok(None) };
-        let Some(policy) = ctx.translation.as_ref() else { return Ok(None) };
+    fn run(
+        &self,
+        seg: &TranscriptSegment,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<Option<DomainEvent>> {
+        let Some(llm) = ctx.llm.as_ref() else {
+            return Ok(None);
+        };
+        let Some(policy) = ctx.translation.as_ref() else {
+            return Ok(None);
+        };
         let is_client = seg.speaker_id != 0;
         if policy.mode == LiveTranslationMode::Off
             || (policy.mode == LiveTranslationMode::ClientToUser && !is_client)
@@ -53,9 +60,15 @@ impl SegmentObserver for TranslatorPlugin {
             return Ok(None);
         }
         let (source, target_language) = if is_client {
-            (policy.client_language.as_str(), policy.user_language.as_str())
+            (
+                policy.client_language.as_str(),
+                policy.user_language.as_str(),
+            )
         } else {
-            (policy.user_language.as_str(), policy.client_language.as_str())
+            (
+                policy.user_language.as_str(),
+                policy.client_language.as_str(),
+            )
         };
         let direction = match (source, target_language) {
             ("en", "zh") => TranslationDirection::EnZh,
@@ -67,8 +80,11 @@ impl SegmentObserver for TranslatorPlugin {
             "en" => "English",
             _ => return Ok(None),
         };
-        let prompt = format!("目标语言：{target}\n\n{}", seg.text);
-        let content = llm.complete(&prompt, SYSTEM_PROMPT)?;
+        let prompt = render_prompt(
+            prompts::TRANSLATOR_USER,
+            &[("target", target), ("text", &seg.text)],
+        );
+        let content = llm.complete(&prompt, prompts::TRANSLATOR_SYSTEM)?;
         if content.trim().is_empty() {
             return Ok(None);
         }
@@ -87,10 +103,17 @@ pub struct TranslatorPluginDef;
 impl crate::registry::Plugin for TranslatorPluginDef {
     fn descriptor(&self) -> &'static crate::PluginDescriptor {
         static D: crate::PluginDescriptor = crate::PluginDescriptor {
-            id: "translator", label: "实时翻译",
+            id: "translator",
+            label: "实时翻译",
             description: "按会话语言策略使用 LLM 生成实时翻译",
-            category: crate::PluginCategory::Analysis, phase: crate::PluginPhase::Observer,
-            capabilities: &[crate::PluginCapability::Llm, crate::PluginCapability::TranslationPolicy], host_managed: &[], after: &[],
+            category: crate::PluginCategory::Analysis,
+            phase: crate::PluginPhase::Observer,
+            capabilities: &[
+                crate::PluginCapability::Llm,
+                crate::PluginCapability::TranslationPolicy,
+            ],
+            host_managed: &[],
+            after: &[],
         };
         &D
     }
@@ -143,7 +166,9 @@ mod tests {
 
     fn bilingual_ctx(response: &str) -> PluginContext {
         PluginContext {
-            llm: Some(std::sync::Arc::new(MockProvider { response: response.into() })),
+            llm: Some(std::sync::Arc::new(MockProvider {
+                response: response.into(),
+            })),
             translation: Some(crate::LiveTranslationPolicy {
                 mode: LiveTranslationMode::Bidirectional,
                 user_language: "zh".into(),
@@ -159,7 +184,11 @@ mod tests {
         let p = TranslatorPlugin::new();
         assert!(p.should_trigger(&seg(1, "We need NPI samples")));
         match p.run(&seg(1, "We need NPI samples"), &ctx).unwrap() {
-            Some(DomainEvent::Translation { direction: TranslationDirection::EnZh, content, .. }) => {
+            Some(DomainEvent::Translation {
+                direction: TranslationDirection::EnZh,
+                content,
+                ..
+            }) => {
                 assert!(!content.is_empty());
             }
             other => panic!("应有 EnZh 翻译事件: {other:?}"),
@@ -171,7 +200,10 @@ mod tests {
         let ctx = bilingual_ctx("We need NPI samples");
         let p = TranslatorPlugin::new();
         match p.run(&seg(0, "我们需要 NPI 样品"), &ctx).unwrap() {
-            Some(DomainEvent::Translation { direction: TranslationDirection::ZhEn, .. }) => {}
+            Some(DomainEvent::Translation {
+                direction: TranslationDirection::ZhEn,
+                ..
+            }) => {}
             other => panic!("应有 ZhEn 翻译事件: {other:?}"),
         }
     }
@@ -179,7 +211,11 @@ mod tests {
     #[test]
     fn no_llm_means_no_translation() {
         let p = TranslatorPlugin::new();
-        let ctx = PluginContext { kb: None, llm: None, ..PluginContext::new() };
+        let ctx = PluginContext {
+            kb: None,
+            llm: None,
+            ..PluginContext::new()
+        };
         assert!(p.run(&seg(1, "We need NPI"), &ctx).unwrap().is_none());
     }
 
