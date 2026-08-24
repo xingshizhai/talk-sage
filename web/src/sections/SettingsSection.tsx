@@ -1,8 +1,8 @@
-// 设置面板：按 Tab 归类（ASR 转写 / 插件分析 / 会议录音 / 噪音检测 / 声音标识 / LLM）。
-// 保存写入 talksage.toml。
+// 设置面板：按 Tab 归类。保存写入 talksage.toml。
+// 模型安装/删除在独立的「模型管理」页，不占用本页。
 
 import { useEffect, useState } from "react";
-import type { AppConfig, AsrModelInfo, DomainEvent, PluginMeta, PluginStatusInfo, SceneMode, SceneParams } from "../lib/api";
+import type { AppConfig, AsrModelInfo, PluginMeta, PluginStatusInfo, SceneMode, SceneParams } from "../lib/api";
 import type { PluginValues } from "../lib/plugins";
 import { analysisPluginIds, buildPluginUpdates, fieldLabel, initialPluginValues, pluginFields, pluginStatusLabel } from "../lib/plugins";
 import { getApi } from "../lib/transport";
@@ -13,11 +13,13 @@ const VOICE_ENROLL_SECONDS = 16;
 const VOICE_ENROLL_TEXT =
   "你好，我正在为拓思者录制声音标识。今天阳光明亮，我会清楚、自然、连续地读完这段文字。会议结束后，请帮我整理重点、时间和下一步行动。";
 
-type SettingsTab = "scene" | "asr" | "plugins" | "recording" | "quality" | "voice" | "llm" | "webhooks";
+type SettingsTab = "scene" | "asr" | "audio" | "terminology" | "plugins" | "recording" | "quality" | "voice" | "llm" | "webhooks";
 
 const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "scene", label: "场景模式", desc: "听写 / 会话 / 双语 / 会议 / 课堂 / 自定义" },
-  { key: "asr", label: "ASR 转写", desc: "引擎 / 灵敏度 / 降噪" },
+  { key: "asr", label: "ASR 转写", desc: "引擎 / 输入增益" },
+  { key: "audio", label: "音频处理", desc: "灵敏度 / 断句 / 降噪" },
+  { key: "terminology", label: "术语纠错", desc: "热词与误识别替换" },
   { key: "plugins", label: "插件分析", desc: "术语 / 翻译 / 简报 / 知识库" },
   { key: "recording", label: "会议录音", desc: "录音开关与目录" },
   { key: "quality", label: "噪音检测", desc: "会话质量阈值" },
@@ -29,14 +31,13 @@ const TABS: { key: SettingsTab; label: string; desc: string }[] = [
 export default function SettingsSection({
   config,
   onSave,
+  onOpenModels,
 }: {
   config: AppConfig | null;
   onSave: (updates: Record<string, unknown>) => Promise<void>;
+  onOpenModels: () => void;
 }) {
   const [tab, setTab] = useState<SettingsTab>("asr");
-  // 模型下载进度（engine id → 事件；由 App 层的 onEvent 转发到这里）。
-  const [modelProgress, setModelProgress] = useState<Record<string, DomainEvent & { type: "model_progress" }>>({});
-  const [modelBusy, setModelBusy] = useState<string | null>(null);
   // 场景模式
   const [sceneMode, setSceneMode] = useState<SceneMode>(config?.scene?.mode ?? "conversation");
   const [sceneCustom, setSceneCustom] = useState<SceneParams>(() => ({
@@ -108,7 +109,6 @@ export default function SettingsSection({
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [asrModels, setAsrModels] = useState<AsrModelInfo[]>([]);
-  // 声音标识
   const [voiceStatus, setVoiceStatus] = useState<{ model_available: boolean; enrolled: boolean } | null>(null);
   const [enrolling, setEnrolling] = useState(false);
   const [enrollCount, setEnrollCount] = useState(0);
@@ -146,65 +146,8 @@ export default function SettingsSection({
     // 设置页是从 App 的 navPage 切进来的，切进来就是一次新的挂载。
   }, []);
 
-  // 模型下载进度：App 层 onEvent 只处理转写相关事件，模型事件在这里单独订阅。
-  useEffect(() => {
-    const off = api.onEvent((ev: DomainEvent) => {
-      if (ev.type === "model_progress") {
-        setModelProgress((prev) => ({ ...prev, [ev.engine]: ev }));
-        // 安装完成/失败/取消后刷新模型列表与可用选项
-        if (ev.stage === "done" || ev.stage === "error" || ev.stage === "cancelled") {
-          api.listAsrModels().then(setAsrModels).catch(() => {});
-        }
-      }
-    });
-    return off;
-  }, []);
-
-  /** 安装模型（进度经 model_progress 事件；失败时给出原因）。 */
-  async function handleDownloadModel(id: string) {
-    setModelBusy(id);
-    setMessage("");
-    try {
-      await api.downloadModel(id);
-      // 桌面端 invoke 在下载完成后才 resolve；此时进度事件已到 done
-      const models = await api.listAsrModels();
-      setAsrModels(models);
-    } catch (e) {
-      setMessage(`模型安装失败: ${e}`);
-    } finally {
-      setModelBusy(null);
-    }
-  }
-
-  /** 删除已安装模型。 */
-  async function handleRemoveModel(id: string) {
-    if (!window.confirm(`确定删除「${id}」模型文件吗？删除后需重新下载。`)) return;
-    setModelBusy(id);
-    setMessage("");
-    try {
-      await api.removeModel(id);
-      const models = await api.listAsrModels();
-      setAsrModels(models);
-      setMessage(`已删除模型: ${id}`);
-    } catch (e) {
-      setMessage(`删除失败: ${e}`);
-    } finally {
-      setModelBusy(null);
-    }
-  }
-
-  /** 取消正在进行的模型下载。 */
-  async function handleCancelDownload(id: string) {
-    setMessage("");
-    try {
-      await api.cancelModelDownload(id);
-      setMessage(`已请求取消: ${id}`);
-    } catch (e) {
-      setMessage(`取消失败: ${e}`);
-    }
-  }
-
-  /** 改某个插件的某个配置键。 */  function setPluginField(id: string, key: string, value: boolean | number | string) {
+  /** 改某个插件的某个配置键。 */
+  function setPluginField(id: string, key: string, value: boolean | number | string) {
     setPluginValues((prev) => ({ ...prev, [id]: { ...prev[id], [key]: value } }));
   }
 
@@ -456,9 +399,9 @@ export default function SettingsSection({
   }
 
   return (
-    <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10, fontSize: 12 }}>
+    <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10, fontSize: 12, display: "flex", flexDirection: "column", height: "100%", minHeight: 0, boxSizing: "border-box" }}>
       {/* Tab 导航 */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap", flexShrink: 0 }}>
         {TABS.map((t) => (
           <button
             key={t.key}
@@ -481,6 +424,7 @@ export default function SettingsSection({
         ))}
       </div>
 
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
       {/* ── 场景模式 ── */}
       {tab === "scene" && (
         <div>
@@ -666,85 +610,44 @@ export default function SettingsSection({
         </div>
       )}
 
-      {/* ── ASR 转写 ── */}
+      {/* ── ASR 转写：选用引擎 + 输入增益；安装模型在独立页 ── */}
       {tab === "asr" && (
         <div>
           <h3 style={groupTitle}>转写引擎</h3>
-          <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-            <select
-              value={clientEngine}
-              onChange={(e) => {
-                const v = e.target.value;
-                setClientEngine(v);
-                // 同步到场景自定义参数：pipeline 实际按场景引擎运行，保持两处一致
-                setSceneCustom((s) => ({ ...s, client_engine: v }));
-              }}
-              style={inputStyle}
-            >
-              {modelOptions(clientEngine)}
-            </select>
-            <select
-              value={userEngine}
-              onChange={(e) => {
-                const v = e.target.value;
-                setUserEngine(v);
-                // 同步到场景自定义参数（同左）
-                setSceneCustom((s) => ({ ...s, user_engine: v }));
-              }}
-              style={inputStyle}
-            >
-              {modelOptions(userEngine)}
-            </select>
+          <div style={{ display: "flex", gap: 10, marginBottom: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ color: "var(--text-2)" }}>客户流</span>
+              <select
+                value={clientEngine}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setClientEngine(v);
+                  setSceneCustom((s) => ({ ...s, client_engine: v }));
+                }}
+                style={inputStyle}
+              >
+                {modelOptions(clientEngine)}
+              </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ color: "var(--text-2)" }}>我的通道</span>
+              <select
+                value={userEngine}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setUserEngine(v);
+                  setSceneCustom((s) => ({ ...s, user_engine: v }));
+                }}
+                style={inputStyle}
+              >
+                {modelOptions(userEngine)}
+              </select>
+            </label>
+            <button type="button" onClick={onOpenModels} style={{ fontSize: 12, padding: "4px 10px", cursor: "pointer" }}>
+              打开模型管理
+            </button>
           </div>
-          <div style={hint}>实时模型持续输出字幕；平衡/准确优先模型在 VAD 段结束后输出，延迟更高。所选引擎即时生效：非自定义场景用此全局设置，自定义场景用「场景模式 → 自定义 → 我的引擎/客户引擎」。</div>
-
-          {/* 模型管理：下载 / 删除 / 磁盘占用 */}
-          <h3 style={{ ...groupTitle, marginTop: 10 }}>模型管理</h3>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {asrModels.length === 0 && <div style={{ fontSize: 12, color: "var(--muted)" }}>加载模型列表…</div>}
-            {asrModels.map((m) => {
-              const prog = modelProgress[m.id];
-              const active = modelBusy === m.id || (prog && (prog.stage === "downloading" || prog.stage === "extracting"));
-              return (
-                <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, border: "1px solid var(--border)", borderRadius: 8, padding: "6px 10px", background: "var(--surface-2)" }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 700 }}>
-                      {m.label}
-                      {m.installed ? <span style={{ color: "var(--live)", marginLeft: 6 }}>✓ 已安装</span> : <span style={{ color: "var(--brief)", marginLeft: 6 }}>未安装</span>}
-                    </div>
-                    <div style={{ color: "var(--muted)", marginTop: 2 }}>
-                      {m.description} · 约 {m.download_size_mb ?? "?"} MB
-                      {m.size_mb ? ` · 已占用 ${m.size_mb} MB` : ""}
-                    </div>
-                    {active && prog && (prog.stage === "downloading" || prog.stage === "extracting") && (
-                      <div style={{ marginTop: 4, height: 5, background: "var(--border)", borderRadius: 3, overflow: "hidden" }}>
-                        <div style={{ height: "100%", width: `${prog.percent ?? 0}%`, background: "var(--live)", transition: "width 0.4s linear" }} />
-                      </div>
-                    )}
-                    {prog && prog.stage === "error" && <div style={{ color: "var(--danger)", marginTop: 2 }}>下载失败: {prog.message}</div>}
-                    {prog && prog.stage === "cancelled" && <div style={{ color: "var(--brief)", marginTop: 2 }}>已取消下载，可重新下载</div>}
-                    {prog && prog.stage === "done" && <div style={{ color: "var(--live)", marginTop: 2 }}>安装完成</div>}
-                  </div>
-                  {active && (prog?.stage === "downloading" || prog?.stage === "extracting") ? (
-                    <button onClick={() => void handleCancelDownload(m.id)} style={{ fontSize: 12, padding: "4px 10px", cursor: "pointer" }}>
-                      取消
-                    </button>
-                  ) : m.installed ? (
-                    <button onClick={() => void handleRemoveModel(m.id)} disabled={modelBusy !== null || !!active} style={{ fontSize: 12, padding: "4px 10px", cursor: "pointer" }}>
-                      删除
-                    </button>
-                  ) : (
-                    <button onClick={() => void handleDownloadModel(m.id)} disabled={modelBusy !== null || !!active} style={{ fontSize: 12, padding: "4px 10px", cursor: "pointer" }}>
-                      {active ? "下载中…" : "下载"}
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-            <div style={hint}>
-              下载在后台进行，可切换页面继续使用；安装/删除前需先停止监听。Qwen3-ASR 由官方 GitHub release 提供（HF 仓库为受限私有）。
-            </div>
-          </div>
+          <div style={hint}>实时模型持续输出字幕；平衡/准确优先模型在 VAD 段结束后输出。未安装的引擎请到「模型管理」下载。非自定义场景用此全局设置，自定义场景用「场景模式 → 自定义」。</div>
 
           <h3 style={{ ...groupTitle, marginTop: 10 }}>麦克风输入电平</h3>
           <label style={labelBlock}>
@@ -752,34 +655,13 @@ export default function SettingsSection({
             <input type="number" min={0} max={24} step={1} value={inputGainDb} onChange={(e) => setInputGainDb(Math.min(24, Math.max(0, Number(e.target.value) || 0)))} style={numStyle} /> dB
           </label>
           <div style={hint}>默认 +12dB；无线麦双声道自动选择电平较高的通道，并在放大后限幅，避免与静音通道平均导致声音变小。</div>
+        </div>
+      )}
 
-          <h3 style={{ ...groupTitle, marginTop: 10 }}>专业术语增强</h3>
-          <label style={labelBlock}>
-            <input type="checkbox" checked={terminologyEnabled} onChange={(e) => setTerminologyEnabled(e.target.checked)} /> 启用会议术语上下文
-          </label>
-          <textarea
-            value={terminologyTerms}
-            onChange={(e) => setTerminologyTerms(e.target.value)}
-            disabled={!terminologyEnabled}
-            placeholder={"每行一个术语，例如：\nTalkSage\nParaformer\n向量数据库"}
-            rows={5}
-            style={{ ...inputStyle, width: "100%", resize: "vertical", opacity: terminologyEnabled ? 1 : 0.5 }}
-          />
-          <label style={{ ...labelBlock, opacity: terminologyEnabled ? 1 : 0.5 }}>
-            热词强度：
-            <input type="number" min={0} max={10} step={0.1} disabled={!terminologyEnabled} value={hotwordScore} onChange={(e) => setHotwordScore(Math.min(10, Math.max(0, Number(e.target.value) || 0)))} style={numStyle} />
-          </label>
-          <textarea
-            value={terminologyCorrections}
-            onChange={(e) => setTerminologyCorrections(e.target.value)}
-            disabled={!terminologyEnabled}
-            placeholder={"常见误识别 => 标准术语，例如：\n怕热佛母 => Paraformer"}
-            rows={4}
-            style={{ ...inputStyle, width: "100%", resize: "vertical", opacity: terminologyEnabled ? 1 : 0.5 }}
-          />
-          <div style={hint}>Zipformer 与 Qwen3-ASR 会使用模型热词；Paraformer 使用纠错表。纠错同步作用于 partial/final，不增加模型推理延迟。修改后下次监听生效。</div>
-
-          <h3 style={{ ...groupTitle, marginTop: 10 }}>识别灵敏度（VAD）</h3>
+      {/* ── 音频处理 ── */}
+      {tab === "audio" && (
+        <div>
+          <h3 style={groupTitle}>识别灵敏度（VAD）</h3>
           <select
             value={vadPreset}
             onChange={(e) => setVadPreset(e.target.value)}
@@ -823,7 +705,38 @@ export default function SettingsSection({
             />
             ms（0 = 不限制）
           </label>
-          <div style={hint}>噪音会话中偶发的"哒/咔"等短段会污染转写与历史；设为 400~800ms 可在不丢正常语句的前提下滤掉它们（下次监听生效）。</div>
+          <div style={hint}>噪音会话中偶发的「哒/咔」等短段会污染转写与历史；设为 400~800ms 可在不丢正常语句的前提下滤掉它们（下次监听生效）。</div>
+        </div>
+      )}
+
+      {/* ── 术语纠错 ── */}
+      {tab === "terminology" && (
+        <div>
+          <h3 style={groupTitle}>专业术语增强</h3>
+          <label style={labelBlock}>
+            <input type="checkbox" checked={terminologyEnabled} onChange={(e) => setTerminologyEnabled(e.target.checked)} /> 启用会议术语上下文
+          </label>
+          <textarea
+            value={terminologyTerms}
+            onChange={(e) => setTerminologyTerms(e.target.value)}
+            disabled={!terminologyEnabled}
+            placeholder={"每行一个术语，例如：\nTalkSage\nParaformer\n向量数据库"}
+            rows={5}
+            style={{ ...inputStyle, width: "100%", resize: "vertical", opacity: terminologyEnabled ? 1 : 0.5 }}
+          />
+          <label style={{ ...labelBlock, opacity: terminologyEnabled ? 1 : 0.5 }}>
+            热词强度：
+            <input type="number" min={0} max={10} step={0.1} disabled={!terminologyEnabled} value={hotwordScore} onChange={(e) => setHotwordScore(Math.min(10, Math.max(0, Number(e.target.value) || 0)))} style={numStyle} />
+          </label>
+          <textarea
+            value={terminologyCorrections}
+            onChange={(e) => setTerminologyCorrections(e.target.value)}
+            disabled={!terminologyEnabled}
+            placeholder={"常见误识别 => 标准术语，例如：\n怕热佛母 => Paraformer"}
+            rows={4}
+            style={{ ...inputStyle, width: "100%", resize: "vertical", opacity: terminologyEnabled ? 1 : 0.5 }}
+          />
+          <div style={hint}>Zipformer 与 Qwen3-ASR 会使用模型热词；Paraformer 使用纠错表。纠错同步作用于 partial/final，不增加模型推理延迟。修改后下次监听生效。</div>
         </div>
       )}
 
@@ -1029,17 +942,19 @@ export default function SettingsSection({
           <div style={hint}>未配置密钥时，术语/翻译插件将只做本地检测（不产生最终结果）。</div>
         </div>
       )}
+      </div>
 
-      {/* 底部操作 */}
+      {/* 底部操作：固定在面板底部，无需滚到页尾 */}
       <div
         style={{
-          marginTop: 14,
+          marginTop: 10,
           borderTop: "1px solid var(--border)",
           paddingTop: 10,
           display: "flex",
           gap: 8,
           alignItems: "center",
           flexWrap: "wrap",
+          flexShrink: 0,
         }}
       >
         <button onClick={handleSave} disabled={saving} style={{ fontSize: 12 }}>

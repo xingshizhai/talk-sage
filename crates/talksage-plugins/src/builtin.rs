@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::brief_retriever::BriefRetrieverPluginDef;
 use crate::conversation_metrics::ConversationMetricsPlugin;
 use crate::cross_stream_dedup::CrossStreamDedupPlugin;
+use crate::key_point_extractor::KeyPointExtractorPlugin;
 use crate::registry::{
     config_type_name, CapabilityAvailability, HookRegistry, Plugin, PluginCategory,
     PluginConfig, PluginConfigIssue, PluginRegistration, RegistrationStatus,
@@ -49,6 +50,7 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
         Box::new(TermExplainerPluginDef),
         Box::new(TranslatorPluginDef),
         Box::new(BriefRetrieverPluginDef),
+        Box::new(KeyPointExtractorPlugin),
         // finalizer：session_quality 必须在 webhook 之前 —— 它把质量 meta 写进
         // 会话行，webhook 要重新读这一行来拼载荷
         Box::new(SessionQualityPlugin),
@@ -435,11 +437,11 @@ mod tests {
         assert_eq!(hooks.filter_count() + 1, all.filter_count(), "关掉一个插件应少一个 filter");
     }
 
-    /// 阶段 5：三个分析插件必须进注册表，service.rs 不再手工装配。
+    /// 阶段 5：分析类插件必须进注册表，service.rs 不再手工装配。
     #[test]
     fn analysis_plugins_are_in_the_registry() {
         let ids: Vec<&str> = builtin_plugins().iter().map(|p| p.id()).collect();
-        for want in ["term_explainer", "translator", "brief_retriever"] {
+        for want in ["term_explainer", "translator", "brief_retriever", "key_point_extractor"] {
             assert!(ids.contains(&want), "缺少插件 {want}，实际: {ids:?}");
         }
     }

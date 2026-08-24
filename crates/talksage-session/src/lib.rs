@@ -1,6 +1,6 @@
 //! TalkSage v2 会话持久化：SQLite（rusqlite bundled）。
 //!
-//! 表：sessions（含 meta JSON）/ segments（含 duration_ms/rms）/ terms / translations。
+//! 表：sessions（含 meta JSON）/ segments（含 duration_ms/rms）/ terms / translations / key_points。
 //! SessionStore 线程安全（内部 Mutex<Connection>），可由 pipeline 事件线程写入。
 //!
 //! `sessions.meta` 保存会话级统计与质量评估（SessionMeta），
@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use anyhow::{anyhow, Result};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use talksage_core::TranscriptSegment;
+use talksage_core::{KeyPointRecord, TranscriptSegment};
 
 /// 由会话详情构建会议结束 webhook payload（借鉴 Call.md workflow-webhook）。
 pub fn build_webhook_payload(detail: &SessionDetail) -> serde_json::Value {
@@ -52,6 +52,7 @@ pub fn build_webhook_payload(detail: &SessionDetail) -> serde_json::Value {
             "trio": detail.trio.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
             "terms": detail.terms,
             "translations": detail.translations,
+            "key_points": detail.key_points,
         },
         "transcript": detail
             .segments
@@ -229,6 +230,15 @@ pub fn export_markdown(detail: &SessionDetail) -> String {
         None => md.push_str("（未生成）\n"),
     }
 
+    md.push_str("\n## 会中要点\n\n");
+    if detail.key_points.is_empty() {
+        md.push_str("（无）\n");
+    } else {
+        for kp in &detail.key_points {
+            md.push_str(&format!("- **{}** {}\n", kp.category.label_zh(), kp.content));
+        }
+    }
+
     // 转写
     md.push_str("## 转写\n\n");
     for s in &detail.segments {
@@ -289,6 +299,7 @@ pub struct SessionDetail {
     pub segments: Vec<TranscriptSegment>,
     pub terms: Vec<String>,
     pub translations: Vec<String>,
+    pub key_points: Vec<KeyPointRecord>,
     pub notes: Option<String>,
     /// 三段式智能纪要（JSON 字符串；借鉴 Call.md summary-generator）。
     pub trio: Option<String>,
@@ -592,10 +603,20 @@ impl SessionStore {
                 content TEXT NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES sessions(id)
             );
+            CREATE TABLE IF NOT EXISTS key_points (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                result_id TEXT NOT NULL,
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                ts_ms INTEGER NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id)
+            );
             CREATE INDEX IF NOT EXISTS idx_segments_text ON segments(text);
             CREATE INDEX IF NOT EXISTS idx_segments_session ON segments(session_id);
             CREATE INDEX IF NOT EXISTS idx_terms_session ON terms(session_id);
             CREATE INDEX IF NOT EXISTS idx_translations_session ON translations(session_id);
+            CREATE INDEX IF NOT EXISTS idx_key_points_session ON key_points(session_id);
             ",
         )?;
         // 迁移（旧库）：sessions.meta / sessions.trio / segments.duration_ms / segments.rms
@@ -716,6 +737,16 @@ impl SessionStore {
         Ok(())
     }
 
+    /// 追加会中要点。
+    pub fn add_key_point(&self, session_id: i64, kp: &KeyPointRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO key_points (session_id, result_id, category, content, ts_ms) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![session_id, kp.result_id, kp.category.as_str(), kp.content, kp.ts_ms],
+        )?;
+        Ok(())
+    }
+
     /// 保存纪要。
     pub fn set_notes(&self, session_id: i64, notes: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -736,12 +767,13 @@ impl SessionStore {
         Ok(())
     }
 
-    /// 删除会话及其全部关联数据（段/术语/翻译）。
+    /// 删除会话及其全部关联数据（段/术语/翻译/要点）。
     pub fn delete_session(&self, session_id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM segments WHERE session_id = ?1", [session_id])?;
         conn.execute("DELETE FROM terms WHERE session_id = ?1", [session_id])?;
         conn.execute("DELETE FROM translations WHERE session_id = ?1", [session_id])?;
+        conn.execute("DELETE FROM key_points WHERE session_id = ?1", [session_id])?;
         conn.execute("DELETE FROM sessions WHERE id = ?1", [session_id])?;
         Ok(())
     }
@@ -864,6 +896,23 @@ impl SessionStore {
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
         };
+        let key_points: Vec<KeyPointRecord> = {
+            let mut stmt = conn.prepare(
+                "SELECT result_id, category, content, ts_ms FROM key_points WHERE session_id = ?1 ORDER BY id",
+            )?;
+            let rows = stmt
+                .query_map([session_id], |r| {
+                    let category_raw: String = r.get(1)?;
+                    Ok(KeyPointRecord {
+                        result_id: r.get(0)?,
+                        category: talksage_core::KeyPointCategory::from_name(&category_raw),
+                        content: r.get(2)?,
+                        ts_ms: r.get(3)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
         Ok(SessionDetail {
             id,
             started_at,
@@ -871,6 +920,7 @@ impl SessionStore {
             segments,
             terms,
             translations,
+            key_points,
             notes,
             trio,
             meta: meta_raw.as_deref().and_then(SessionMeta::from_json),
@@ -987,6 +1037,29 @@ mod tests {
         assert_eq!(detail.translations.len(), 1);
         assert_eq!(detail.started_at, 111);
         assert_eq!(detail.ended_at, Some(222));
+    }
+
+    #[test]
+    fn key_points_persist_and_appear_in_detail() {
+        let s = store();
+        let id = s.start_session(1).unwrap();
+        s.add_key_point(
+            id,
+            &KeyPointRecord {
+                result_id: "kp-1".into(),
+                category: talksage_core::KeyPointCategory::Requirement,
+                content: "We need NPI samples by Friday.".into(),
+                ts_ms: 1000,
+            },
+        )
+        .unwrap();
+        let detail = s.get_session(id).unwrap();
+        assert_eq!(detail.key_points.len(), 1);
+        assert_eq!(detail.key_points[0].category, talksage_core::KeyPointCategory::Requirement);
+        assert!(detail.key_points[0].content.contains("NPI"));
+        let md = export_markdown(&detail);
+        assert!(md.contains("会中要点"));
+        assert!(md.contains("要求"));
     }
 
     #[test]
@@ -1155,6 +1228,16 @@ mod tests {
         s.add_segment(id, &seg(0, "我", "好的")).unwrap();
         s.add_term(id, "NPI = 新产品导入").unwrap();
         s.add_translation(id, "en_zh", "我们需要 NPI").unwrap();
+        s.add_key_point(
+            id,
+            &KeyPointRecord {
+                result_id: "kp-1".into(),
+                category: talksage_core::KeyPointCategory::Requirement,
+                content: "Need NPI".into(),
+                ts_ms: 1,
+            },
+        )
+        .unwrap();
         s.set_notes(id, "纪要内容").unwrap();
 
         // 删除后：详情查询报错、列表为空

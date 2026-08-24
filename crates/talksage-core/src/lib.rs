@@ -19,6 +19,9 @@ pub use metrics::{
 pub mod webhook;
 pub use webhook::{post_webhook, trigger_webhooks, validate_webhook_url, WebhookResult};
 
+pub mod key_points;
+pub use key_points::{extract_key_points, ExtractedKeyPoint, KeyPointAggregator, KeyPointRecord};
+
 /// 应用版本（与 workspace 版本保持一致）。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -136,12 +139,13 @@ pub enum DomainEvent {
         direction: TranslationDirection,
         content: String,
     },
-    /// 关键要点（需求/技术方案/问句/决策）。
+    /// 关键要点（需求/技术方案/问句/决策/行动）。
     KeyPoint {
         result_id: String,
         status: ResultStatus,
         category: KeyPointCategory,
         content: String,
+        ts_ms: u64,
     },
     /// 简报检索命中。
     Brief { source: String, text: String },
@@ -273,7 +277,44 @@ pub enum KeyPointCategory {
     Technical,
     Question,
     Decision,
+    Action,
     Other,
+}
+
+impl KeyPointCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Requirement => "requirement",
+            Self::Technical => "technical",
+            Self::Question => "question",
+            Self::Decision => "decision",
+            Self::Action => "action",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn label_zh(self) -> &'static str {
+        match self {
+            Self::Requirement => "要求",
+            Self::Technical => "技术",
+            Self::Question => "问句",
+            Self::Decision => "决策",
+            Self::Action => "行动",
+            Self::Other => "其他",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "requirement" => Self::Requirement,
+            "technical" => Self::Technical,
+            "question" => Self::Question,
+            "decision" => Self::Decision,
+            "action" => Self::Action,
+            "other" => Self::Other,
+            _ => Self::Other,
+        }
+    }
 }
 
 /// 运行阶段。
@@ -543,6 +584,28 @@ mod tests {
             DomainEvent::Status {
                 stage: StatusStage::Idle,
                 message: "已停止".into()
+            }
+            .delivery_class(),
+            DeliveryClass::Replayable
+        );
+        assert_eq!(
+            DomainEvent::KeyPoint {
+                result_id: "kp-1".into(),
+                status: ResultStatus::Final,
+                category: KeyPointCategory::Requirement,
+                content: "We need NPI samples".into(),
+                ts_ms: 1,
+            }
+            .delivery_class(),
+            DeliveryClass::Durable
+        );
+        assert_eq!(
+            DomainEvent::KeyPoint {
+                result_id: "kp-1".into(),
+                status: ResultStatus::Skeleton,
+                category: KeyPointCategory::Requirement,
+                content: "…".into(),
+                ts_ms: 1,
             }
             .delivery_class(),
             DeliveryClass::Replayable

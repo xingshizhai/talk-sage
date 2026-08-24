@@ -14,6 +14,7 @@ pub mod builtin;
 pub mod conversation_metrics;
 pub mod session_quality;
 pub mod webhook;
+pub mod key_point_extractor;
 
 pub use builtin::{
     analysis_plugin_ids, build_registry, build_registry_with_report, builtin_plugins,

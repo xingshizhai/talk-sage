@@ -1062,6 +1062,29 @@ mod tests {
     }
 
     #[test]
+    fn persist_final_key_points() {
+        let (svc, _dir) = temp_service(true);
+        let store = svc.sessions().unwrap().clone();
+        let sid = store.start_session(1).unwrap();
+        let stats = Arc::new(Mutex::new(Vec::new()));
+        let texts = Arc::new(Mutex::new(Vec::new()));
+        let mut writer = SessionWriter::start(store.clone(), sid, stats, texts).unwrap();
+        let tx = writer.sender();
+        tx.enqueue(&DomainEvent::KeyPoint {
+            result_id: "kp-1".into(),
+            status: talksage_core::ResultStatus::Final,
+            category: talksage_core::KeyPointCategory::Requirement,
+            content: "We need NPI samples".into(),
+            ts_ms: 42,
+        });
+        writer.finish().unwrap();
+        let detail = store.get_session(sid).unwrap();
+        assert_eq!(detail.key_points.len(), 1);
+        assert_eq!(detail.key_points[0].ts_ms, 42);
+        assert!(detail.key_points[0].content.contains("NPI"));
+    }
+
+    #[test]
     fn build_live_config_attaches_engine_pool() {
         let (svc, _dir) = temp_service(false);
         match svc.build_live_config(&StartListen::desktop()) {

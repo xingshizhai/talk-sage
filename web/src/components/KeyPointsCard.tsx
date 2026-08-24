@@ -33,12 +33,12 @@ export default function KeyPointsCard({ points }: { points: readonly KeyPoint[] 
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--pad)", display: "flex", flexDirection: "column", gap: 9 }}>
         {points.length === 0 && (
-          <div style={{ color: "var(--muted)", fontSize: 13 }}>会议中的问句、要求、决策将聚合在这里…</div>
+          <div style={{ color: "var(--muted)", fontSize: 13 }}>会中要点由插件抽取；关闭插件或听写场景下这里为空…</div>
         )}
         {points.map((p, i) => {
           const c = KIND_COLOR[p.kind] ?? KIND_COLOR["其他"];
           return (
-            <div key={i} style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
+            <div key={p.resultId || i} style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
               <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 5, background: c.bg, color: c.fg }}>
                 {p.kind}
               </span>

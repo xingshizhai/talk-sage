@@ -615,7 +615,7 @@ async fn generate_notes_api(
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "会话不存在" }))).into_response();
     };
     let gen = NotesGenerator::new(llm);
-    match gen.generate(&detail.segments, &detail.terms, &detail.translations, &template) {
+    match gen.generate(&detail.segments, &detail.terms, &detail.translations, &detail.key_points, &template) {
         Ok(notes) => {
             let _ = state.sessions.set_notes(id, &notes);
             (StatusCode::OK, Json(serde_json::json!({ "notes": notes }))).into_response()
@@ -641,7 +641,7 @@ async fn generate_trio_notes_api(
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "会话不存在" }))).into_response();
     };
     let gen = talksage_notes::TrioGenerator::new(llm);
-    match gen.generate(&detail.segments, body.meeting_name.as_deref(), body.meeting_description.as_deref()) {
+    match gen.generate(&detail.segments, &detail.key_points, body.meeting_name.as_deref(), body.meeting_description.as_deref()) {
         Ok(trio) => {
             let json = serde_json::to_value(&trio).unwrap_or_default();
             let _ = state.sessions.set_trio(id, &json.to_string());
@@ -668,7 +668,7 @@ async fn export_session_api(State(state): State<ServerState>, headers: axum::htt
         .into_response()
 }
 
-/// LLM 提炼核心要点（历史详情；无 LLM 配置时 400）。
+/// 整理会中已落库要点（历史详情；无 LLM 配置时 400）。
 async fn generate_highlights_api(State(state): State<ServerState>, headers: axum::http::HeaderMap, AxumPath(id): AxumPath<i64>) -> impl IntoResponse {
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
@@ -679,7 +679,7 @@ async fn generate_highlights_api(State(state): State<ServerState>, headers: axum
     let Ok(detail) = state.sessions.get_session(id) else {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "会话不存在" }))).into_response();
     };
-    match talksage_notes::generate_highlights(&detail.segments, &llm) {
+    match talksage_notes::generate_highlights(&detail.key_points, &detail.segments, &llm) {
         Ok(points) => (StatusCode::OK, Json(serde_json::json!({ "points": points }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }

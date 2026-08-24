@@ -663,7 +663,7 @@ fn generate_notes(session_id: i64, template_id: String, state: tauri::State<'_, 
     let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
     let gen = talksage_notes::NotesGenerator::new(llm);
     let notes = gen
-        .generate(&detail.segments, &detail.terms, &detail.translations, &template)
+        .generate(&detail.segments, &detail.terms, &detail.translations, &detail.key_points, &template)
         .map_err(|e| format!("纪要生成失败: {e}"))?;
     state
         .sessions
@@ -681,7 +681,7 @@ fn generate_trio_notes(session_id: i64, meeting_name: Option<String>, meeting_de
     let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
     let gen = talksage_notes::TrioGenerator::new(llm);
     let trio = gen
-        .generate(&detail.segments, meeting_name.as_deref(), meeting_description.as_deref())
+        .generate(&detail.segments, &detail.key_points, meeting_name.as_deref(), meeting_description.as_deref())
         .map_err(|e| format!("智能纪要生成失败: {e}"))?;
     let json = serde_json::to_value(&trio).map_err(|e| e.to_string())?;
     state
@@ -704,14 +704,14 @@ fn export_session_markdown(session_id: i64, state: tauri::State<'_, AppState>) -
     Ok(serde_json::json!({ "path": path.display().to_string(), "content": content }))
 }
 
-/// LLM 提炼核心要点（历史详情；无 LLM 时返回错误，前端提示）。
+/// 整理会中已落库要点（历史详情；无 LLM 时返回错误，前端提示）。
 #[tauri::command]
 fn generate_highlights(session_id: i64, state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
     let Some(llm) = TalkSageService::build_llm(&state.config) else {
         return Err("未配置 LLM（请设置 llm.providers.<provider>.api_key）".into());
     };
     let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
-    talksage_notes::generate_highlights(&detail.segments, &llm).map_err(|e| format!("要点提炼失败: {e}"))
+    talksage_notes::generate_highlights(&detail.key_points, &detail.segments, &llm).map_err(|e| format!("要点整理失败: {e}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

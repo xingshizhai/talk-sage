@@ -128,10 +128,17 @@ fn zh_pipeline(root: &Path, wav: &Path, min_commit_ms: u64) -> LivePipelineConfi
         engine_pool: None,
         hooks: talksage_plugins::build_registry(
             &talksage_plugins::builtin_plugins(),
-            &std::collections::HashMap::from([(
-                "short_segment".to_string(),
-                serde_json::json!({ "min_ms": min_commit_ms }),
-            )]),
+            &std::collections::HashMap::from([
+                (
+                    "short_segment".to_string(),
+                    serde_json::json!({ "min_ms": min_commit_ms }),
+                ),
+                // 特征化测的是转写/指标事件序列；要点抽取是新增分析层，不纳入 golden。
+                (
+                    "key_point_extractor".to_string(),
+                    serde_json::json!({ "enabled": false }),
+                ),
+            ]),
             &talksage_plugins::PluginContext::new(),
         ),
     }

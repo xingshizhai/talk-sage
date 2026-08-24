@@ -1,7 +1,7 @@
 //! TalkSage v2 纪要模板化。
 //!
 //! `Template`：结构化纪要模板（标题 + 分节指令 + 输出格式），
-//! `NotesGenerator`：基于会话转写/术语/翻译，按模板分节指令生成 Markdown 纪要。
+//! `NotesGenerator`：以会中已落库要点为整理依据，转写仅供核对说话人。
 //!
 //! 结构参考 Meetily summary/templates（title/instruction/format/item_format）。
 
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use talksage_core::TranscriptSegment;
+use talksage_core::{KeyPointRecord, TranscriptSegment};
 use talksage_llm::LLMProvider;
 
 /// 分节输出格式。
@@ -233,6 +233,7 @@ impl NotesGenerator {
         transcript: &[TranscriptSegment],
         terms: &[String],
         translations: &[String],
+        key_points: &[KeyPointRecord],
         template: &Template,
     ) -> Result<String> {
         template.validate()?;
@@ -240,8 +241,8 @@ impl NotesGenerator {
             return Err(anyhow!("会话无转写内容，无法生成纪要"));
         }
         let system = format!(
-            "你是中英双语商务会议秘书。根据转写与辅助信息，按给定模板结构生成简洁、条理的 Markdown 会议纪要。\
-             使用中文输出（除非内容是专有名词/缩写）。遵守模板分节与条目格式。"
+            "你是中英双语商务会议秘书。根据会中已抽取的要点整理成纪要，转写仅供核对说话人与上下文。\
+             不要从转写重新抽取一套平行要点。使用中文输出（除非内容是专有名词/缩写）。遵守模板分节与条目格式。"
         );
         let transcript_block = transcript
             .iter()
@@ -250,11 +251,13 @@ impl NotesGenerator {
             .join("\n");
         let terms_block = if terms.is_empty() { "（无）".to_string() } else { terms.join("；") };
         let translations_block = if translations.is_empty() { "（无）".to_string() } else { translations.join("\n") };
+        let key_points_block = format_key_points(key_points);
 
         let prompt = format!(
-            "## 模板\n{}\n\n## 模板分节指令\n{}\n\n## 转写\n{}\n\n## 术语\n{}\n\n## 翻译参考\n{}\n\n请生成纪要。",
+            "## 模板\n{}\n\n## 模板分节指令\n{}\n\n## 会中要点（整理依据）\n{}\n\n## 转写（核对用）\n{}\n\n## 术语\n{}\n\n## 翻译参考\n{}\n\n请生成纪要。",
             template.to_markdown_structure(),
             template.to_instructions(),
+            key_points_block,
             transcript_block,
             terms_block,
             translations_block,
@@ -265,6 +268,17 @@ impl NotesGenerator {
         }
         Ok(notes.trim().to_string())
     }
+}
+
+fn format_key_points(key_points: &[KeyPointRecord]) -> String {
+    if key_points.is_empty() {
+        return "（无）".into();
+    }
+    key_points
+        .iter()
+        .map(|k| format!("- [{}] {}", k.category.label_zh(), k.content))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ── 三段式智能纪要（借鉴 Call.md summary-generator）──────────────────
@@ -293,20 +307,19 @@ pub struct TrioGenerator {
     llm: Arc<dyn LLMProvider>,
 }
 
-const OVERVIEW_SYSTEM: &str = "你是一名资深会议纪要秘书。根据转写与会议信息，写一段话的叙事概述。\
+const OVERVIEW_SYSTEM: &str = "你是一名资深会议纪要秘书。根据会中已抽取的要点整理一段话叙事概述。\
 规则：单段流畅叙述，不用列表/标题/编号；3–5 句、不超过 120 字；第三人称过去时；\
-提到参会者与其贡献但保持概括，不逐字引用、不添加评价；只输出概述段落本身。";
+以会中要点为主要依据，转写仅用于核对说话人；不逐字引用、不添加评价、不发明要点中没有的事实；只输出概述段落本身。";
 
-const KEY_POINTS_SYSTEM: &str = "你是一名资深会议纪要秘书。根据转写提取关键讨论要点，按主题分组。\
-规则：识别 2–5 个主要主题；每条要点归属提出人（格式：「[我]/[客户] 说了/确认了/提出了…」）；\
-每条一句话、具体不空泛；只陈述事实，不加解读；按实际内容定数量，不强行填充。\
+const KEY_POINTS_SYSTEM: &str = "你是一名资深会议纪要秘书。在会中已抽取要点的基础上合并主题并归属发言人。\
+规则：识别 2–5 个主要主题；合并重复项；每条要点归属提出人（格式：「[我]/[客户] 说了/确认了/提出了…」）；\
+每条一句话、具体不空泛；只陈述事实；不要从转写另抽一套未出现在会中要点里的内容。\
 只输出如下 JSON，不要任何其他内容：\
 {\"key_points\":[{\"topic\":\"主题\",\"points\":[\"说话人说了什么具体内容。\"]}]}";
 
-const ACTION_ITEMS_SYSTEM: &str = "你是一名资深会议分析师。从转写中提取所有会议后需要处理的事项。\
+const ACTION_ITEMS_SYSTEM: &str = "你是一名资深会议分析师。从会中要点整理会后待办。\
 规则：包括分配给某人的任务、待跟进决定、未解答问题、承诺、提到的期限、下一步；\
-每条要具体可执行，含负责人（若提到）；如「客户发邮件确认方案」「周五前发 proposal」；\
-3–10 条，只收录真实行动项，不编造；无行动项则返回空数组。\
+每条要具体可执行，含负责人（若提到）；3–10 条；无行动项则返回空数组。不要编造要点中没有的事项。\
 只输出如下 JSON，不要任何其他内容：{\"checklist\":[\"行动项1\",\"行动项2\"]}";
 
 impl TrioGenerator {
@@ -318,6 +331,7 @@ impl TrioGenerator {
     pub fn generate(
         &self,
         transcript: &[TranscriptSegment],
+        key_points: &[KeyPointRecord],
         meeting_name: Option<&str>,
         meeting_description: Option<&str>,
     ) -> Result<TrioSummary> {
@@ -336,7 +350,10 @@ impl TrioGenerator {
         if let Some(d) = meeting_description.filter(|d| !d.trim().is_empty()) {
             context.push_str(&format!("会议说明：{d}\n"));
         }
-        let user_prompt = format!("{context}\n## 转写\n{transcript_block}\n\n请生成。");
+        let user_prompt = format!(
+            "{context}\n## 会中要点（整理依据）\n{}\n\n## 转写（核对说话人）\n{transcript_block}\n\n请整理。",
+            format_key_points(key_points)
+        );
 
         // 三个专精任务并行（LLM 调用相互独立）
         let (llm_a, llm_b, llm_c) = (self.llm.clone(), self.llm.clone(), self.llm.clone());
@@ -377,24 +394,35 @@ fn extract_json(text: &str) -> Option<serde_json::Value> {
     serde_json::from_str(&t[start..=end]).ok()
 }
 
-// ── LLM 要点提炼（高质量核心内容；本地规则之外的补充）──────────────────
+// ── LLM 要点整理（合并会中已落库要点；旧会话无要点时才退回转写）──────────
 
-const HIGHLIGHTS_SYSTEM: &str = "你是一名会议分析师。根据转写提炼这场会议的核心要点。\
-规则：提炼 5–10 条，覆盖主要讨论内容、关键决定、明确需求、行动项、数字与时间承诺；\
-每条一句话、具体可执行或可引用，不含客套；避免重复；按重要性排序。\
+const HIGHLIGHTS_SYSTEM: &str = "你是一名会议分析师。你的任务是整理已有的会中要点，而不是从转写重新抽取。\
+规则：合并重复与同一主题；按重要性排序；每条一句话、具体可执行或可引用；不含客套；5–10 条（来源不足则可更少）。\
 只输出如下 JSON，不要任何其他内容：{\"points\":[\"要点1\",\"要点2\"]}";
 
-/// 用 LLM 提炼核心要点（无 LLM 时返回 Err，调用方退回本地规则）。
-pub fn generate_highlights(transcript: &[TranscriptSegment], llm: &Arc<dyn LLMProvider>) -> Result<Vec<String>> {
-    if transcript.is_empty() {
-        return Err(anyhow!("会话无转写内容"));
+/// 整理会中要点。有落库要点时只依据要点；旧会话没有要点时才退回转写。
+pub fn generate_highlights(
+    key_points: &[KeyPointRecord],
+    transcript: &[TranscriptSegment],
+    llm: &Arc<dyn LLMProvider>,
+) -> Result<Vec<String>> {
+    if key_points.is_empty() && transcript.is_empty() {
+        return Err(anyhow!("会话无要点也无转写，无法整理"));
     }
-    let block = transcript
-        .iter()
-        .map(|s| format!("[{}] {}", s.speaker_label, s.text))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let raw = llm.complete(&format!("## 转写\n{block}\n\n请提炼核心要点。"), HIGHLIGHTS_SYSTEM)?;
+    let user = if key_points.is_empty() {
+        let block = transcript
+            .iter()
+            .map(|s| format!("[{}] {}", s.speaker_label, s.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("## 转写（旧会话，无会中要点）\n{block}\n\n请整理核心要点。不要发明不存在的事实。")
+    } else {
+        format!(
+            "## 会中要点\n{}\n\n请合并主题、去重并按重要性排序。不要新增这些要点之外的内容。",
+            format_key_points(key_points)
+        )
+    };
+    let raw = llm.complete(&user, HIGHLIGHTS_SYSTEM)?;
     extract_json(&raw)
         .and_then(|v| v.get("points").cloned())
         .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
@@ -404,6 +432,7 @@ pub fn generate_highlights(transcript: &[TranscriptSegment], llm: &Arc<dyn LLMPr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use talksage_core::KeyPointRecord;
     use talksage_llm::MockProvider;
 
     #[test]
@@ -451,7 +480,7 @@ mod tests {
             TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), speaker_attribution: None, text: "我们确认可以安排。".into(), is_partial: false, ts_ms: 1, duration_ms: 400, rms: 0.15 },
         ];
         let t = get_template("standard_meeting").unwrap();
-        let notes = gen.generate(&segs, &["NPI = 新产品导入".into()], &[], &t).unwrap();
+        let notes = gen.generate(&segs, &["NPI = 新产品导入".into()], &[], &[], &t).unwrap();
         assert!(notes.contains("会议纪要"));
         assert!(notes.contains("NPI"));
     }
@@ -461,7 +490,7 @@ mod tests {
         let mock = MockProvider { response: "x".into() };
         let gen = NotesGenerator::new(Arc::new(mock));
         let t = get_template("standard_meeting").unwrap();
-        assert!(gen.generate(&[], &[], &[], &t).is_err());
+        assert!(gen.generate(&[], &[], &[], &[], &t).is_err());
     }
 
     #[test]
@@ -475,7 +504,7 @@ mod tests {
             TranscriptSegment { speaker_id: 1, speaker_label: "客户".into(), speaker_attribution: None, text: "We need NPI samples by Friday.".into(), is_partial: false, ts_ms: 0, duration_ms: 500, rms: 0.2 },
             TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), speaker_attribution: None, text: "我们确认可以安排。".into(), is_partial: false, ts_ms: 1, duration_ms: 400, rms: 0.15 },
         ];
-        let trio = gen.generate(&segs, Some("NPI 评审"), Some("确认交付时间")).unwrap();
+        let trio = gen.generate(&segs, &[], Some("NPI 评审"), Some("确认交付时间")).unwrap();
         assert!(!trio.short_overview.trim().is_empty(), "概述为空");
         assert_eq!(trio.key_points.len(), 1);
         assert_eq!(trio.key_points[0].topic, "交付方案");
@@ -487,7 +516,7 @@ mod tests {
         let mock = MockProvider { response: "抱歉，我无法生成".into() };
         let gen = TrioGenerator::new(Arc::new(mock));
         let segs = vec![TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), speaker_attribution: None, text: "hi".into(), is_partial: false, ts_ms: 0, duration_ms: 100, rms: 0.1 }];
-        assert!(gen.generate(&segs, None, None).is_err());
+        assert!(gen.generate(&segs, &[], None, None).is_err());
     }
 
     #[test]
@@ -504,7 +533,7 @@ mod tests {
         };
         let llm: Arc<dyn LLMProvider> = Arc::new(mock);
         let segs = vec![TranscriptSegment { speaker_id: 1, speaker_label: "客户".into(), speaker_attribution: None, text: "We need NPI samples by Friday.".into(), is_partial: false, ts_ms: 0, duration_ms: 500, rms: 0.2 }];
-        let points = generate_highlights(&segs, &llm).unwrap();
+        let points = generate_highlights(&[], &segs, &llm).unwrap();
         assert_eq!(points.len(), 2);
         assert!(points[0].contains("周五"));
     }
@@ -513,12 +542,38 @@ mod tests {
     fn highlights_reject_invalid_json() {
         let llm: Arc<dyn LLMProvider> = Arc::new(MockProvider { response: "抱歉，无法提炼".into() });
         let segs = vec![TranscriptSegment { speaker_id: 0, speaker_label: "我".into(), speaker_attribution: None, text: "hi".into(), is_partial: false, ts_ms: 0, duration_ms: 100, rms: 0.1 }];
-        assert!(generate_highlights(&segs, &llm).is_err());
+        assert!(generate_highlights(&[], &segs, &llm).is_err());
     }
 
     #[test]
     fn highlights_empty_transcript_rejected() {
         let llm: Arc<dyn LLMProvider> = Arc::new(MockProvider { response: "{}".into() });
-        assert!(generate_highlights(&[], &llm).is_err());
+        assert!(generate_highlights(&[], &[], &llm).is_err());
+    }
+
+    #[test]
+    fn highlights_prefer_stored_key_points_over_transcript() {
+        let mock = MockProvider {
+            response: r#"{"points":["合并后的 NPI 交期"]}"#.into(),
+        };
+        let llm: Arc<dyn LLMProvider> = Arc::new(mock);
+        let kps = vec![KeyPointRecord {
+            result_id: "kp-1".into(),
+            category: talksage_core::KeyPointCategory::Requirement,
+            content: "We need NPI samples by Friday.".into(),
+            ts_ms: 1,
+        }];
+        let segs = vec![TranscriptSegment {
+            speaker_id: 1,
+            speaker_label: "客户".into(),
+            speaker_attribution: None,
+            text: "这段转写不应成为抽取来源".into(),
+            is_partial: false,
+            ts_ms: 0,
+            duration_ms: 500,
+            rms: 0.2,
+        }];
+        let points = generate_highlights(&kps, &segs, &llm).unwrap();
+        assert_eq!(points, vec!["合并后的 NPI 交期"]);
     }
 }

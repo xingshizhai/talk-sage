@@ -470,7 +470,7 @@ token = ""
 - 测试：server_api.rs（真实 wav multipart → 文本；非法音频 400；缺 file 400；无鉴权 401）
 
 ### 18.7 最小提交时长（噪音短段抑制）
-- 配置：`[audio] min_segment_ms = 400`（ms；0/缺省 = 不限制），桌面设置页「ASR 转写 → 最短提交时长」可调
+- 配置：`[audio] min_segment_ms = 400`（ms；0/缺省 = 不限制），桌面设置页「音频处理 → 最短提交时长」可调
 - 管道：`LivePipelineConfig.min_commit_ms` → `StreamWorker`，`finish_speech` 中 final 段时长 < 阈值时**丢弃**（不 emit、不计数、不触发插件），日志打 `短段丢弃`
 - 动机：噪音会话中偶发的"哒/咔"短段会污染转写与历史；400~800ms 阈值可在不丢正常语句的前提下滤掉
 - 覆盖：桌面 / headless / CLI listen / import 均经 `TalkSageService` 读场景与 `min_commit_ms`；

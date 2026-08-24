@@ -56,7 +56,7 @@
 
 ### 1. Get the models
 
-**Option A — in-app (recommended)**: Settings → ASR → Model management, click "Download" per engine (stop listening first; progress is shown and downloads run in the background).
+**Option A — in-app (recommended)**: open **模型管理** in the left nav, click "Download" per engine (stop listening first; progress is shown and downloads run in the background).
 
 **Option B — command line** (batch / offline):
 
@@ -138,7 +138,7 @@ curl http://127.0.0.1:8080/v1/audio/transcriptions \
 | Session analysis | `talksage session <id>` (dump raw segments: timestamps/duration/text + duplicate-segment detection to debug repeated recognition); `--dup-only` for duplicates only |
 | Offline speaker timeline | `talksage diarize audio.wav [--speakers N]` (pyannote segmentation + WeSpeaker clustering) |
 | Fixed-corpus benchmark | `talksage bench [--dir corpus] [--engine paraformer-zh\|zipformer-en] [--limit N]` (CER/WER, RTF, first-token latency) |
-| Short-segment suppression | Settings → ASR → 最短提交时长 (ms, 0 = off); or `[audio] min_segment_ms` in config |
+| Short-segment suppression | Settings → 音频处理 → 最短提交时长 (ms, 0 = off); or `[audio] min_segment_ms` in config |
 
 ### The recording → trim → replay loop
 

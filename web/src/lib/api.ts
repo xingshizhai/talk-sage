@@ -159,7 +159,7 @@ export type DomainEvent =
     }
   | { type: "term"; result_id: string; status: "skeleton" | "final"; content: string }
   | { type: "translation"; result_id: string; status: "skeleton" | "final"; direction: "zh_en" | "en_zh"; content: string }
-  | { type: "key_point"; result_id: string; status: "skeleton" | "final"; category: string; content: string }
+  | { type: "key_point"; result_id: string; status: "skeleton" | "final"; category: string; content: string; ts_ms?: number }
   | { type: "brief"; source: string; text: string }
   | { type: "state"; topic: string; open_questions: string[]; recent_decisions: string[] }
   | { type: "status"; stage: string; message: string }
@@ -303,6 +303,14 @@ export interface SegmentHit {
   ts_ms: number;
 }
 
+/** 会中落库的要点（插件 `key_point_extractor` 产出）。 */
+export interface SessionKeyPoint {
+  result_id: string;
+  category: string;
+  content: string;
+  ts_ms: number;
+}
+
 /** 会话详情。 */
 export interface SessionDetail {
   id: number;
@@ -311,6 +319,7 @@ export interface SessionDetail {
   segments: { speaker_id: number; speaker_label: string; speaker_attribution?: SpeakerAttribution; text: string; ts_ms: number; duration_ms?: number; rms?: number }[];
   terms: string[];
   translations: string[];
+  key_points: SessionKeyPoint[];
   notes: string | null;
   /** 三段式智能纪要（JSON 字符串；借鉴 Call.md）。 */
   trio: string | null;
@@ -392,7 +401,7 @@ export interface AppApi {
   generateTrioNotes(sessionId: number, meetingName?: string, meetingDescription?: string): Promise<TrioSummary>;
   /** 导出会话为 Markdown 单文件（转写 + 纪要 + 指标 + 质量；path 为桌面端落盘路径，headless 为空）。 */
   exportSessionMarkdown(sessionId: number): Promise<{ path: string; content: string }>;
-  /** LLM 提炼核心要点（历史详情；需配置 LLM）。 */
+  /** 整理会中要点（历史详情；需配置 LLM）。 */
   generateHighlights(sessionId: number): Promise<string[]>;
   /** 调试：读取最近日志（尾部 N 行）。 */
   readLogs(lines?: number): Promise<string>;

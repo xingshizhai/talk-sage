@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getApi } from "./lib/transport";
 import type { AppConfig, ConversationMetrics, DomainEvent, NotesTemplate, NudgeEvent, SceneMode, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./lib/api";
 import { TranscriptAccumulator } from "./lib/transcript";
-import { KeyPointAggregator, type KeyPoint } from "./lib/highlights";
+import { toKeyPoint, type KeyPoint } from "./lib/highlights";
 import { cssVars, type Theme } from "./lib/theme";
 import { loadTheme, saveTheme, loadTranscriptMode, saveTranscriptMode, loadAsideCollapsed, saveAsideCollapsed } from "./lib/prefs";
 import SideNav, { type HealthRow, type NavItem } from "./components/SideNav";
@@ -12,6 +12,7 @@ import KeyPointsCard from "./components/KeyPointsCard";
 import AsidePanel from "./components/AsidePanel";
 import HistorySection from "./sections/HistorySection";
 import SettingsSection from "./sections/SettingsSection";
+import ModelsSection from "./sections/ModelsSection";
 import DebugWindow from "./sections/DebugWindow";
 import type { TermItem } from "./sections/TermsSection";
 import type { BriefItem } from "./sections/BriefSection";
@@ -90,7 +91,6 @@ export default function App() {
   const listeningRef = useRef(listening);
   listeningRef.current = listening;
   const accumulatorRef = useRef(new TranscriptAccumulator());
-  const pointsRef = useRef(new KeyPointAggregator());
   const lastTranslationRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
@@ -208,11 +208,19 @@ export default function App() {
             };
           }),
         );
-        if (!ev.is_partial) {
-          if (pointsRef.current.push(ev.text, ev.ts_ms ?? Date.now())) {
-            setPoints([...pointsRef.current.getItems()]);
+      }
+      if (ev.type === "key_point") {
+        const item = toKeyPoint(ev);
+        setPoints((prev) => {
+          const idx = prev.findIndex((p) => p.resultId === item.resultId);
+          if (idx >= 0) {
+            const next = [...prev];
+            next[idx] = item;
+            return next;
           }
-        }
+          const next = [...prev, item];
+          return next.length > 80 ? next.slice(-80) : next;
+        });
       }
       if (ev.type === "term") {
         setTerms((prev) => {
@@ -263,6 +271,7 @@ export default function App() {
   const navItems: NavItem[] = [
     { key: "transcript", label: "实时转写", dot: "var(--live)", badge: String(lines.length), active: navPage === "transcript" },
     { key: "history", label: "历史会话", dot: "var(--term)", badge: String(sessions.length), active: navPage === "history" },
+    { key: "models", label: "模型管理", dot: "var(--client)", badge: "", active: navPage === "models" },
     { key: "settings", label: "设置", dot: "var(--brief)", badge: "", active: navPage === "settings" },
   ];
 
@@ -423,7 +432,6 @@ export default function App() {
   /** 新监听会话必须从空白的实时上下文开始；暂停/继续不调用此方法。 */
   const resetLiveSession = useCallback(() => {
     accumulatorRef.current.reset();
-    pointsRef.current = new KeyPointAggregator();
     lastTranslationRef.current = {};
     setLines([]);
     setPoints([]);
@@ -720,13 +728,24 @@ export default function App() {
           </section>
         )}
 
+        {navPage === "models" && (
+          <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+            <div style={{ padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
+              <b style={{ fontSize: 13 }}>模型管理</b>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "var(--pad)", display: "flex", flexDirection: "column" }}>
+              <ModelsSection listening={listening} />
+            </div>
+          </section>
+        )}
+
         {navPage === "settings" && (
           <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
             <div style={{ padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
               <b style={{ fontSize: 13 }}>设置</b>
             </div>
-            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--pad)" }}>
-              <SettingsSection config={config} onSave={handleSaveConfig} />
+            <div style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "var(--pad)", display: "flex", flexDirection: "column" }}>
+              <SettingsSection config={config} onSave={handleSaveConfig} onOpenModels={() => setNavPage("models")} />
             </div>
           </section>
         )}

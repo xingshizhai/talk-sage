@@ -8,7 +8,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use anyhow::{anyhow, Result};
-use talksage_core::{DomainEvent, ResultStatus, TranscriptSegment};
+use talksage_core::{DomainEvent, KeyPointRecord, ResultStatus, TranscriptSegment};
 use talksage_session::{SessionStore, StreamMeta};
 
 const WRITER_QUEUE_CAPACITY: usize = 256;
@@ -17,6 +17,7 @@ enum WriteCommand {
     Segment(TranscriptSegment),
     Term(String),
     Translation(String),
+    KeyPoint(KeyPointRecord),
     Stats(StreamMeta),
     Shutdown,
 }
@@ -50,6 +51,18 @@ impl WriteCommand {
                 ..
             } => Some(Self::Term(content.clone())),
             DomainEvent::Translation { content, .. } => Some(Self::Translation(content.clone())),
+            DomainEvent::KeyPoint {
+                result_id,
+                status: ResultStatus::Final,
+                category,
+                content,
+                ts_ms,
+            } => Some(Self::KeyPoint(KeyPointRecord {
+                result_id: result_id.clone(),
+                category: *category,
+                content: content.clone(),
+                ts_ms: *ts_ms,
+            })),
             DomainEvent::SessionStats {
                 speaker_label,
                 total_ms,
@@ -163,6 +176,7 @@ fn run_writer(
             WriteCommand::Translation(content) => {
                 store.add_translation(session_id, "translate", &content)
             }
+            WriteCommand::KeyPoint(kp) => store.add_key_point(session_id, &kp),
             WriteCommand::Stats(meta) => {
                 if let Ok(mut values) = stats.lock() {
                     values.push(meta);

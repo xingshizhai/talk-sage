@@ -1,9 +1,10 @@
 // 历史面板：会话列表 + 全文搜索 + 详情查看（含质量/统计/录音回放）+ 纪要生成 + 删除。
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { NotesTemplate, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "../lib/api";
 import { recordingUrl } from "../lib/transport";
 import { punctuateAndSplit } from "../lib/transcript";
+import { categoryLabel } from "../lib/highlights";
 
 function formatTime(sec: number): string {
   const d = new Date(sec * 1000);
@@ -104,9 +105,15 @@ export default function HistorySection({
   // 导出状态消息（Markdown 已保存路径 / 下载提示）
   const [exportMsg, setExportMsg] = useState("");
   const [exporting, setExporting] = useState(false);
-  // LLM 提炼的核心要点（历史详情）
+  // LLM 整理后的核心要点（历史详情）
   const [aiHighlights, setAiHighlights] = useState<string[]>([]);
   const [hlBusy, setHlBusy] = useState(false);
+  const detailIdRef = useRef(detail?.id);
+  detailIdRef.current = detail?.id;
+
+  useEffect(() => {
+    setAiHighlights([]);
+  }, [detail?.id]);
 
   /** 切换单条选择。 */
   function toggleSelect(id: number) {
@@ -454,17 +461,37 @@ export default function HistorySection({
             </div>
           )}
 
-          {/* LLM 提炼核心要点（本地规则之外的补充） */}
+          <div style={{ marginTop: 8 }}>
+            <b style={{ fontSize: 12 }}>会中要点</b>
+            {(detail.key_points ?? []).length === 0 ? (
+              <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 4 }}>无（插件未启用、听写场景，或旧会话未落库）</div>
+            ) : (
+              <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 4 }}>
+                {(detail.key_points ?? []).map((kp) => (
+                  <div key={kp.result_id} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, lineHeight: 1.6, color: "var(--text)" }}>
+                    <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 5, background: "var(--surface-2)", color: "var(--text-2)" }}>
+                      {categoryLabel(kp.category)}
+                    </span>
+                    <span>{kp.content}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 会后 LLM：整理已落库要点，不再从转写重抽 */}
           <div style={{ margin: "8px 0 4px", borderTop: "1px dashed var(--border)", paddingTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
-            <b style={{ fontSize: 12 }}>核心要点（AI）</b>
+            <b style={{ fontSize: 12 }}>核心要点（AI 整理）</b>
             <button
               onClick={async () => {
+                const id = detail.id;
                 setHlBusy(true);
                 setAiHighlights([]);
                 try {
-                  setAiHighlights(await onGenerateHighlights(detail.id));
+                  const points = await onGenerateHighlights(id);
+                  if (detailIdRef.current === id) setAiHighlights(points);
                 } catch (e) {
-                  alert(`要点提炼失败: ${e}`);
+                  alert(`要点整理失败: ${e}`);
                 } finally {
                   setHlBusy(false);
                 }
@@ -472,9 +499,9 @@ export default function HistorySection({
               disabled={hlBusy}
               style={{ fontSize: 11 }}
             >
-              {hlBusy ? "提炼中…" : "AI 提炼"}
+              {hlBusy ? "整理中…" : "AI 整理"}
             </button>
-            <span style={{ fontSize: 10, color: "var(--muted)" }}>需要配置 LLM；未配置时可用会中的本地规则要点</span>
+            <span style={{ fontSize: 10, color: "var(--muted)" }}>基于会中要点合并去重；旧会话无要点时才根据转写整理。需要配置 LLM</span>
           </div>
           {aiHighlights.length > 0 && (
             <div style={{ background: "var(--surface-2)", borderRadius: 6, padding: 8, fontSize: 12, margin: "4px 0", color: "var(--text)" }}>
