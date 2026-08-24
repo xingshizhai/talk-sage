@@ -259,7 +259,14 @@ function Cmd-Clean {
 }
 
 function Cmd-Help {
-    Get-Content $PSCommandPath | Select-String "^#" | ForEach-Object { $_.Line.TrimStart("#", " ") } | Select-Object -First 22
+    # 用法写在文件头的 <# ... #> 里。不能用 ^# 抽行：那会命中 #> 打出孤立的 ">"，
+    # 并漏掉块注释里的正文（与 bash 版 sed 's/^# //' 不是同一语法）。
+    $raw = Get-Content -Raw -LiteralPath $PSCommandPath
+    if ($raw -match '(?s)<#(.*?)#>') {
+        Write-Host $Matches[1].Trim()
+        return
+    }
+    Write-Host "用法: .\scripts\talksage.ps1 <env|deps|build|dev|run|serve|listen|import|trim|record|loop|doctor|test|package|logs|clean>"
 }
 
 # ── 分发 ─────────────────────────────────────────────
