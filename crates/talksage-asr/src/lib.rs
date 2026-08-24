@@ -162,10 +162,18 @@ impl EngineKind {
         }
     }
 
-    /// 检查模型文件是否完整，而不只是检查目录存在。
+    /// 检查模型文件是否完整（存在且非空），而不只是检查目录存在。
+    ///
+    /// 非空校验防止「下载/解压失败留下 0 字节文件」被误判为已安装——
+    /// 空 onnx 会让 sherpa-onnx 在 native 层崩溃而非优雅报错。
     pub fn is_available(self, models_root: &Path) -> bool {
         let dir = models_root.join(self.model_dir_name());
-        let has = |name: &str| dir.join(name).is_file();
+        let has = |name: &str| dir.join(name).is_file() && dir.join(name).metadata().map(|m| m.len() > 0).unwrap_or(false);
+        let has_tokenizer_dir = || {
+            dir.join("tokenizer").is_dir()
+                && dir.join("tokenizer").join("vocab.json").is_file()
+                && dir.join("tokenizer").join("vocab.json").metadata().map(|m| m.len() > 0).unwrap_or(false)
+        };
         match self {
             Self::ParaformerZh => has("tokens.txt") && ((has("encoder.onnx") && has("decoder.onnx")) || (has("encoder.int8.onnx") && has("decoder.int8.onnx"))),
             Self::ZipformerEn => has("tokens.txt") && has("bpe.model") && has("encoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx") && has("decoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx") && has("joiner-epoch-99-avg-1-chunk-16-left-64.int8.onnx"),
@@ -179,7 +187,7 @@ impl EngineKind {
                 has("conv_frontend.onnx")
                     && ((has("encoder.onnx") && has("decoder.onnx"))
                         || (has("encoder.int8.onnx") && has("decoder.int8.onnx")))
-                    && (has("tokenizer.json") || dir.join("tokenizer").is_dir())
+                    && (has("tokenizer.json") || has_tokenizer_dir())
             }
         }
     }
@@ -407,6 +415,22 @@ impl OfflineSegmentEngine {
                 } else {
                     ("encoder.int8.onnx", "decoder.int8.onnx")
                 };
+                // 空/极小模型文件会让 sherpa-onnx 在 native 层崩溃（而非优雅报错）。
+                // 加载前做最小大小校验（官方 int8 包 >100MB），截断/空文件直接拒绝。
+                let min_size = |name: &str| -> anyhow::Result<()> {
+                    let p = model_dir.join(name);
+                    let len = std::fs::metadata(&p).map_err(|e| anyhow::anyhow!("模型文件不可读 {name}: {e}"))?.len();
+                    if len < 100 * 1024 * 1024 {
+                        anyhow::bail!(
+                            "Qwen3-ASR 模型文件异常（{name} 仅 {:.1}MB，预期 >100MB）。\
+                             下载可能未完成或已损坏，请删除后重新下载（设置 → ASR 转写 → 模型管理）",
+                            len as f64 / 1e6
+                        );
+                    }
+                    Ok(())
+                };
+                min_size(enc)?;
+                min_size(dec)?;
                 // sherpa-onnx 的 QwenAsrTokenizer 期望 tokenizer **目录**
                 // （内含 vocab.json / merges.txt / tokenizer_config.json）；旧约定为单文件。
                 let tokenizer = if model_dir.join("tokenizer").is_dir() {
@@ -526,6 +550,29 @@ mod tests {
             assert!(ids.insert(kind.display_name()), "模型 id 重复");
             assert!(matches!(profile.speed, "realtime" | "balanced" | "accurate"));
         }
+    }
+
+    /// 0 字节模型文件不得被判定为已安装（空 onnx 会让 sherpa-onnx native 崩溃）。
+    #[test]
+    fn empty_model_files_are_not_available() {
+        use std::path::PathBuf;
+        let tmp = std::env::temp_dir().join(format!("talksage-asr-empty-{}", std::process::id()));
+        let dir = tmp.join(EngineKind::Qwen3Asr.model_dir_name());
+        std::fs::create_dir_all(&dir).unwrap();
+        // 空文件模拟下载失败残留
+        for f in ["conv_frontend.onnx", "encoder.int8.onnx", "decoder.int8.onnx"] {
+            std::fs::write(dir.join(f), b"").unwrap();
+        }
+        std::fs::create_dir_all(dir.join("tokenizer")).unwrap();
+        std::fs::write(dir.join("tokenizer").join("vocab.json"), b"").unwrap();
+        assert!(!EngineKind::Qwen3Asr.is_available(&tmp), "空文件不应判定为已安装");
+        // 写非空后判定为已安装
+        std::fs::write(dir.join("encoder.int8.onnx"), vec![1u8; 1024]).unwrap();
+        std::fs::write(dir.join("decoder.int8.onnx"), vec![1u8; 1024]).unwrap();
+        std::fs::write(dir.join("conv_frontend.onnx"), vec![1u8; 1024]).unwrap();
+        std::fs::write(dir.join("tokenizer").join("vocab.json"), b"{}").unwrap();
+        assert!(EngineKind::Qwen3Asr.is_available(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 

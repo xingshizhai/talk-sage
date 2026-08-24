@@ -205,18 +205,21 @@ fn download_qwen3_asr(models_root: &Path, progress: Option<&ProgressFn>) -> anyh
         }
     }
     drop(ar);
-    // 校验关键文件
-    if !staging.join("conv_frontend.onnx").is_file()
-        || !staging.join("encoder.int8.onnx").is_file()
-        || !staging.join("decoder.int8.onnx").is_file()
+    // 校验关键文件存在且**非空**（0 字节 = 下载/解压失败，会触发 native 崩溃）
+    let nonempty = |p: &Path| p.is_file() && p.metadata().map(|m| m.len() > 0).unwrap_or(false);
+    if !nonempty(&staging.join("conv_frontend.onnx"))
+        || !nonempty(&staging.join("encoder.int8.onnx"))
+        || !nonempty(&staging.join("decoder.int8.onnx"))
     {
         let _ = std::fs::remove_dir_all(&staging);
-        anyhow::bail!("Qwen3-ASR 归档缺少关键文件（下载损坏？）");
+        let _ = std::fs::remove_file(&archive);
+        anyhow::bail!("Qwen3-ASR 归档解压后关键文件为空（下载损坏或磁盘问题），已清理，请重试");
     }
     if !staging.join("tokenizer").is_dir() {
         // 兼容旧约定：tokenizer.json 单文件
-        if !staging.join("tokenizer.json").is_file() {
+        if !nonempty(&staging.join("tokenizer.json")) {
             let _ = std::fs::remove_dir_all(&staging);
+            let _ = std::fs::remove_file(&archive);
             anyhow::bail!("Qwen3-ASR 归档缺少 tokenizer");
         }
     }
@@ -267,6 +270,12 @@ pub fn download_file(
     }
     out.flush()?;
     drop(out);
+    // 下载完成校验非空：空文件（网络中断/服务端异常）不能当作成功
+    let part_len = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    if part_len == 0 {
+        let _ = std::fs::remove_file(&part);
+        anyhow::bail!("下载内容为空（网络中断？），已清理临时文件，请重试");
+    }
     std::fs::rename(&part, target)?;
     Ok(())
 }

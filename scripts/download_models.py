@@ -178,6 +178,14 @@ def download_qwen3_asr_model() -> None:
             else:
                 print(f"  warn: 跳过特殊条目 {member.name}")
     archive.unlink(missing_ok=True)
+    # 校验关键文件存在且非空（0 字节 = 下载/解压失败，加载时会 native 崩溃）
+    def nonempty(p: Path) -> bool:
+        return p.is_file() and p.stat().st_size > 0
+    missing = [n for n in ("conv_frontend.onnx", "encoder.int8.onnx", "decoder.int8.onnx") if not nonempty(staging / n)]
+    if missing:
+        import shutil
+        shutil.rmtree(staging, ignore_errors=True)
+        raise RuntimeError(f"Qwen3-ASR 解压后关键文件缺失或为空: {missing}（下载损坏，请重试）")
     # staging → 正式目录（若已存在旧版，先移除）
     if out_dir.exists():
         import shutil
