@@ -64,7 +64,12 @@ fn runtime_info_from_config(cfg: &talksage_config::Config) -> talksage_session::
     let vad = scene.to_vad_config().effective();
     let audio = &cfg.audio;
     let asr = &cfg.asr;
-    let user_engine = if scene.user_engine.is_empty() { asr.user_engine.clone() } else { scene.user_engine.clone() };
+    let user_engine = match cfg.scene.mode {
+        talksage_config::SceneMode::Custom => {
+            if scene.user_engine.is_empty() { asr.user_engine.clone() } else { scene.user_engine.clone() }
+        }
+        _ => asr.user_engine.clone(), // 与 service.rs 一致：非自定义场景用全局引擎
+    };
     talksage_session::SessionRuntimeInfo {
         app_version: talksage_core::VERSION.to_string(),
         scene_mode: format!("{:?}", cfg.scene.mode).to_ascii_lowercase(),

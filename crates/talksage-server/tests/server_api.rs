@@ -171,8 +171,7 @@ async fn save_config_rejects_invalid_plugin_config() {
                 .body(Body::from(r#"{"plugins":{"term_explainer":{"enabled":"yes"}}}"#))
                 .unwrap(),
         )
-        .await
-        .unwrap();
+        .await        .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -404,4 +403,55 @@ async fn openai_transcribe_wav_returns_text() {
     let text = v["text"].as_str().unwrap_or("");
     assert!(!text.trim().is_empty(), "转写结果为空: {body_str}");
     eprintln!("openai 转写结果: {text}");
+}
+
+/// 设置页保存的 ASR 引擎应持久化：POST /config 写 asr.user_engine 后，
+/// 内存快照立即反映新值（前端保存后 getConfig 应读到它）。
+#[tokio::test]
+async fn save_config_persists_asr_engine_choice() {
+    let state = test_state();
+    let router = build_router(state.clone(), &std::path::PathBuf::from("nonexistent-dist"));
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/config")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"asr":{"user_engine":"whisper-base"}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(state.config.snapshot().asr.user_engine, "whisper-base");
+}
+
+/// 场景自定义里的引擎同样应持久化（pipeline 实际按场景引擎运行）。
+#[tokio::test]
+async fn save_config_persists_scene_custom_engine() {
+    let state = test_state();
+    let router = build_router(state.clone(), &std::path::PathBuf::from("nonexistent-dist"));
+    let body = serde_json::json!({
+        "scene": {
+            "mode": "custom",
+            "custom": { "user_engine": "whisper-small", "client_engine": "zipformer-en" }
+        }
+    });
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/config")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let snap = state.config.snapshot();
+    assert_eq!(snap.scene.mode, talksage_config::SceneMode::Custom);
+    assert_eq!(snap.scene.custom.user_engine, "whisper-small");
+    assert_eq!(snap.scene.custom.client_engine, "zipformer-en");
 }

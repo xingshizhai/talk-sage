@@ -68,8 +68,18 @@ export default function SettingsSection({
   const [pluginValues, setPluginValues] = useState<PluginValues>({});
   const [kbFolder, setKbFolder] = useState<string>("");
   const [kbEnabled, setKbEnabled] = useState(false);
-  const [clientEngine, setClientEngine] = useState(config?.asr?.client_engine ?? "zipformer-en");
-  const [userEngine, setUserEngine] = useState(config?.asr?.user_engine ?? "paraformer-zh");
+  // 引擎显示值：自定义场景读场景参数；否则读全局 ASR 配置（与 pipeline 实际
+  // 生效逻辑一致：非自定义场景的用户流引擎跟随 [asr].user_engine）。
+  const initialUserEngine = () =>
+    config?.scene?.mode === "custom"
+      ? config?.scene?.custom?.user_engine ?? config?.asr?.user_engine ?? "paraformer-zh"
+      : config?.asr?.user_engine ?? "paraformer-zh";
+  const initialClientEngine = () =>
+    config?.scene?.mode === "custom"
+      ? config?.scene?.custom?.client_engine ?? config?.asr?.client_engine ?? "zipformer-en"
+      : config?.asr?.client_engine ?? "zipformer-en";
+  const [clientEngine, setClientEngine] = useState<string>(initialClientEngine);
+  const [userEngine, setUserEngine] = useState<string>(initialUserEngine);
   const [terminologyEnabled, setTerminologyEnabled] = useState(config?.asr?.terminology?.enabled ?? false);
   const [hotwordScore, setHotwordScore] = useState(config?.asr?.terminology?.hotword_score ?? 1.5);
   const [terminologyTerms, setTerminologyTerms] = useState((config?.asr?.terminology?.terms ?? []).join("\n"));
@@ -183,8 +193,7 @@ export default function SettingsSection({
     }
   }
 
-  /** 改某个插件的某个配置键。 */
-  function setPluginField(id: string, key: string, value: boolean | number | string) {
+  /** 改某个插件的某个配置键。 */  function setPluginField(id: string, key: string, value: boolean | number | string) {
     setPluginValues((prev) => ({ ...prev, [id]: { ...prev[id], [key]: value } }));
   }
 
@@ -651,14 +660,32 @@ export default function SettingsSection({
         <div>
           <h3 style={groupTitle}>转写引擎</h3>
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-            <select value={clientEngine} onChange={(e) => setClientEngine(e.target.value)} style={inputStyle}>
+            <select
+              value={clientEngine}
+              onChange={(e) => {
+                const v = e.target.value;
+                setClientEngine(v);
+                // 同步到场景自定义参数：pipeline 实际按场景引擎运行，保持两处一致
+                setSceneCustom((s) => ({ ...s, client_engine: v }));
+              }}
+              style={inputStyle}
+            >
               {modelOptions(clientEngine)}
             </select>
-            <select value={userEngine} onChange={(e) => setUserEngine(e.target.value)} style={inputStyle}>
+            <select
+              value={userEngine}
+              onChange={(e) => {
+                const v = e.target.value;
+                setUserEngine(v);
+                // 同步到场景自定义参数（同左）
+                setSceneCustom((s) => ({ ...s, user_engine: v }));
+              }}
+              style={inputStyle}
+            >
               {modelOptions(userEngine)}
             </select>
           </div>
-          <div style={hint}>实时模型持续输出字幕；平衡/准确优先模型在 VAD 段结束后输出，延迟更高。未安装的模型可在下方「模型管理」下载后选择。</div>
+          <div style={hint}>实时模型持续输出字幕；平衡/准确优先模型在 VAD 段结束后输出，延迟更高。所选引擎即时生效：非自定义场景用此全局设置，自定义场景用「场景模式 → 自定义 → 我的引擎/客户引擎」。</div>
 
           {/* 模型管理：下载 / 删除 / 磁盘占用 */}
           <h3 style={{ ...groupTitle, marginTop: 10 }}>模型管理</h3>

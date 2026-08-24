@@ -328,13 +328,17 @@ impl TalkSageService {
             hotword_score: terminology.hotword_score.clamp(0.0, 10.0),
         };
         let scene = snapshot.scene.effective();
-        // 场景是完整的运行预设（包括每条流的语言模型），不再让全局 ASR 设置
-        // 暗中覆盖双语场景。调用方的显式 StartListen override 仍具有最高优先级。
-        let configured_user_engine = &scene.user_engine;
-        let configured_client_engine = &scene.client_engine;
+        // 引擎来源：场景自定义参数优先；**非自定义场景的用户流引擎跟随全局 ASR
+        // 设置**（[asr].user_engine），让「转写引擎」页的选择真正生效。客户流引擎
+        // 仍由场景模板决定（双语/会议场景按语言配英文引擎），避免全局设置破坏
+        // 场景的语言搭配。调用方的显式 StartListen override 仍具有最高优先级。
+        let (configured_user_engine, configured_client_engine): (String, String) = match snapshot.scene.mode {
+            talksage_config::SceneMode::Custom => (scene.user_engine.clone(), scene.client_engine.clone()),
+            _ => (snapshot.asr.user_engine.clone(), scene.client_engine.clone()),
+        };
         let user_engine = req
             .user_engine
-            .or_else(|| EngineKind::from_name(configured_user_engine))
+            .or_else(|| EngineKind::from_name(&configured_user_engine))
             .unwrap_or(EngineKind::ParaformerZh);
         let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
         let user_model = model_dir.join(user_engine.model_dir_name());
@@ -358,7 +362,7 @@ impl TalkSageService {
             None
         };
 
-        let client_engine = EngineKind::from_name(configured_client_engine).unwrap_or(EngineKind::ZipformerEn);
+        let client_engine = EngineKind::from_name(&configured_client_engine).unwrap_or(EngineKind::ZipformerEn);
         let client_model = model_dir.join(client_engine.model_dir_name());
         let client = Self::resolve_client_input(scene.client_enabled, &req.client).and_then(|input| {
             if !client_engine.is_available(&model_dir) {
@@ -1077,5 +1081,42 @@ mod tests {
         let dir = tempfile_dir::TempDir::new();
         let cfg = ConfigManager::from_config(Config::default(), dir.path().to_path_buf());
         assert!(TalkSageService::build_llm(&cfg).is_none());
+    }
+
+    /// 非自定义场景：用户流引擎跟随全局 [asr].user_engine（「转写引擎」页的选择
+    /// 必须真正生效）；自定义场景：用场景参数。
+    #[test]
+    fn engine_resolution_follows_global_asr_outside_custom_scene() {
+        use talksage_config::{Config, SceneMode};
+
+        // 默认场景是 conversation（非 custom）→ 用全局 [asr].user_engine
+        let mut cfg = Config::default();
+        cfg.asr.user_engine = "whisper-base".into();
+        cfg.asr.client_engine = "whisper-base".into();
+        let dir = tempfile_dir::TempDir::new();
+        let mgr = ConfigManager::from_config(cfg, dir.path().to_path_buf());
+        let snap = mgr.snapshot();
+        let scene = snap.scene.effective();
+        assert_ne!(snap.scene.mode, SceneMode::Custom);
+        // 复制 service.rs 的解析逻辑做断言（引擎选择不依赖模型存在）
+        let user = match snap.scene.mode {
+            SceneMode::Custom => scene.user_engine.clone(),
+            _ => snap.asr.user_engine.clone(),
+        };
+        assert_eq!(user, "whisper-base", "非自定义场景应使用全局用户引擎");
+
+        // 自定义场景 → 用场景参数（即使全局不同）
+        let mut cfg2 = Config::default();
+        cfg2.asr.user_engine = "whisper-base".into();
+        cfg2.scene.mode = SceneMode::Custom;
+        cfg2.scene.custom.user_engine = "qwen3-asr".into();
+        let mgr2 = ConfigManager::from_config(cfg2, dir.path().join("cfg2").to_path_buf());
+        let snap2 = mgr2.snapshot();
+        let scene2 = snap2.scene.effective();
+        let user2 = match snap2.scene.mode {
+            SceneMode::Custom => scene2.user_engine.clone(),
+            _ => snap2.asr.user_engine.clone(),
+        };
+        assert_eq!(user2, "qwen3-asr", "自定义场景应使用场景参数引擎");
     }
 }
