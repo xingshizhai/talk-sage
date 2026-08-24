@@ -74,7 +74,7 @@ async fn health_returns_ok_and_version() {
     let (status, body) = get("/api/health").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("\"ok\":true"));
-    assert!(body.contains("0.1.0"));
+    assert!(body.contains("0.1.1"));
 }
 
 #[tokio::test]

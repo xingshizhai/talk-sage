@@ -413,7 +413,7 @@ pub struct SessionMeta {
 /// 或按相同配置重放历史录音复现/优化。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRuntimeInfo {
-    /// 应用版本（如 "0.1.0"）。
+    /// 应用版本（如 "0.1.1"）。
     pub app_version: String,
     /// 场景模式（dictation / conversation / translation / meeting / lecture / custom）。
     pub scene_mode: String,

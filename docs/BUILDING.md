@@ -267,8 +267,8 @@ npx tauri build
 
 - 自动执行 `npm run build`（前端）→ `cargo build --release`（约 8–10 分钟）→ 下载 WIX/NSIS 工具链并打包
 - 产物（**workspace 根 `target/`**，非 web 下）：
-  - `target/release/bundle/nsis/TalkSage_0.1.0_x64-setup.exe`（**推荐分发**，双击安装）
-  - `target/release/bundle/msi/TalkSage_0.1.0_x64_en-US.msi`
+  - `target/release/bundle/nsis/TalkSage_0.1.1_x64-setup.exe`（**推荐分发**，双击安装）
+  - `target/release/bundle/msi/TalkSage_0.1.1_x64_en-US.msi`
   - `target/release/talksage-app.exe`（绿色版）
 
 ### 6.2 macOS（dmg）
