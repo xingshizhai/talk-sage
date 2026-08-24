@@ -4,6 +4,7 @@ import { getApi } from "./lib/transport";
 import type { AppConfig, ConversationMetrics, DomainEvent, NotesTemplate, NudgeEvent, SceneMode, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./lib/api";
 import { TranscriptAccumulator } from "./lib/transcript";
 import { toKeyPoint, type KeyPoint } from "./lib/highlights";
+import { applyIncomingNudge } from "./lib/nudge";
 import { cssVars, type Theme } from "./lib/theme";
 import { loadTheme, saveTheme, loadTranscriptMode, saveTranscriptMode, loadAsideCollapsed, saveAsideCollapsed } from "./lib/prefs";
 import SideNav, { type HealthRow, type NavItem } from "./components/SideNav";
@@ -246,7 +247,7 @@ export default function App() {
         setMetrics(ev.metrics);
       }
       if (ev.type === "nudge") {
-        setNudges((prev) => [...prev.slice(-3), ev.nudge]);
+        setNudges((prev) => applyIncomingNudge(prev, ev.nudge));
       }
       setRawEvents((prev) => [...prev.slice(-199), ev]);
     });
@@ -612,7 +613,7 @@ export default function App() {
 
         {navPage === "transcript" && (
           <>
-            {/* 会中提示（借鉴 Call.md nudge-engine）：浮动 toast，可手动关闭 */}
+            {/* 会中提示：同时只显示一条，可手动关闭 */}
             {nudges.length > 0 && (
               <div style={{ position: "absolute", top: 8, right: 8, zIndex: 60, display: "flex", flexDirection: "column", gap: 6, maxWidth: 340 }}>
                 {nudges.map((n) => (
