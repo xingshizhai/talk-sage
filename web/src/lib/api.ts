@@ -262,6 +262,22 @@ export interface StreamMeta {
   vad_threshold: number;
 }
 
+export interface SessionRuntimeInfo {
+  app_version: string;
+  scene_mode: string;
+  user_engine: string;
+  client_engine?: string | null;
+  client_enabled: boolean;
+  vad_preset: string;
+  vad_threshold: number;
+  vad_min_silence_ms?: number | null;
+  denoise_enabled: boolean;
+  min_segment_ms: number;
+  input_gain_db: number;
+  speaker_mode: string;
+  sample_rate: number;
+}
+
 export interface SessionMeta {
   quality: string;
   skipped_analysis: boolean;
@@ -275,6 +291,8 @@ export interface SessionMeta {
   master_recording?: string | null;
   streams: StreamMeta[];
   evaluated_at: number;
+  /** 运行环境快照（模型/场景/参数），老数据缺省。 */
+  runtime_info?: SessionRuntimeInfo | null;
 }
 
 /** 搜索命中。 */

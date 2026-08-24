@@ -40,6 +40,9 @@ impl QualityDeps for QualityHost {
         params.auto_detect = snapshot.scene.effective().noise_auto_detect;
         let mut meta = talksage_session::SessionMeta::evaluate(stats, &texts, unix_secs(), &params);
         meta.master_recording = self.master_recording.lock().unwrap().clone();
+        // 记录本次运行的模型/场景/主要参数：事后可对比不同 ASR 配置的质量
+        // 差异，或按相同参数重放历史录音（见 SessionRuntimeInfo）。
+        meta.runtime_info = Some(runtime_info_from_config(&snapshot));
         if let Err(e) = self.store.set_session_meta(session_id, &meta) {
             // 写不进 meta 不该拖垮整条链：会话本身已经落库，报个警继续。
             log::warn!("保存会话元数据失败: {e}");
@@ -52,6 +55,32 @@ impl QualityDeps for QualityHost {
             meta.skipped_analysis,
         );
         Ok(Some(meta.quality_label().to_string()))
+    }
+}
+
+/// 从配置快照构建运行环境信息（模型/场景/主要参数）。
+fn runtime_info_from_config(cfg: &talksage_config::Config) -> talksage_session::SessionRuntimeInfo {
+    let scene = cfg.scene.effective();
+    let vad = scene.to_vad_config().effective();
+    let audio = &cfg.audio;
+    let asr = &cfg.asr;
+    let user_engine = if scene.user_engine.is_empty() { asr.user_engine.clone() } else { scene.user_engine.clone() };
+    talksage_session::SessionRuntimeInfo {
+        app_version: talksage_core::VERSION.to_string(),
+        scene_mode: format!("{:?}", cfg.scene.mode).to_ascii_lowercase(),
+        user_engine,
+        client_engine: scene.client_enabled.then(|| {
+            if scene.client_engine.is_empty() { asr.client_engine.clone() } else { scene.client_engine.clone() }
+        }),
+        client_enabled: scene.client_enabled,
+        vad_preset: format!("{:?}", scene.vad_preset).to_ascii_lowercase(),
+        vad_threshold: vad.0,
+        vad_min_silence_ms: scene.vad_min_silence_ms,
+        denoise_enabled: scene.denoise_enabled,
+        min_segment_ms: scene.min_segment_ms,
+        input_gain_db: audio.input_gain_db,
+        speaker_mode: format!("{:?}", scene.speaker_mode).to_ascii_lowercase(),
+        sample_rate: talksage_audio::TARGET_SAMPLE_RATE,
     }
 }
 
@@ -170,6 +199,13 @@ mod tests {
         let meta = f.store.get_session(sid).unwrap().meta.expect("meta 应已落库");
         assert_eq!(meta.quality_label(), label, "返回的标签应与落库的一致");
         assert_eq!(meta.master_recording.as_deref(), Some("session-1_master.wav"));
+        // 运行环境快照应写入（默认场景=一对一会话，用户引擎=paraformer-zh）
+        let ri = meta.runtime_info.expect("应写入运行环境快照");
+        assert_eq!(ri.scene_mode, "conversation");
+        assert_eq!(ri.user_engine, "paraformer-zh");
+        assert!(ri.client_enabled, "默认场景应双流");
+        assert_eq!(ri.sample_rate, 16_000);
+        assert_eq!(ri.app_version, talksage_core::VERSION);
     }
 
     /// 第二道闸：`[webhooks]` 关闭时不推送。插件自身的 enabled 管不到这里 ——

@@ -33,7 +33,7 @@
 - **Recording & testing loop** — every session keeps raw mono PCM per input stream and exposes one main recording for playback (single-stream reuse; dual-stream stereo with microphone left/system audio right); `talksage trim` supports regression preparation
 - **Session quality assessment** — automatic noise/silence detection per session (configurable thresholds + auto background-noise calibration); noisy sessions skip downstream analysis
 - **Runtime noise control** — adjust the mic noise gate live from the left panel *while listening*, no restart
-- **History** — SQLite sessions with search, per-segment duration/RMS stats, quality badges
+- **History** — SQLite sessions with search, per-segment duration/RMS stats, quality badges; **each session auto-saves a runtime snapshot** (scene mode / ASR engines / VAD / denoise / min-commit / gain / speaker mode / app version) so you can compare transcription quality across models & parameters afterwards, or replay the recorded audio with the same config (visible in History detail and `talksage session <id>`)
 - **Two carriers** — Tauri 2 desktop app (IPC) and a headless HTTP/WS server (browser access, token-protected)
 - **System tray** — Windows: minimizing hides the window into the tray (click the icon to restore); macOS: follows platform conventions with a menu-bar icon that toggles the window
 - **Fixed-corpus benchmark** — `talksage bench` streams through `*.wav` corpora (engine pool warm start, model reused in-process) and reports **CER/WER accuracy + real-time factor (RTF) + first-token latency** for regression testing (borrows WhisperLiveKit's bench)

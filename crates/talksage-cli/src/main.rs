@@ -548,6 +548,24 @@ fn cmd_session(id: i64, dup_only: bool) -> ExitCode {
         detail.ended_at,
         detail.meta.as_ref().map(|m| m.quality_label()),
     );
+    // 运行环境快照：模型/场景/参数（对比不同 ASR 配置时用）
+    if let Some(ri) = detail.meta.as_ref().and_then(|m| m.runtime_info.as_ref()) {
+        println!(
+            "运行环境: v{} 场景={} 引擎={}{} VAD={} 降噪={} 最短提交={}ms 增益={}dB 说话人={} 采样率={}Hz",
+            ri.app_version,
+            ri.scene_mode,
+            ri.user_engine,
+            if ri.client_enabled { format!("+{}", ri.client_engine.as_deref().unwrap_or("?")) } else { "（单流）".into() },
+            ri.vad_preset,
+            if ri.denoise_enabled { "开" } else { "关" },
+            ri.min_segment_ms,
+            ri.input_gain_db,
+            ri.speaker_mode,
+            ri.sample_rate,
+        );
+    } else {
+        println!("运行环境: （旧会话，无配置快照）");
+    }
     for (i, s) in detail.segments.iter().enumerate() {
         let start_ms = s.ts_ms.saturating_sub(s.duration_ms);
         println!(

@@ -125,6 +125,19 @@ pub fn find_duplicate_segments(segments: &[TranscriptSegment]) -> Vec<DuplicateP
     out
 }
 
+/// 场景模式中文名（导出/展示用；与前端标签一致）。
+fn scene_label(mode: &str) -> &'static str {
+    match mode {
+        "dictation" => "单人听写",
+        "conversation" => "一对一会话",
+        "translation" => "双语对话",
+        "meeting" => "多人会议",
+        "lecture" => "演讲/课堂",
+        "custom" => "自定义",
+        _ => "未知",
+    }
+}
+
 /// 会话详情导出为 Markdown 单文件（转写 + 纪要 + 指标 + 质量；借鉴 Call.md markdown-export）。
 pub fn export_markdown(detail: &SessionDetail) -> String {
     let mut md = String::new();
@@ -141,6 +154,24 @@ pub fn export_markdown(detail: &SessionDetail) -> String {
             meta.quality_label(),
             if meta.skipped_analysis { "（跳过下游分析）" } else { "" },
         ));
+        // 运行环境：模型/场景/参数快照（对比不同 ASR 配置时用）
+        if let Some(ri) = &meta.runtime_info {
+            md.push_str(&format!(
+                "- 场景 {} · 引擎 {}（{}）· 应用 v{}\n",
+                scene_label(&ri.scene_mode),
+                ri.user_engine,
+                if ri.client_enabled { "双流" } else { "单流" },
+                ri.app_version,
+            ));
+            md.push_str(&format!(
+                "- VAD {} · 降噪 {} · 最短提交 {}ms · 增益 {}dB · 说话人 {}\n",
+                ri.vad_preset,
+                if ri.denoise_enabled { "开" } else { "关" },
+                ri.min_segment_ms,
+                ri.input_gain_db,
+                ri.speaker_mode,
+            ));
+        }
     }
     if metrics.has_data() {
         md.push_str(&format!(
@@ -358,6 +389,48 @@ pub struct SessionMeta {
     pub streams: Vec<StreamMeta>,
     /// 采样时刻（Unix 秒）。
     pub evaluated_at: i64,
+    /// 运行环境快照（模型/场景/主要参数）：事后可据此对比不同 ASR 配置的
+    /// 转写质量，或按相同参数重放历史录音。旧数据缺省 None。
+    #[serde(default)]
+    pub runtime_info: Option<SessionRuntimeInfo>,
+}
+
+/// 会话运行环境快照：当时使用的模型、场景模式与主要参数。
+///
+/// 用于「事后分析」：把会话转写质量与具体 ASR 配置关联起来，对比不同引擎/
+/// 参数（paraformer vs whisper vs qwen3、VAD 灵敏度、降噪开关…）的效果，
+/// 或按相同配置重放历史录音复现/优化。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRuntimeInfo {
+    /// 应用版本（如 "0.1.0"）。
+    pub app_version: String,
+    /// 场景模式（dictation / conversation / translation / meeting / lecture / custom）。
+    pub scene_mode: String,
+    /// 用户流引擎（paraformer-zh / zipformer-en / whisper-base / whisper-small / qwen3-asr）。
+    pub user_engine: String,
+    /// 客户流引擎（None = 单流）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_engine: Option<String>,
+    /// 是否双流。
+    #[serde(default)]
+    pub client_enabled: bool,
+    /// VAD 灵敏度预设（sensitive / standard / strict）。
+    pub vad_preset: String,
+    /// VAD 检测阈值。
+    pub vad_threshold: f32,
+    /// VAD 段尾静音（ms；覆盖时）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vad_min_silence_ms: Option<u64>,
+    /// 降噪开关。
+    pub denoise_enabled: bool,
+    /// 最短提交时长（ms）。
+    pub min_segment_ms: u64,
+    /// 输入增益（dB）。
+    pub input_gain_db: f32,
+    /// 说话人识别模式（off / channel / voiceprint）。
+    pub speaker_mode: String,
+    /// 采样率（一般 16000）。
+    pub sample_rate: u32,
 }
 
 impl SessionMeta {
@@ -466,6 +539,7 @@ impl SessionMeta {
             master_recording: None,
             streams: stats,
             evaluated_at: now,
+            runtime_info: None, // 由调用方（QualityHost）在写入前填充
         }
     }
 }

@@ -10,6 +10,25 @@ function formatTime(sec: number): string {
   return d.toLocaleString("zh-CN", { hour12: false });
 }
 
+/** 场景模式中文标签（与 App.tsx SCENE_LABELS 对应）。 */
+function sceneLabel(mode: string): string {
+  const map: Record<string, string> = {
+    dictation: "单人听写",
+    conversation: "一对一会话",
+    translation: "双语对话",
+    meeting: "多人会议",
+    lecture: "演讲/课堂",
+    custom: "自定义",
+  };
+  return map[mode] ?? mode;
+}
+
+/** 说话人识别模式中文标签。 */
+function speakerLabel(mode: string): string {
+  const map: Record<string, string> = { off: "关闭", channel: "按通道", voiceprint: "声纹" };
+  return map[mode] ?? mode;
+}
+
 /** 质量徽章样式。 */
 const QUALITY_STYLE: Record<string, { label: string; color: string; bg: string }> = {
   clean: { label: "正常", color: "var(--live)", bg: "var(--live-soft)" },
@@ -234,6 +253,26 @@ export default function HistorySection({
                   {s.recording ? ` / ${s.recording.split(/[\\/]/).pop()}` : ""}
                 </div>
               ))}
+              {/* 运行环境快照：当时用的模型/场景/主要参数，供事后对比分析 */}
+              {(() => {
+                const ri = detail.meta?.runtime_info;
+                if (!ri) return null;
+                return (
+                  <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px dashed var(--border)", color: "var(--muted)" }}>
+                    <div style={{ fontWeight: 700, color: "var(--text-2)", marginBottom: 2 }}>运行环境（本次转写配置）</div>
+                    <div>
+                      场景 {sceneLabel(ri.scene_mode)} · 引擎 {ri.user_engine}
+                      {ri.client_enabled ? ` + ${ri.client_engine ?? "?"}` : "（单流）"} · v{ri.app_version}
+                    </div>
+                    <div>
+                      VAD {ri.vad_preset}
+                      {ri.vad_min_silence_ms ? `（段尾静音 ${ri.vad_min_silence_ms}ms）` : ""} · 降噪{" "}
+                      {ri.denoise_enabled ? "开" : "关"} · 最短提交 {ri.min_segment_ms}ms · 增益 {ri.input_gain_db}dB
+                    </div>
+                    <div>说话人 {speakerLabel(ri.speaker_mode)} · {ri.sample_rate}Hz</div>
+                  </div>
+                );
+              })()}
             </div>
           )}
 
