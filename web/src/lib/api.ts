@@ -184,7 +184,7 @@ export type DomainEvent =
   | {
       type: "model_progress";
       engine: string;
-      stage: "downloading" | "extracting" | "done" | "error";
+      stage: "downloading" | "extracting" | "done" | "cancelled" | "error";
       percent?: number;
       message?: string;
     }
@@ -347,6 +347,8 @@ export interface AppApi {
   listAsrModels(): Promise<AsrModelInfo[]>;
   /** 下载/安装 ASR 引擎（进度经 model_progress 事件推送）。 */
   downloadModel(engine: string): Promise<void>;
+  /** 取消正在进行的模型下载。 */
+  cancelModelDownload(engine: string): Promise<void>;
   /** 删除 ASR 引擎模型目录。 */
   removeModel(engine: string): Promise<void>;
   /** 插件元数据（设置页据此生成插件表单）。 */

@@ -36,6 +36,8 @@ pub struct ServerState {
     pub events: broadcast::Sender<DomainEvent>,
     /// 当前监听。
     pub running: Arc<Mutex<Option<RunningListen>>>,
+    /// 进行中的模型下载（引擎 id → 取消标志）。
+    pub downloads: Arc<Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>>,
     /// 可选鉴权 token（空 = 不鉴权）。
     pub token: String,
     /// 共享用例入口（装配 / 落库 / 引擎池）。
@@ -59,6 +61,7 @@ pub async fn run(host: &str, port: u16, token: &str, web_dist: &PathBuf) -> Resu
         sessions,
         events: tx,
         running: Arc::new(Mutex::new(None)),
+        downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
         token: token.to_string(),
         service,
     };
@@ -84,6 +87,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/plugins/status", get(plugin_status_api))
         .route("/asr/models", get(asr_models_api))
         .route("/asr/models/{engine}/download", axum::routing::post(download_model_api))
+        .route("/asr/models/{engine}/download/cancel", axum::routing::post(cancel_model_download_api))
         .route("/asr/models/{engine}/remove", axum::routing::post(remove_model_api))
         .route("/sessions", get(list_sessions_api))
         .route("/search", get(search_api))
@@ -233,6 +237,17 @@ async fn download_model_api(
     };
     let engine_id = kind.display_name().to_string();
     let events = state.events.clone();
+    // 注册取消标志（同一引擎已在下载则拒绝）
+    let cancel_flag = {
+        let mut dl = state.downloads.lock().unwrap();
+        if dl.contains_key(&engine_id) {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "该模型已在下载中" }))).into_response();
+        }
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        dl.insert(engine_id.clone(), flag.clone());
+        flag
+    };
+    let downloads = state.downloads.clone();
     tokio::task::spawn_blocking(move || {
         let emit_events = events.clone();
         let emit_engine = engine_id.clone();
@@ -257,13 +272,39 @@ async fn download_model_api(
                 message: String::new(),
             });
         };
-        let result = talksage_asr::models::download_engine(kind, &root, Some(&progress));
+        let result = talksage_asr::models::download_engine(kind, &root, Some(&progress), Some(cancel_flag.as_ref()));
         match result {
             Ok(()) => emit("done", 100, "安装完成"),
+            Err(e) if e.downcast_ref::<talksage_asr::models::DownloadCancelled>().is_some() => {
+                emit("cancelled", 0, "已取消");
+            }
             Err(e) => emit("error", 0, &e.to_string()),
+        }
+        // 下载结束（成功/失败/取消）移除注册
+        if let Ok(mut dl) = downloads.lock() {
+            dl.remove(&engine_id);
         }
     });
     (StatusCode::ACCEPTED, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+/// 取消正在进行的模型下载。
+async fn cancel_model_download_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath(engine): AxumPath<String>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let dl = state.downloads.lock().unwrap();
+    match dl.get(&engine) {
+        Some(flag) => {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+        }
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "该模型没有正在进行的下载" }))).into_response(),
+    }
 }
 
 /// 删除 ASR 引擎模型目录。

@@ -48,6 +48,7 @@ fn test_state() -> ServerState {
         sessions,
         events: tx,
         running: Arc::new(std::sync::Mutex::new(None)),
+        downloads: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         token: String::new(),
         service,
     }
@@ -260,6 +261,7 @@ async fn export_returns_markdown_for_session() {
             sessions,
             events: tx,
             running: Arc::new(std::sync::Mutex::new(None)),
+            downloads: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             token: String::new(),
             service,
         }

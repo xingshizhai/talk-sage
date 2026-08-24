@@ -11,11 +11,28 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::EngineKind;
 
 /// 下载进度回调（received = 已下载字节，total = 总字节，未知为 0）。
 pub type ProgressFn = dyn Fn(u64, u64) + Send + Sync;
+
+/// 下载被用户取消时返回的错误（上层据此发"已取消"事件而非"失败"）。
+#[derive(Debug)]
+pub struct DownloadCancelled;
+
+impl std::fmt::Display for DownloadCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "下载已取消")
+    }
+}
+
+impl std::error::Error for DownloadCancelled {}
+
+fn cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+}
 
 /// 每个引擎的下载源（文件名 → 显式 URL；空 URL = 走 HF resolve/main）。
 /// 与 `scripts/download_models.py` 的 TARGETS 保持一致。
@@ -123,16 +140,19 @@ pub fn remove_engine(kind: EngineKind, models_root: &Path) -> std::io::Result<()
 
 /// 下载并安装引擎（同步阻塞；调用方应放入 spawn_blocking）。
 /// 进度经 `progress` 回调（received/total 字节，total 未知为 0）。
+/// `cancel` 为可选的取消标志：置位后尽快停止并清理临时文件，返回
+/// [`DownloadCancelled`]。
 pub fn download_engine(
     kind: EngineKind,
     models_root: &Path,
     progress: Option<&ProgressFn>,
+    cancel: Option<&AtomicBool>,
 ) -> anyhow::Result<()> {
     if kind.is_available(models_root) {
         return Ok(()); // 已安装
     }
     if kind == EngineKind::Qwen3Asr {
-        return download_qwen3_asr(models_root, progress);
+        return download_qwen3_asr(models_root, progress, cancel);
     }
     std::fs::create_dir_all(models_root)?;
     let out_dir = models_root.join(kind.model_dir_name());
@@ -151,13 +171,17 @@ pub fn download_engine(
         } else {
             explicit.to_string()
         };
-        download_file(&url, &target, progress)?;
+        download_file(&url, &target, progress, cancel)?;
     }
     Ok(())
 }
 
 /// Qwen3-ASR：下载官方 GitHub release 归档并解压到模型目录。
-fn download_qwen3_asr(models_root: &Path, progress: Option<&ProgressFn>) -> anyhow::Result<()> {
+fn download_qwen3_asr(
+    models_root: &Path,
+    progress: Option<&ProgressFn>,
+    cancel: Option<&AtomicBool>,
+) -> anyhow::Result<()> {
     const URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2";
     std::fs::create_dir_all(models_root)?;
     let final_dir = models_root.join(EngineKind::Qwen3Asr.model_dir_name());
@@ -171,7 +195,7 @@ fn download_qwen3_asr(models_root: &Path, progress: Option<&ProgressFn>) -> anyh
     std::fs::create_dir_all(&staging)?;
     // 归档下载到 models/<dir>.tar.bz2
     let archive = models_root.join(format!("{}.tar.bz2", EngineKind::Qwen3Asr.model_dir_name()));
-    download_file(URL, &archive, progress)?;
+    download_file(URL, &archive, progress, cancel)?;
     // 解压（tar.bz2 → staging/，剥离顶层目录）
     let file = std::fs::File::open(&archive)?;
     let decoder = bzip2::read::MultiBzDecoder::new(file);
@@ -182,6 +206,11 @@ fn download_qwen3_asr(models_root: &Path, progress: Option<&ProgressFn>) -> anyh
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("读取归档失败: {e}"))?;
     for entry in entries {
+        if cancelled(cancel) {
+            let _ = std::fs::remove_dir_all(&staging);
+            let _ = std::fs::remove_file(&archive);
+            return Err(anyhow::Error::new(DownloadCancelled));
+        }
         let path = entry.path()?.into_owned();
         let mut parts = path.components();
         let head = parts.next().map(|c| c.as_os_str().to_string_lossy().into_owned());
@@ -233,10 +262,12 @@ fn download_qwen3_asr(models_root: &Path, progress: Option<&ProgressFn>) -> anyh
 }
 
 /// 流式下载单个文件到目标路径（进度回调；不覆盖已存在的非空文件）。
+/// `cancel` 置位时尽快停止：删除 `.part` 临时文件并返回 [`DownloadCancelled`]。
 pub fn download_file(
     url: &str,
     target: &Path,
     progress: Option<&ProgressFn>,
+    cancel: Option<&AtomicBool>,
 ) -> anyhow::Result<()> {
     if target.exists() && target.metadata().map(|m| m.len() > 0).unwrap_or(false) {
         return Ok(());
@@ -245,6 +276,11 @@ pub fn download_file(
         std::fs::create_dir_all(parent)?;
     }
     let part = target.with_extension("part");
+    // 下载开始前先检查取消（用户可能在下一次尝试前已取消）
+    if cancelled(cancel) {
+        let _ = std::fs::remove_file(&part);
+        return Err(anyhow::Error::new(DownloadCancelled));
+    }
     let resp = ureq::get(url)
         .timeout(std::time::Duration::from_secs(900))
         .call()
@@ -258,6 +294,11 @@ pub fn download_file(
     let mut buf = [0u8; 262144];
     let mut received = 0u64;
     loop {
+        if cancelled(cancel) {
+            drop(out);
+            let _ = std::fs::remove_file(&part);
+            return Err(anyhow::Error::new(DownloadCancelled));
+        }
         let n = reader.read(&mut buf).map_err(|e| anyhow::anyhow!("读取下载流失败: {e}"))?;
         if n == 0 {
             break;
@@ -320,5 +361,71 @@ mod tests {
             assert!(!names.is_empty());
             assert!(names.iter().all(|(f, _)| !f.is_empty()), "{} 文件名不应为空", kind.display_name());
         }
+    }
+
+    /// 取消标志置位后，下载应返回 DownloadCancelled 并清理 .part 临时文件。
+    #[test]
+    fn cancel_flag_stops_download_and_cleans_part() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::sync::atomic::AtomicBool;
+        use std::thread;
+
+        // 起一个本地 HTTP server，持续返回数据（模拟大文件下载）
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                if let Ok(mut s) = stream {
+                    let _ = s.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 100000000\r\n\r\n",
+                    );
+                    // 持续灌数据直到对端断开
+                    let payload = vec![0x5Au8; 65536];
+                    loop {
+                        if s.write_all(&payload).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // 本地测试不能被环境代理劫持（HTTP_PROXY 会把 127.0.0.1 也转发出去）
+        let saved_http = std::env::var_os("HTTP_PROXY");
+        let saved_https = std::env::var_os("HTTPS_PROXY");
+        let saved_http_l = std::env::var_os("http_proxy");
+        let saved_https_l = std::env::var_os("https_proxy");
+        std::env::remove_var("HTTP_PROXY");
+        std::env::remove_var("HTTPS_PROXY");
+        std::env::remove_var("http_proxy");
+        std::env::remove_var("https_proxy");
+
+        let result = (|| {
+            let tmp = std::env::temp_dir().join(format!("talksage-cancel-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let target = tmp.join("big.bin");
+            let cancel = std::sync::Arc::new(AtomicBool::new(false));
+            // 预先置位取消标志：下载线程首个循环就应检测到并清理 .part
+            cancel.store(true, Ordering::Relaxed);
+            let result = download_file(&format!("http://{addr}/big.bin"), &target, None, Some(cancel.as_ref()));
+            let err = result.expect_err("取消标志已置位，应返回错误");
+            assert!(
+                err.downcast_ref::<DownloadCancelled>().is_some(),
+                "应返回 DownloadCancelled，实际: {err}"
+            );
+            assert!(!target.with_extension("part").exists(), ".part 应被清理");
+            assert!(!target.exists(), "目标文件不应残留");
+            let _ = std::fs::remove_dir_all(&tmp);
+        })();
+
+        // 恢复代理环境变量
+        for (k, v) in [("HTTP_PROXY", saved_http), ("HTTPS_PROXY", saved_https), ("http_proxy", saved_http_l), ("https_proxy", saved_https_l)] {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        result;
     }
 }

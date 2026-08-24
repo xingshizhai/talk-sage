@@ -7,7 +7,7 @@
 //! 这是"可插拔传输适配器"之一；删除本 crate 即回到纯 headless（M4 预留 axum 适配器）。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -32,6 +32,8 @@ pub struct AppState {
     service: TalkSageService,
     /// 当前监听（None = 未监听）。Arc 便于移入 spawn_blocking 闭包。
     running: Arc<Mutex<Option<RunningListen>>>,
+    /// 进行中的模型下载（引擎 id → 取消标志）。下载开始注册、结束/取消移除。
+    downloads: Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
 }
 
 /// 版本。
@@ -113,6 +115,7 @@ fn list_asr_models() -> Vec<serde_json::Value> {
 }
 
 /// 下载/安装 ASR 引擎（后台线程；进度经 `talksage://event` 推送 ModelProgress）。
+/// 下载期间注册到 `state.downloads`，可用 [`cancel_model_download`] 取消。
 #[tauri::command]
 async fn download_model(
     engine: String,
@@ -126,8 +129,20 @@ async fn download_model(
     let Some(root) = TalkSageService::resolve_models_dir() else {
         return Err("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）".into());
     };
-    let app = app.clone();
     let engine_id = kind.display_name().to_string();
+    // 注册取消标志：同一引擎已在下载则拒绝重复启动
+    let cancel_flag = {
+        let mut dl = state.downloads.lock().map_err(|_| "下载注册表锁失败".to_string())?;
+        if dl.contains_key(&engine_id) {
+            return Err("该模型已在下载中".into());
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        dl.insert(engine_id.clone(), flag.clone());
+        flag
+    };
+    let app = app.clone();
+    // 外层（注册表清理）单独持有一份 engine_id
+    let cleanup_engine = engine_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let emit_app = app.clone();
         let emit_engine = engine_id.clone();
@@ -158,20 +173,45 @@ async fn download_model(
                 },
             );
         };
-        let result = talksage_asr::models::download_engine(kind, &root, Some(&progress));
+        let result = talksage_asr::models::download_engine(kind, &root, Some(&progress), Some(&cancel_flag));
         match result {
             Ok(()) => {
                 emit("done", 100, "安装完成");
                 Ok(())
             }
             Err(e) => {
-                emit("error", 0, &e.to_string());
-                Err(e.to_string())
+                // 用户主动取消：发"已取消"而非"失败"
+                if e.downcast_ref::<talksage_asr::models::DownloadCancelled>().is_some() {
+                    emit("cancelled", 0, "已取消");
+                    Ok(())
+                } else {
+                    emit("error", 0, &e.to_string());
+                    Err(e.to_string())
+                }
             }
         }
     })
     .await
     .map_err(|e| e.to_string())?
+    .map(|_| {
+        // 无论成功/失败/取消，下载结束都要从注册表移除
+        if let Ok(mut dl) = state.downloads.lock() {
+            dl.remove(&cleanup_engine);
+        }
+    })
+}
+
+/// 取消正在进行的模型下载（置位取消标志；下载线程会尽快停止并清理临时文件）。
+#[tauri::command]
+fn cancel_model_download(engine: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let dl = state.downloads.lock().map_err(|_| "下载注册表锁失败".to_string())?;
+    match dl.get(&engine) {
+        Some(flag) => {
+            flag.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+        None => Err("该模型没有正在进行的下载".into()),
+    }
 }
 
 /// 删除 ASR 引擎模型目录。
@@ -694,6 +734,7 @@ pub fn run() {
             sessions,
             service,
             running: Arc::new(Mutex::new(None)),
+            downloads: Mutex::new(std::collections::HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             get_version,
@@ -702,6 +743,7 @@ pub fn run() {
             list_plugin_status,
             list_asr_models,
             download_model,
+            cancel_model_download,
             remove_model,
             save_config,
             ping,

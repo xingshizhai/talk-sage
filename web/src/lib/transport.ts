@@ -50,6 +50,10 @@ export const ipcApi: AppApi = {
     await invoke("download_model", { engine });
   },
 
+  async cancelModelDownload(engine: string): Promise<void> {
+    await invoke("cancel_model_download", { engine });
+  },
+
   async removeModel(engine: string): Promise<void> {
     await invoke("remove_model", { engine });
   },
@@ -185,6 +189,10 @@ export const httpApi: AppApi = {
 
   async downloadModel(engine: string): Promise<void> {
     await req(`/asr/models/${encodeURIComponent(engine)}/download`, { method: "POST" });
+  },
+
+  async cancelModelDownload(engine: string): Promise<void> {
+    await req(`/asr/models/${encodeURIComponent(engine)}/download/cancel`, { method: "POST" });
   },
 
   async removeModel(engine: string): Promise<void> {

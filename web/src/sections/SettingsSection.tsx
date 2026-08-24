@@ -151,8 +151,8 @@ export default function SettingsSection({
     const off = api.onEvent((ev: DomainEvent) => {
       if (ev.type === "model_progress") {
         setModelProgress((prev) => ({ ...prev, [ev.engine]: ev }));
-        // 安装完成/失败后刷新模型列表与可用选项
-        if (ev.stage === "done" || ev.stage === "error") {
+        // 安装完成/失败/取消后刷新模型列表与可用选项
+        if (ev.stage === "done" || ev.stage === "error" || ev.stage === "cancelled") {
           api.listAsrModels().then(setAsrModels).catch(() => {});
         }
       }
@@ -190,6 +190,17 @@ export default function SettingsSection({
       setMessage(`删除失败: ${e}`);
     } finally {
       setModelBusy(null);
+    }
+  }
+
+  /** 取消正在进行的模型下载。 */
+  async function handleCancelDownload(id: string) {
+    setMessage("");
+    try {
+      await api.cancelModelDownload(id);
+      setMessage(`已请求取消: ${id}`);
+    } catch (e) {
+      setMessage(`取消失败: ${e}`);
     }
   }
 
@@ -711,9 +722,14 @@ export default function SettingsSection({
                       </div>
                     )}
                     {prog && prog.stage === "error" && <div style={{ color: "var(--danger)", marginTop: 2 }}>下载失败: {prog.message}</div>}
+                    {prog && prog.stage === "cancelled" && <div style={{ color: "var(--brief)", marginTop: 2 }}>已取消下载，可重新下载</div>}
                     {prog && prog.stage === "done" && <div style={{ color: "var(--live)", marginTop: 2 }}>安装完成</div>}
                   </div>
-                  {m.installed ? (
+                  {active && (prog?.stage === "downloading" || prog?.stage === "extracting") ? (
+                    <button onClick={() => void handleCancelDownload(m.id)} style={{ fontSize: 12, padding: "4px 10px", cursor: "pointer" }}>
+                      取消
+                    </button>
+                  ) : m.installed ? (
                     <button onClick={() => void handleRemoveModel(m.id)} disabled={modelBusy !== null || !!active} style={{ fontSize: 12, padding: "4px 10px", cursor: "pointer" }}>
                       删除
                     </button>
