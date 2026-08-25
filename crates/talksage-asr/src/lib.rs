@@ -17,6 +17,9 @@ use sherpa_onnx::{
     OnlineRecognizer, OnlineRecognizerConfig, OnlineStream, OnlineTransducerModelConfig,
 };
 
+/// 阿里云 NLS 引擎与 Token 管理。
+pub mod aliyun;
+
 /// GPU 后端检测（CUDA / CoreML / CPU）。
 pub mod gpu;
 pub use gpu::GpuBackend;
