@@ -156,6 +156,11 @@ impl TalkSageService {
         }
     }
 
+    /// 在宿主进程退出前主动释放常驻 ASR 模型。
+    pub fn clear_engines(&self) {
+        self.engines.clear();
+    }
+
     /// 无需启动音频/ASR 的插件状态预检，供设置页、REST 和 doctor 使用。
     pub fn plugin_registrations(&self) -> Vec<talksage_plugins::PluginRegistration> {
         let snapshot = self.config.snapshot();

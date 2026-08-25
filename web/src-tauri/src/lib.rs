@@ -864,10 +864,17 @@ fn generate_highlights(session_id: i64, state: tauri::State<'_, AppState>) -> Re
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // whisper.cpp 1.8.3 在 macOS 15+ 的 residency-set 全局析构阶段可能因
+    // Tauri `process::exit` 跳过 Rust Drop 而触发 GGML_ASSERT/SIGABRT。该优化
+    // 只负责延长资源驻留，不决定是否使用 Metal；禁用后 Metal/融合/并发仍启用。
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    std::env::set_var("GGML_METAL_NO_RESIDENCY", "1");
     let config = Arc::new(ConfigManager::load(None, None).expect("加载配置失败"));
     let data_dir = config.data_dir().to_path_buf();
     let _log_guard = talksage_logging::init(Some(&data_dir));
     log::info!("TalkSage 桌面应用启动，数据目录: {}", data_dir.display());
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    log::info!("Metal 稳定性保护已启用: GGML_METAL_NO_RESIDENCY=1");
     let startup_gpu = talksage_asr::GpuBackend::detect();
     log::info!(
         "启动时 ASR 硬件诊断: physical_gpu={} runtime_backend={} accelerated={} note={}",
@@ -883,7 +890,7 @@ pub fn run() {
     // 上次异常退出的残留（未完成录音 + 未结束会话），在窗口起来前先收拾干净。
     service.recover_on_startup();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             config,
@@ -1027,8 +1034,32 @@ pub fn run() {
             );
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running TalkSage");
+        .build(tauri::generate_context!())
+        .expect("error while building TalkSage");
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            prepare_exit(app_handle);
+        }
+    });
+}
+
+/// Tauri `App::run` 最终使用 `process::exit`，不会执行 managed state 的 Drop。
+/// 因此退出事件中显式停止管道并释放 Metal 模型；幂等，兼容托盘和前端退出。
+fn prepare_exit(app: &AppHandle) {
+    static EXIT_CLEANUP_STARTED: AtomicBool = AtomicBool::new(false);
+    if EXIT_CLEANUP_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    log::info!("应用退出清理开始");
+    let state = app.state::<AppState>();
+    let running = state.running.lock().ok().and_then(|mut guard| guard.take());
+    if let Some(running) = running {
+        if let Err(error) = state.service.finish(running) {
+            log::error!("应用退出时停止监听失败: {error:#}");
+        }
+    }
+    state.service.clear_engines();
+    log::info!("应用退出清理完成");
 }
 
 /// 显示并聚焦主窗口（从托盘/菜单栏恢复）。

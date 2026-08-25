@@ -755,11 +755,39 @@ impl EnginePool {
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().values().map(|v| v.len()).sum()
     }
+
+    /// 主动释放池中模型。桌面应用必须在 Tauri 调用 `process::exit` 前执行；
+    /// 否则 Rust Drop 不会运行，whisper.cpp Metal residency set 会残留到 C++
+    /// 全局析构阶段并触发断言。
+    pub fn clear(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        let count = inner.values().map(Vec::len).sum::<usize>();
+        inner.clear();
+        log::info!("ASR 引擎池已清空: released={count}");
+    }
 }
 
 #[cfg(test)]
 mod pool_tests {
     use super::*;
+
+    struct DummyEngine;
+
+    impl SegmentEngine for DummyEngine {
+        fn accept(&mut self, _samples: &[f32]) -> Option<String> {
+            None
+        }
+
+        fn finish(&mut self) -> String {
+            String::new()
+        }
+
+        fn reset(&mut self) {}
+
+        fn kind(&self) -> EngineKind {
+            EngineKind::Qwen3Asr
+        }
+    }
 
     /// 探测模型目录（真实模型缺失时跳过，避免失败）。
     fn model_dir(kind: EngineKind) -> Option<std::path::PathBuf> {
@@ -810,6 +838,18 @@ mod pool_tests {
         let pool = EnginePool::new();
         pool.warmup(EngineKind::ParaformerZh, &dir, 1).expect("预热失败");
         assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn clear_releases_all_cached_engines() {
+        let pool = EnginePool::new();
+        pool.inner.lock().unwrap().insert(
+            "test".into(),
+            vec![Box::new(DummyEngine), Box::new(DummyEngine)],
+        );
+        assert_eq!(pool.len(), 2);
+        pool.clear();
+        assert_eq!(pool.len(), 0);
     }
 
     #[test]
