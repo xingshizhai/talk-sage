@@ -2,6 +2,7 @@
 // 模型安装/删除在独立的「模型管理」页，不占用本页。
 
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { AppConfig, AsrModelInfo, PluginMeta, PluginStatusInfo, SceneMode, SceneParams } from "../lib/api";
 import type { PluginValues } from "../lib/plugins";
 import { analysisPluginIds, buildPluginUpdates, fieldLabel, initialPluginValues, pluginFields, pluginStatusLabel } from "../lib/plugins";
@@ -103,6 +104,11 @@ export default function SettingsSection({
   const [engineEn, setEngineEn] = useState<string>(initialEngineEn);
   const [engineZh, setEngineZh] = useState<string>(initialEngineZh);
   const [punctEnabled, setPunctEnabled] = useState<boolean>(config?.asr?.punct_enabled ?? true);
+  const [asrMode, setAsrMode] = useState(config?.asr?.asr_mode ?? "auto");
+  const [aliyunKeyId, setAliyunKeyId] = useState(config?.asr?.aliyun_access_key_id ?? "");
+  const [aliyunKeySecret, setAliyunKeySecret] = useState(config?.asr?.aliyun_access_key_secret ?? "");
+  const [aliyunAppKey, setAliyunAppKey] = useState(config?.asr?.aliyun_app_key ?? "");
+  const [gpuStatus, setGpuStatus] = useState<{ backend: string; display_name: string; is_accelerated: boolean } | null>(null);
   const [terminologyEnabled, setTerminologyEnabled] = useState(config?.asr?.terminology?.enabled ?? false);
   const [hotwordScore, setHotwordScore] = useState(config?.asr?.terminology?.hotword_score ?? 1.5);
   const [terminologyTerms, setTerminologyTerms] = useState((config?.asr?.terminology?.terms ?? []).join("\n"));
@@ -146,6 +152,9 @@ export default function SettingsSection({
       return null;
     };
     (async () => {
+      invoke<{ backend: string; display_name: string; is_accelerated: boolean }>("get_gpu_status")
+        .then(setGpuStatus)
+        .catch(() => {});
       const [voice, models, metas, statuses] = await Promise.all([
         api.getVoiceprintStatus().catch(warn("声纹状态")),
         api.listAsrModels().catch(warn("ASR 模型列表")),
@@ -348,6 +357,10 @@ export default function SettingsSection({
           engine_en: engineEn,
           engine_zh: engineZh,
           punct_enabled: punctEnabled,
+          asr_mode: asrMode,
+          aliyun_access_key_id: aliyunKeyId,
+          aliyun_access_key_secret: aliyunKeySecret,
+          aliyun_app_key: aliyunAppKey,
           terminology: {
             enabled: terminologyEnabled,
             hotword_score: hotwordScore,
@@ -786,6 +799,58 @@ export default function SettingsSection({
               <div style={{ ...hint, color: "var(--brief)" }}>需要下载标点恢复模型（约 20 MB）。请点击上方「打开模型管理」搜索 punct 下载。</div>
             );
           })()}
+
+          {gpuStatus && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, fontSize: 12, color: "var(--text-2)" }}>
+              <span>GPU：</span>
+              <span style={{ color: gpuStatus.is_accelerated ? "var(--live)" : undefined }}>{gpuStatus.display_name}</span>
+            </div>
+          )}
+
+          <h3 style={{ ...groupTitle, marginTop: 10 }}>ASR 模式</h3>
+          <select
+            value={asrMode}
+            onChange={(e) => setAsrMode(e.target.value)}
+            style={{ ...inputStyle, marginBottom: 4 }}
+          >
+            <option value="auto">自动（有 GPU 用本地，否则云端）</option>
+            <option value="local">本地优先</option>
+            <option value="cloud">阿里云云端</option>
+          </select>
+
+          {(asrMode === "auto" || asrMode === "cloud") && (
+            <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-2)" }}>阿里云实时语音识别</span>
+              <label style={labelBlock}>
+                <span style={{ fontSize: 11 }}>AccessKey ID</span>
+                <input
+                  value={aliyunKeyId}
+                  onChange={(e) => setAliyunKeyId(e.target.value)}
+                  placeholder="LTAI..."
+                  style={{ ...inputStyle, display: "block", width: "100%", marginTop: 2 }}
+                />
+              </label>
+              <label style={labelBlock}>
+                <span style={{ fontSize: 11 }}>AccessKey Secret</span>
+                <input
+                  type="password"
+                  value={aliyunKeySecret}
+                  onChange={(e) => setAliyunKeySecret(e.target.value)}
+                  placeholder="••••••••"
+                  style={{ ...inputStyle, display: "block", width: "100%", marginTop: 2 }}
+                />
+              </label>
+              <label style={labelBlock}>
+                <span style={{ fontSize: 11 }}>AppKey</span>
+                <input
+                  value={aliyunAppKey}
+                  onChange={(e) => setAliyunAppKey(e.target.value)}
+                  placeholder="NLS 项目 AppKey"
+                  style={{ ...inputStyle, display: "block", width: "100%", marginTop: 2 }}
+                />
+              </label>
+            </div>
+          )}
         </div>
       )}
 
