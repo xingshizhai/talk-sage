@@ -505,6 +505,7 @@ impl TalkSageService {
             speaker,
             engine_pool: Some(self.engines.clone()),
             hooks,
+            punct_enabled: snapshot.asr.punct_enabled,
         })
     }
 

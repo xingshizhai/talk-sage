@@ -83,6 +83,7 @@ pub fn transcribe_file(
             )]),
             &talksage_plugins::PluginContext::new(),
         ),
+        punct_enabled: false,
     };
 
     let start = Instant::now();

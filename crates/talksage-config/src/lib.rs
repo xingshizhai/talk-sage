@@ -518,6 +518,8 @@ pub struct AsrConfig {
     pub backend: String,
     /// 专业术语热词和确定性纠错配置。
     pub terminology: TerminologyConfig,
+    /// 是否启用标点恢复与语义分段（流式引擎且模型已安装时生效）。
+    pub punct_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -567,6 +569,7 @@ impl Default for AsrConfig {
             engine_en: "zipformer-en".into(),
             backend: "auto".into(),
             terminology: TerminologyConfig::default(),
+            punct_enabled: true,
         }
     }
 }
@@ -1063,6 +1066,7 @@ fn merge_config(default: Config, user: Config) -> Config {
             engine_en: take_or(user.asr.engine_en, default.asr.engine_en),
             backend: take_or(user.asr.backend, default.asr.backend),
             terminology: user.asr.terminology,
+            punct_enabled: user.asr.punct_enabled,
         },
         audio: AudioConfig {
             mic_device: user.audio.mic_device.or(default.audio.mic_device),

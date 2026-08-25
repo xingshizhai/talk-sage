@@ -141,6 +141,7 @@ fn zh_pipeline(root: &Path, wav: &Path, min_commit_ms: u64) -> LivePipelineConfi
             ]),
             &talksage_plugins::PluginContext::new(),
         ),
+        punct_enabled: false,
     }
 }
 

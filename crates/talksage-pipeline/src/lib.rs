@@ -162,6 +162,8 @@ pub struct LivePipelineConfig {
     /// ASR 引擎池（Some = 引擎常驻复用，监听热启动；None = 每次新建）。
     /// 参考 WhisperLiveKit 引擎单例设计。
     pub engine_pool: Option<Arc<EnginePool>>,
+    /// 是否启用标点恢复与语义分段（流式引擎且模型已安装时生效）。
+    pub punct_enabled: bool,
     /// 插件钩子（filter 链 + observer）。由 TalkSageService 用
     /// talksage_plugins::build_registry 装配。
     ///
@@ -392,6 +394,8 @@ struct StreamWorker {
     engine_options: EngineOptions,
     /// 插件钩子（filter 链）。与其它流共享同一批 filter 实例。
     hooks: talksage_plugins::HookRegistry,
+    /// 标点恢复与语义分段（流式引擎 + 模型已安装时为 Some）。
+    punct_restorer: Option<talksage_asr::PunctuationRestorer>,
     /// 该流采样时钟。
     clock: AudioClock,
     /// 会话墙钟原点（ms）；`ts_ms = origin_ms + clock.ms()`。
@@ -512,6 +516,7 @@ impl StreamWorker {
             engine_options: cfg.engine_options.clone(),
             engine: Some(engine),
             hooks,
+            punct_restorer: None,
             clock: AudioClock::new(talksage_audio::TARGET_SAMPLE_RATE),
             origin_ms,
         })
@@ -778,42 +783,74 @@ impl StreamWorker {
                 final_text.chars().count(),
                 final_text.chars().take(60).collect::<String>(),
             );
-            let seg = TranscriptSegment {
-                speaker_id: assignment.source_id(),
-                speaker_label: assignment.label().to_string(),
-                speaker_attribution: Some(assignment.attribution().clone()),
-                text: final_text.clone(),
-                is_partial: false,
-                ts_ms,
-                duration_ms,
-                rms,
+
+            // 标点恢复 + 语义分段：有 restorer 时把一条长段切成若干子段，
+            // 每个子段独立发出；无 restorer 时退化为单段。
+            let sub_segments: Vec<(String, u64)> = match &self.punct_restorer {
+                Some(restorer) => restorer.restore_and_split(&final_text, duration_ms, 3),
+                None => vec![(final_text.clone(), duration_ms)],
             };
-            // filter 链在产生点施加：被吞掉的事件既不 emit，也不触发 observer。
-            // 这一点必须保持——短段抑制原本就同时拦住两者。
-            let ev = DomainEvent::Segment {
-                speaker_id: seg.speaker_id,
-                speaker_label: seg.speaker_label.clone(),
-                speaker_attribution: seg.speaker_attribution.clone(),
-                text: seg.text.clone(),
-                is_partial: false,
-                ts_ms: seg.ts_ms,
-                duration_ms: seg.duration_ms,
-                rms: seg.rms,
-                revision: 0,
-                start_sample: self.seg_start_sample,
-                end_sample,
-            };
-            if let Some(ev) = self.hooks.apply_filters(ev) {
-                // filter 放行 → 这一段真的存在，此刻才注册/更新说话人。
-                assignment.commit();
-                // filter 是**变换**而不仅是丢弃：observer 与统计计数器都必须看
-                // filter 之后的数据。否则第一个做改写的 filter（脱敏/标点/规范化）
-                // 一上线，落库与 sink 的文本就会和插件、words/questions 静默错位。
-                let seg = filtered_segment(&ev).unwrap_or(seg);
-                self.statistics.record_committed_segment(&seg.text);
-                emit(ev);
-                if let Some(hook) = &self.on_final {
-                    hook(&seg);
+
+            // 预先提取说话人信息，以便在循环中复用（commit 会消耗所有权）。
+            let spk_id = assignment.source_id();
+            let spk_label = assignment.label().to_string();
+            let spk_attribution = Some(assignment.attribution().clone());
+            let mut assignment_opt = Some(assignment);
+
+            let seg_start_ms = ts_ms.saturating_sub(duration_ms);
+            let mut offset_ms: u64 = 0;
+            let sub_count = sub_segments.len();
+            for (i, (sub_text, sub_dur)) in sub_segments.into_iter().enumerate() {
+                if sub_text.is_empty() {
+                    offset_ms += sub_dur;
+                    continue;
+                }
+                let sub_ts = seg_start_ms + offset_ms + sub_dur;
+                offset_ms += sub_dur;
+                let is_last = i == sub_count - 1;
+
+                let seg = TranscriptSegment {
+                    speaker_id: spk_id,
+                    speaker_label: spk_label.clone(),
+                    speaker_attribution: spk_attribution.clone(),
+                    text: sub_text.clone(),
+                    is_partial: false,
+                    ts_ms: sub_ts,
+                    duration_ms: sub_dur,
+                    rms,
+                };
+                // filter 链在产生点施加：被吞掉的事件既不 emit，也不触发 observer。
+                // 这一点必须保持——短段抑制原本就同时拦住两者。
+                let ev = DomainEvent::Segment {
+                    speaker_id: seg.speaker_id,
+                    speaker_label: seg.speaker_label.clone(),
+                    speaker_attribution: seg.speaker_attribution.clone(),
+                    text: seg.text.clone(),
+                    is_partial: false,
+                    ts_ms: seg.ts_ms,
+                    duration_ms: seg.duration_ms,
+                    rms: seg.rms,
+                    revision: 0,
+                    start_sample: self.seg_start_sample,
+                    end_sample,
+                };
+                if let Some(ev) = self.hooks.apply_filters(ev) {
+                    // filter 放行 → 第一个放行的子段才注册说话人（只提交一次）。
+                    if let Some(a) = assignment_opt.take() {
+                        a.commit();
+                    }
+                    // filter 是**变换**而不仅是丢弃：observer 与统计计数器都必须看
+                    // filter 之后的数据。否则第一个做改写的 filter（脱敏/标点/规范化）
+                    // 一上线，落库与 sink 的文本就会和插件、words/questions 静默错位。
+                    let seg = filtered_segment(&ev).unwrap_or(seg);
+                    self.statistics.record_committed_segment(&seg.text);
+                    emit(ev);
+                    // on_final（插件触发）仅在最后一个子段触发，与单段行为一致。
+                    if is_last {
+                        if let Some(hook) = &self.on_final {
+                            hook(&seg);
+                        }
+                    }
                 }
             }
         }
@@ -1030,6 +1067,15 @@ fn run_loop(
             cfg.hooks.clone(),
             origin_ms,
         )?;
+        // 标点恢复：仅流式引擎 + 用户启用 + 模型已安装时激活
+        if cfg.punct_enabled && sc.engine_kind.is_streaming() {
+            if let Some(models_root) = sc.model_dir.parent() {
+                w.punct_restorer = talksage_asr::PunctuationRestorer::try_load(models_root);
+                if w.punct_restorer.is_some() {
+                    log::info!("流[{}] 标点恢复已启用", sc.speaker_label);
+                }
+            }
+        }
         w.start_input(cfg.chunk_ms)?;
         log::info!(
             "流[{}] 就绪: engine={} model={} 加载耗时={:?}",
