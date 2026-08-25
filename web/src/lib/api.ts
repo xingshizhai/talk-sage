@@ -11,6 +11,7 @@ export interface AppConfig {
     engine_zh: string;
     engine_en: string;
     backend: string;
+    punct_enabled: boolean;
     terminology: {
       enabled: boolean;
       hotword_score: number;

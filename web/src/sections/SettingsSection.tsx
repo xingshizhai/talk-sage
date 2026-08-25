@@ -102,6 +102,7 @@ export default function SettingsSection({
       : config?.asr?.engine_en ?? "zipformer-en";
   const [engineEn, setEngineEn] = useState<string>(initialEngineEn);
   const [engineZh, setEngineZh] = useState<string>(initialEngineZh);
+  const [punctEnabled, setPunctEnabled] = useState<boolean>(config?.asr?.punct_enabled ?? true);
   const [terminologyEnabled, setTerminologyEnabled] = useState(config?.asr?.terminology?.enabled ?? false);
   const [hotwordScore, setHotwordScore] = useState(config?.asr?.terminology?.hotword_score ?? 1.5);
   const [terminologyTerms, setTerminologyTerms] = useState((config?.asr?.terminology?.terms ?? []).join("\n"));
@@ -346,6 +347,7 @@ export default function SettingsSection({
         asr: {
           engine_en: engineEn,
           engine_zh: engineZh,
+          punct_enabled: punctEnabled,
           terminology: {
             enabled: terminologyEnabled,
             hotword_score: hotwordScore,
@@ -764,6 +766,26 @@ export default function SettingsSection({
             <input type="number" min={0} max={24} step={1} value={inputGainDb} onChange={(e) => setInputGainDb(Math.min(24, Math.max(0, Number(e.target.value) || 0)))} style={numStyle} /> dB
           </label>
           <div style={hint}>默认 +12dB；无线麦双声道自动选择电平较高的通道，并在放大后限幅，避免与静音通道平均导致声音变小。</div>
+
+          <h3 style={{ ...groupTitle, marginTop: 10 }}>语义分句</h3>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={punctEnabled}
+              onChange={(e) => setPunctEnabled(e.target.checked)}
+            />
+            <span>启用语义分句（标点恢复模型）</span>
+          </label>
+          <div style={hint}>在停顿断句基础上，用标点模型识别语义边界并自动拆分。仅对 paraformer-zh / zipformer-en 流式引擎生效。</div>
+          {punctEnabled && (() => {
+            const punctModel = asrModels.find((m) => m.id === "punct");
+            if (!punctModel) return null;
+            return punctModel.installed ? (
+              <div style={{ ...hint, color: "var(--live)" }}>✓ 标点恢复模型已安装</div>
+            ) : (
+              <div style={{ ...hint, color: "var(--brief)" }}>需要下载标点恢复模型（约 20 MB）。请点击上方「打开模型管理」搜索 punct 下载。</div>
+            );
+          })()}
         </div>
       )}
 
