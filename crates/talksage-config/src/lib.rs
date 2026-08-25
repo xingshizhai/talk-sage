@@ -47,10 +47,13 @@ fn dirs_home() -> PathBuf {
 pub enum SceneMode {
     /// 单人听写：低资源、灵敏 VAD、单流。
     Dictation,
-    /// 一对一会话：默认按输入通道区分双方，不运行声纹模型。
+    /// 一对一会话：按输入通道区分双方，两流使用相同语言。
     Conversation,
-    /// 双语对话：双方通道使用不同语言模型，双向翻译。
-    Translation,
+    /// 双语对话：双方通道使用不同语言，可选双向翻译。
+    #[serde(alias = "translation")]   // 兼容旧配置文件
+    Bilingual,
+    /// 实时翻译：单一语言输入，自动翻译到目标语言输出。
+    LiveTranslation,
     /// 多人会议：启用在线声纹聚类和段内换人检测。
     Meeting,
     /// 演讲/课堂：长段单流，开启术语与简报，不运行声纹模型。
@@ -117,8 +120,11 @@ pub struct SceneParams {
     pub client_enabled: bool,
     /// 客户流引擎。
     pub client_engine: String,
-    /// 用户流和对方流的 BCP-47 风格语言代码（当前实时翻译支持 zh/en）。
-    pub user_language: String,
+    /// 本场景主语言（所有单语言场景两流均使用此语言）。
+    /// 双语场景中为「我的语言」；实时翻译场景中为「输入语言」。
+    #[serde(alias = "user_language")]
+    pub language: String,
+    /// 对方语言：双语场景为「对方讲的语言」；实时翻译场景为「翻译目标语言」。
     pub client_language: String,
     pub translation_mode: TranslationMode,
     /// 该场景允许启用的分析类插件 id。不在列表里的一律关闭。
@@ -157,23 +163,20 @@ fn all_analysis_plugins() -> Vec<String> {
 pub fn scene_params(mode: SceneMode) -> SceneParams {
     match mode {
         SceneMode::Dictation => SceneParams {
-            vad_preset: VadPreset::Sensitive, // 灵敏：抓短句/弱语音（日常对话碎句多）
+            vad_preset: VadPreset::Sensitive,
             vad_threshold: None,
             vad_min_speech_ms: None,
-            // 段尾静音 600ms：Sensitive 预设的 300ms 会在尾字韵母衰减时过早切段，
-            // 导致一句话最后一个字被吞（流式 ASR 解码有 ~600ms 步进延迟）。
             vad_min_silence_ms: Some(600),
             vad_max_speech_ms: None,
-            denoise_enabled: false, // 生活噪音多变，弱信号优先，默认不开门限
+            denoise_enabled: false,
             denoise_gate: 0.008,
-            min_segment_ms: 0, // 生活短句不丢
+            min_segment_ms: 0,
             user_engine: "paraformer-zh".into(),
-            client_enabled: false, // 日常单方说话，不开双流
+            client_enabled: false,
             client_engine: "zipformer-en".into(),
-            user_language: "zh".into(),
+            language: "zh".into(),
             client_language: "en".into(),
             translation_mode: TranslationMode::Off,
-            // 省资源/安静：单人听写不允许任何分析类插件
             plugin_allowlist: Vec::new(),
             speaker_mode: SpeakerMode::Off,
             noise_auto_detect: true,
@@ -190,14 +193,14 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             user_engine: "paraformer-zh".into(),
             client_enabled: true,
             client_engine: "paraformer-zh".into(),
-            user_language: "zh".into(),
+            language: "zh".into(),
             client_language: "zh".into(),
             translation_mode: TranslationMode::Off,
             plugin_allowlist: ["term_explainer", "brief_retriever", "key_point_extractor"].iter().map(|s| s.to_string()).collect(),
             speaker_mode: SpeakerMode::Channel,
             noise_auto_detect: true,
         },
-        SceneMode::Translation => SceneParams {
+        SceneMode::Bilingual => SceneParams {
             vad_preset: VadPreset::Standard,
             vad_threshold: None,
             vad_min_speech_ms: None,
@@ -209,11 +212,30 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             user_engine: "paraformer-zh".into(),
             client_enabled: true,
             client_engine: "zipformer-en".into(),
-            plugin_allowlist: all_analysis_plugins(),
-            user_language: "zh".into(),
+            language: "zh".into(),
             client_language: "en".into(),
             translation_mode: TranslationMode::Bidirectional,
+            plugin_allowlist: all_analysis_plugins(),
             speaker_mode: SpeakerMode::Channel,
+            noise_auto_detect: true,
+        },
+        SceneMode::LiveTranslation => SceneParams {
+            vad_preset: VadPreset::Standard,
+            vad_threshold: None,
+            vad_min_speech_ms: None,
+            vad_min_silence_ms: None,
+            vad_max_speech_ms: None,
+            denoise_enabled: false,
+            denoise_gate: 0.008,
+            min_segment_ms: 300,
+            user_engine: "paraformer-zh".into(),
+            client_enabled: false,
+            client_engine: "zipformer-en".into(),
+            language: "zh".into(),
+            client_language: "en".into(),
+            translation_mode: TranslationMode::Bidirectional,
+            plugin_allowlist: ["translator"].iter().map(|s| s.to_string()).collect(),
+            speaker_mode: SpeakerMode::Off,
             noise_auto_detect: true,
         },
         SceneMode::Meeting => SceneParams {
@@ -228,7 +250,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             user_engine: "paraformer-zh".into(),
             client_enabled: true,
             client_engine: "paraformer-zh".into(),
-            user_language: "zh".into(),
+            language: "zh".into(),
             client_language: "zh".into(),
             translation_mode: TranslationMode::Off,
             plugin_allowlist: all_analysis_plugins(),
@@ -247,7 +269,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             user_engine: "paraformer-zh".into(),
             client_enabled: false,
             client_engine: "zipformer-en".into(),
-            user_language: "zh".into(),
+            language: "zh".into(),
             client_language: "en".into(),
             translation_mode: TranslationMode::Off,
             plugin_allowlist: ["term_explainer", "brief_retriever", "key_point_extractor"].iter().map(|s| s.to_string()).collect(),
@@ -266,7 +288,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             user_engine: "paraformer-zh".into(),
             client_enabled: true,
             client_engine: "zipformer-en".into(),
-            user_language: "zh".into(),
+            language: "zh".into(),
             client_language: "en".into(),
             translation_mode: TranslationMode::Off,
             plugin_allowlist: all_analysis_plugins(),
@@ -309,8 +331,9 @@ impl SceneConfig {
         match self.mode {
             SceneMode::Dictation => "单人听写",
             SceneMode::Conversation => "一对一会话",
-            SceneMode::Translation => "双语对话",
-            SceneMode::Meeting => "会议",
+            SceneMode::Bilingual => "双语对话",
+            SceneMode::LiveTranslation => "实时翻译",
+            SceneMode::Meeting => "多人会议",
             SceneMode::Lecture => "演讲/课堂",
             SceneMode::Custom => "自定义",
         }
@@ -387,8 +410,8 @@ pub fn apply_scene_params(p: &mut SceneParams, u: &serde_json::Value) {
             .filter_map(|x| x.as_str().map(|s| s.to_string()))
             .collect();
     }
-    if let Some(v) = u.get("user_language").and_then(|v| v.as_str()) {
-        p.user_language = v.to_string();
+    if let Some(v) = u.get("language").or_else(|| u.get("user_language")).and_then(|v| v.as_str()) {
+        p.language = v.to_string();
     }
     if let Some(v) = u.get("client_language").and_then(|v| v.as_str()) {
         p.client_language = v.to_string();
@@ -485,10 +508,12 @@ impl Default for KnowledgeBaseConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AsrConfig {
-    /// 客户（英文）流式引擎。
-    pub client_engine: String,
-    /// 用户（中文）流式引擎。
-    pub user_engine: String,
+    /// 中文场景使用的引擎（两流均用此引擎）。
+    #[serde(alias = "user_engine")]
+    pub engine_zh: String,
+    /// 英文场景使用的引擎（两流均用此引擎）。
+    #[serde(alias = "client_engine")]
+    pub engine_en: String,
     /// 推理后端：auto | cpu | cuda | metal。
     pub backend: String,
     /// 专业术语热词和确定性纠错配置。
@@ -538,8 +563,8 @@ impl TerminologyConfig {
 impl Default for AsrConfig {
     fn default() -> Self {
         Self {
-            client_engine: "zipformer-en".into(),
-            user_engine: "paraformer-zh".into(),
+            engine_zh: "paraformer-zh".into(),
+            engine_en: "zipformer-en".into(),
             backend: "auto".into(),
             terminology: TerminologyConfig::default(),
         }
@@ -1034,8 +1059,8 @@ impl ConfigManager {
 fn merge_config(default: Config, user: Config) -> Config {
     Config {
         asr: AsrConfig {
-            client_engine: take_or(user.asr.client_engine, default.asr.client_engine),
-            user_engine: take_or(user.asr.user_engine, default.asr.user_engine),
+            engine_zh: take_or(user.asr.engine_zh, default.asr.engine_zh),
+            engine_en: take_or(user.asr.engine_en, default.asr.engine_en),
             backend: take_or(user.asr.backend, default.asr.backend),
             terminology: user.asr.terminology,
         },
@@ -1113,7 +1138,7 @@ fn merge_config(default: Config, user: Config) -> Config {
                 user_engine: user.scene.custom.user_engine,
                 client_enabled: user.scene.custom.client_enabled,
                 client_engine: user.scene.custom.client_engine,
-                user_language: user.scene.custom.user_language,
+                language: user.scene.custom.language,
                 client_language: user.scene.custom.client_language,
                 translation_mode: user.scene.custom.translation_mode,
                 plugin_allowlist: user.scene.custom.plugin_allowlist,
@@ -1186,7 +1211,7 @@ mod tests {
         let _env = env_lock();
         let mgr = ConfigManager::load(None, None).unwrap();
         let c = mgr.snapshot();
-        assert_eq!(c.asr.user_engine, "paraformer-zh");
+        assert_eq!(c.asr.engine_zh, "paraformer-zh");
         assert_eq!(c.server.host, "127.0.0.1");
         assert!(!c.server.enabled);
         assert_eq!(c.audio.vad.effective(), (0.50, 0.25, 0.50, 512, 30.0));
@@ -1221,7 +1246,7 @@ min_segment_ms = 600
         // 最短提交时长（噪音短段抑制）
         assert_eq!(c.audio.min_segment_ms, Some(600));
         // 未覆盖字段保持默认
-        assert_eq!(c.asr.user_engine, "paraformer-zh");
+        assert_eq!(c.asr.engine_zh, "paraformer-zh");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1255,7 +1280,7 @@ min_segment_ms = 600
         assert_eq!(reloaded.snapshot().llm.default, "kimi");
         assert!(!reloaded.snapshot().plugins.get_bool("translator", "enabled", true));
         // 未修改字段保持默认
-        assert_eq!(reloaded.snapshot().asr.user_engine, "paraformer-zh");
+        assert_eq!(reloaded.snapshot().asr.engine_zh, "paraformer-zh");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1279,6 +1304,7 @@ min_segment_ms = 600
         assert_eq!(p.min_segment_ms, 300);
         assert_eq!(p.user_engine, "paraformer-zh");
         assert!(p.client_enabled);
+        assert_eq!(p.language, "zh");
         assert_eq!(
             p.plugin_allowlist,
             vec!["term_explainer", "brief_retriever", "key_point_extractor"]
@@ -1292,21 +1318,35 @@ min_segment_ms = 600
     #[test]
     fn scene_templates_express_distinct_workloads() {
         let dictation = scene_params(SceneMode::Dictation);
-        let translation = scene_params(SceneMode::Translation);
+        let bilingual = scene_params(SceneMode::Bilingual);
+        let live_translation = scene_params(SceneMode::LiveTranslation);
         let meeting = scene_params(SceneMode::Meeting);
         let lecture = scene_params(SceneMode::Lecture);
+
         assert_eq!(dictation.vad_preset, VadPreset::Sensitive);
         assert!(!dictation.client_enabled, "听写场景应单流");
         assert!(dictation.plugin_allowlist.is_empty(), "听写场景应关闭分析插件");
-        // 段尾静音 600ms：防止尾字韵母衰减时 VAD 过早切段吞掉句尾字（回归网）
-        assert_eq!(dictation.vad_min_silence_ms, Some(600), "听写场景应使用较保守的段尾静音");
-        assert_eq!(translation.translation_mode, TranslationMode::Bidirectional);
+        assert_eq!(dictation.vad_min_silence_ms, Some(600));
+
+        assert_eq!(bilingual.translation_mode, TranslationMode::Bidirectional);
+        assert_eq!(bilingual.language, "zh");
+        assert_eq!(bilingual.client_language, "en");
+        assert!(bilingual.client_enabled);
+
+        assert_eq!(live_translation.translation_mode, TranslationMode::Bidirectional);
+        assert!(!live_translation.client_enabled, "实时翻译默认单流");
+        assert!(live_translation.plugin_allowlist.contains(&"translator".to_string()));
+        assert_eq!(live_translation.language, "zh");
+        assert_eq!(live_translation.client_language, "en");
+
         assert_eq!(meeting.speaker_mode, SpeakerMode::Voiceprint);
+        assert_eq!(meeting.language, "zh");
+
         assert_eq!(lecture.vad_max_speech_ms, Some(60_000));
-        // 默认（会议）→ effective 用模板而非 custom
+
         let cfg = SceneConfig { mode: SceneMode::Meeting, custom: scene_params(SceneMode::Custom) };
         assert_eq!(cfg.effective().vad_preset, meeting.vad_preset);
-        // 自定义 → 用 custom
+
         let cfg_custom = SceneConfig { mode: SceneMode::Custom, custom: dictation.clone() };
         assert_eq!(cfg_custom.effective().vad_preset, VadPreset::Sensitive);
     }
@@ -1389,10 +1429,18 @@ knob = 42
     }
 
     #[test]
-    fn translation_scene_enables_translator() {
-        let p = scene_params(SceneMode::Translation);
+    fn bilingual_scene_allows_all_analysis_plugins() {
+        let allow = scene_params(SceneMode::Bilingual).plugin_allowlist;
+        for id in ["term_explainer", "translator", "brief_retriever", "key_point_extractor"] {
+            assert!(allow.contains(&id.to_string()), "双语模式应允许 {id}");
+        }
+    }
+
+    #[test]
+    fn bilingual_scene_enables_translator() {
+        let p = scene_params(SceneMode::Bilingual);
         assert!(p.plugin_allowlist.contains(&"translator".to_string()));
-        assert_eq!(p.user_language, "zh");
+        assert_eq!(p.language, "zh");
         assert_eq!(p.client_language, "en");
     }
 
@@ -1412,16 +1460,38 @@ knob = 42
         apply_scene_params(
             &mut p,
             &serde_json::json!({
-                "user_language": "en",
+                "language": "en",
                 "client_language": "zh",
                 "translation_mode": "client_to_user",
                 "speaker_mode": "voiceprint"
             }),
         );
-        assert_eq!(p.user_language, "en");
+        assert_eq!(p.language, "en");
         assert_eq!(p.client_language, "zh");
         assert_eq!(p.translation_mode, TranslationMode::ClientToUser);
         assert_eq!(p.speaker_mode, SpeakerMode::Voiceprint);
+    }
+
+    #[test]
+    fn old_user_language_key_still_works_in_apply_scene_params() {
+        let mut p = scene_params(SceneMode::Custom);
+        apply_scene_params(
+            &mut p,
+            &serde_json::json!({ "user_language": "en" }),
+        );
+        assert_eq!(p.language, "en", "旧键 user_language 应映射到 language");
+    }
+
+    #[test]
+    fn bilingual_mode_deserializes_from_old_translation_key() {
+        let _env = env_lock();
+        let dir = std::env::temp_dir().join(format!("talksage-cfg-bilingual-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("talksage.toml");
+        std::fs::write(&file, "[scene]\nmode = \"translation\"\n").unwrap();
+        let cfg = ConfigManager::load(None, Some(&file)).unwrap().snapshot();
+        assert_eq!(cfg.scene.mode, SceneMode::Bilingual, "旧 translation 配置应反序列化为 Bilingual");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
