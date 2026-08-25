@@ -1,4 +1,4 @@
-// 设置面板：按 Tab 归类。保存写入 talksage.toml。
+﻿// 设置面板：按 Tab 归类。保存写入 talksage.toml。
 // 模型安装/删除在独立的「模型管理」页，不占用本页。
 
 import { useEffect, useState } from "react";
@@ -39,7 +39,17 @@ export default function SettingsSection({
 }) {
   const [tab, setTab] = useState<SettingsTab>("asr");
   // 场景模式
-  const [sceneMode, setSceneMode] = useState<SceneMode>(config?.scene?.mode ?? "conversation");
+  const [sceneMode, setSceneMode] = useState<SceneMode>(() => {
+    const m = (config?.scene?.mode ?? "conversation") as string;
+    return (m === "translation" ? "bilingual" : m) as SceneMode;
+  });
+  // 模板场景的语言选择（非自定义模式）
+  const [sceneLanguage, setSceneLanguage] = useState<"zh" | "en">(
+    (config?.scene?.custom?.language as "zh" | "en") ?? "zh"
+  );
+  const [sceneClientLanguage, setSceneClientLanguage] = useState<"zh" | "en">(
+    (config?.scene?.custom?.client_language as "zh" | "en") ?? "en"
+  );
   const [sceneCustom, setSceneCustom] = useState<SceneParams>(() => ({
     vad_preset: config?.scene?.custom?.vad_preset ?? "standard",
     vad_threshold: config?.scene?.custom?.vad_threshold ?? null,
@@ -52,8 +62,8 @@ export default function SettingsSection({
     user_engine: config?.scene?.custom?.user_engine ?? "paraformer-zh",
     client_enabled: config?.scene?.custom?.client_enabled ?? true,
     client_engine: config?.scene?.custom?.client_engine ?? "zipformer-en",
-    user_language: config?.scene?.custom?.user_language ?? "zh",
-    client_language: config?.scene?.custom?.client_language ?? "en",
+    language: (config?.scene?.custom?.language as "zh" | "en") ?? "zh",
+    client_language: (config?.scene?.custom?.client_language as "zh" | "en") ?? "en",
     translation_mode: config?.scene?.custom?.translation_mode ?? "off",
     // 配置没给 allowlist 时，元数据到货后回填「全部分析类插件」（见下方 effect）——
     // 这里不能写死 id 列表：哪些插件算分析类归 Rust descriptor。
@@ -71,16 +81,16 @@ export default function SettingsSection({
   const [kbEnabled, setKbEnabled] = useState(false);
   // 引擎显示值：自定义场景读场景参数；否则读全局 ASR 配置（与 pipeline 实际
   // 生效逻辑一致：非自定义场景的用户流引擎跟随 [asr].user_engine）。
-  const initialUserEngine = () =>
+  const initialEngineZh = () =>
     config?.scene?.mode === "custom"
-      ? config?.scene?.custom?.user_engine ?? config?.asr?.user_engine ?? "paraformer-zh"
-      : config?.asr?.user_engine ?? "paraformer-zh";
-  const initialClientEngine = () =>
+      ? config?.scene?.custom?.user_engine ?? config?.asr?.engine_zh ?? "paraformer-zh"
+      : config?.asr?.engine_zh ?? "paraformer-zh";
+  const initialEngineEn = () =>
     config?.scene?.mode === "custom"
-      ? config?.scene?.custom?.client_engine ?? config?.asr?.client_engine ?? "zipformer-en"
-      : config?.asr?.client_engine ?? "zipformer-en";
-  const [clientEngine, setClientEngine] = useState<string>(initialClientEngine);
-  const [userEngine, setUserEngine] = useState<string>(initialUserEngine);
+      ? config?.scene?.custom?.client_engine ?? config?.asr?.engine_en ?? "zipformer-en"
+      : config?.asr?.engine_en ?? "zipformer-en";
+  const [engineEn, setEngineEn] = useState<string>(initialEngineEn);
+  const [engineZh, setEngineZh] = useState<string>(initialEngineZh);
   const [terminologyEnabled, setTerminologyEnabled] = useState(config?.asr?.terminology?.enabled ?? false);
   const [hotwordScore, setHotwordScore] = useState(config?.asr?.terminology?.hotword_score ?? 1.5);
   const [terminologyTerms, setTerminologyTerms] = useState((config?.asr?.terminology?.terms ?? []).join("\n"));
@@ -323,8 +333,8 @@ export default function SettingsSection({
           folder: kbFolder.trim(),
         },
         asr: {
-          client_engine: clientEngine,
-          user_engine: userEngine,
+          engine_en: engineEn,
+          engine_zh: engineZh,
           terminology: {
             enabled: terminologyEnabled,
             hotword_score: hotwordScore,
@@ -365,7 +375,11 @@ export default function SettingsSection({
         },
         scene: {
           mode: sceneMode,
-          custom: sceneCustom,
+          custom: {
+            ...sceneCustom,
+            language: sceneMode === "custom" ? sceneCustom.language : sceneLanguage,
+            client_language: sceneMode === "custom" ? sceneCustom.client_language : sceneClientLanguage,
+          },
         },
       };
       await onSave(updates);
@@ -433,8 +447,9 @@ export default function SettingsSection({
             {(
               [
                 { key: "dictation", label: "单人听写", desc: "单麦克风、灵敏 VAD、最低资源消耗" },
-                { key: "conversation", label: "一对一会话", desc: "双人会话，按输入通道区分双方，不运行声纹模型" },
-                { key: "translation", label: "双语对话", desc: "中文与英文双通道识别，双向实时翻译" },
+                { key: "conversation", label: "一对一会话", desc: "双人会话，按输入通道区分双方，两流使用相同语言" },
+                { key: "bilingual", label: "双语对话", desc: "双语会话：我说中文，对方说英文（或反向），双向翻译" },
+                { key: "live_translation", label: "实时翻译", desc: "说一种语言，自动翻译并显示另一种语言" },
                 { key: "meeting", label: "多人会议", desc: "两人以上，启用 WeSpeaker 在线角色识别" },
                 { key: "lecture", label: "演讲/课堂", desc: "长段单流，术语和简报增强，关闭角色识别" },
                 { key: "custom", label: "自定义", desc: "使用下方全部参数" },
@@ -461,38 +476,121 @@ export default function SettingsSection({
             ))}
           </div>
 
+          {/* 单语言场景：识别语言选择器 */}
+          {(sceneMode === "dictation" || sceneMode === "conversation" || sceneMode === "meeting" || sceneMode === "lecture") && (
+            <div style={{ marginBottom: 8 }}>
+              <label>
+                识别语言：
+                <select
+                  value={sceneLanguage}
+                  onChange={(e) => setSceneLanguage(e.target.value as "zh" | "en")}
+                  style={{ ...inputStyle, marginLeft: 8 }}
+                >
+                  <option value="zh">中文</option>
+                  <option value="en">英语</option>
+                </select>
+              </label>
+              <span style={{ fontSize: 11, color: "var(--text-2)", marginLeft: 12 }}>
+                两条通道均使用此语言识别（按通道区分说话人，不混合）
+              </span>
+            </div>
+          )}
+
+          {/* 双语对话：我的语言 + 对方语言 */}
+          {sceneMode === "bilingual" && (
+            <div style={{ display: "flex", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
+              <label>
+                我的语言：
+                <select
+                  value={sceneLanguage}
+                  onChange={(e) => setSceneLanguage(e.target.value as "zh" | "en")}
+                  style={{ ...inputStyle, marginLeft: 8 }}
+                >
+                  <option value="zh">中文</option>
+                  <option value="en">英语</option>
+                </select>
+              </label>
+              <label>
+                对方语言：
+                <select
+                  value={sceneClientLanguage}
+                  onChange={(e) => setSceneClientLanguage(e.target.value as "zh" | "en")}
+                  style={{ ...inputStyle, marginLeft: 8 }}
+                >
+                  <option value="zh">中文</option>
+                  <option value="en">英语</option>
+                </select>
+              </label>
+            </div>
+          )}
+
+          {/* 实时翻译：输入语言 + 翻译目标语言 */}
+          {sceneMode === "live_translation" && (
+            <div style={{ display: "flex", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
+              <label>
+                我说的语言：
+                <select
+                  value={sceneLanguage}
+                  onChange={(e) => setSceneLanguage(e.target.value as "zh" | "en")}
+                  style={{ ...inputStyle, marginLeft: 8 }}
+                >
+                  <option value="zh">中文</option>
+                  <option value="en">英语</option>
+                </select>
+              </label>
+              <label>
+                翻译为：
+                <select
+                  value={sceneClientLanguage}
+                  onChange={(e) => setSceneClientLanguage(e.target.value as "zh" | "en")}
+                  style={{ ...inputStyle, marginLeft: 8 }}
+                >
+                  <option value="zh">中文</option>
+                  <option value="en">英语</option>
+                </select>
+              </label>
+            </div>
+          )}
+
           {sceneMode !== "custom" ? (
             <div style={{ background: "var(--surface-2)", borderRadius: 6, padding: 8, fontSize: 11, color: "var(--text-2)", lineHeight: 1.9 }}>
               {sceneMode === "dictation" && (
                 <>
-                  <div>· 单麦克风中文听写；灵敏 VAD，短句不丢</div>
+                  <div>· 单麦克风听写；灵敏 VAD，短句不丢</div>
                   <div>· 角色、翻译和分析插件关闭，资源消耗最低</div>
                 </>
               )}
               {sceneMode === "conversation" && (
                 <>
-                  <div>· 双方默认使用中文实时模型；最短提交 300ms</div>
-                  <div>· 按麦克风/系统音频通道标记“我/对方”，不加载声纹模型</div>
+                  <div>· 双方使用所选语言实时模型；最短提交 300ms</div>
+                  <div>· 按麦克风/系统音频通道标记"我/对方"，不加载声纹模型</div>
                   <div>· 开启术语和简报，关闭翻译</div>
                 </>
               )}
-              {sceneMode === "translation" && (
+              {sceneMode === "bilingual" && (
                 <>
-                  <div>· 我的通道：中文 Paraformer；对方通道：英文 Zipformer</div>
-                  <div>· 双向中英翻译；按通道确定角色，不加载声纹模型</div>
-                  <div>· macOS 远程通话需选择可捕获系统音频的设备；共享麦克风暂不自动分语言</div>
+                  <div>· 两通道分别使用各自语言的识别模型，不混用</div>
+                  <div>· 按通道确定角色，双向实时翻译；不加载声纹模型</div>
+                  <div>· macOS 远程通话需选择可捕获系统音频的设备</div>
+                </>
+              )}
+              {sceneMode === "live_translation" && (
+                <>
+                  <div>· 单流（麦克风），用你选择的语言说话</div>
+                  <div>· 实时转写并翻译成目标语言，同时在界面显示原文和译文</div>
+                  <div>· 适合实时演示、口译练习或字幕辅助场景</div>
                 </>
               )}
               {sceneMode === "meeting" && (
                 <>
                   <div>· 两人以上会议，开启 WeSpeaker 在线聚类和段内换人检测</div>
-                  <div>· 双方默认中文；术语、简报等会议分析开启，翻译默认关闭</div>
+                  <div>· 术语、简报等会议分析开启，翻译默认关闭</div>
                   <div>· 角色识别会增加 CPU 和内存占用</div>
                 </>
               )}
               {sceneMode === "lecture" && (
                 <>
-                  <div>· 单流中文，严格 VAD；段尾静音 700ms，最长语音 60s</div>
+                  <div>· 单流，严格 VAD；段尾静音 700ms，最长语音 60s</div>
                   <div>· 关闭角色识别；开启术语和简报，适合长时间连续发言</div>
                 </>
               )}
@@ -544,7 +642,7 @@ export default function SettingsSection({
               </label>
               <label style={labelBlock}>
                 我的语言：
-                <select value={sceneCustom.user_language} onChange={(e) => setSceneCustom({ ...sceneCustom, user_language: e.target.value as SceneParams["user_language"] })} style={inputStyle}>
+                <select value={sceneCustom.language} onChange={(e) => setSceneCustom({ ...sceneCustom, language: e.target.value as "zh" | "en" })} style={inputStyle}>
                   <option value="zh">中文</option><option value="en">英语</option>
                 </select>
               </label>
@@ -616,38 +714,38 @@ export default function SettingsSection({
           <h3 style={groupTitle}>转写引擎</h3>
           <div style={{ display: "flex", gap: 10, marginBottom: 6, flexWrap: "wrap", alignItems: "center" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ color: "var(--text-2)" }}>客户流</span>
+              <span style={{ color: "var(--text-2)" }}>中文引擎</span>
               <select
-                value={clientEngine}
+                value={engineZh}
                 onChange={(e) => {
                   const v = e.target.value;
-                  setClientEngine(v);
-                  setSceneCustom((s) => ({ ...s, client_engine: v }));
-                }}
-                style={inputStyle}
-              >
-                {modelOptions(clientEngine)}
-              </select>
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ color: "var(--text-2)" }}>我的通道</span>
-              <select
-                value={userEngine}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setUserEngine(v);
+                  setEngineZh(v);
                   setSceneCustom((s) => ({ ...s, user_engine: v }));
                 }}
                 style={inputStyle}
               >
-                {modelOptions(userEngine)}
+                {modelOptions(engineZh)}
+              </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ color: "var(--text-2)" }}>英文引擎</span>
+              <select
+                value={engineEn}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setEngineEn(v);
+                  setSceneCustom((s) => ({ ...s, client_engine: v }));
+                }}
+                style={inputStyle}
+              >
+                {modelOptions(engineEn)}
               </select>
             </label>
             <button type="button" onClick={onOpenModels} style={{ fontSize: 12, padding: "4px 10px", cursor: "pointer" }}>
               打开模型管理
             </button>
           </div>
-          <div style={hint}>实时模型持续输出字幕；平衡/准确优先模型在 VAD 段结束后输出。未安装的引擎请到「模型管理」下载。非自定义场景用此全局设置，自定义场景用「场景模式 → 自定义」。</div>
+          <div style={hint}>中文引擎用于所有中文场景（听写、会话、会议、课堂等）；英文引擎用于英文场景及双语对话的英文通道。未安装的引擎请到「模型管理」下载。非自定义场景用此全局设置，自定义场景用「场景模式 → 自定义」。</div>
 
           <h3 style={{ ...groupTitle, marginTop: 10 }}>麦克风输入电平</h3>
           <label style={labelBlock}>
