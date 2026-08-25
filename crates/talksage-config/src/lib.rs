@@ -171,7 +171,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 0,
-            user_engine: "paraformer-zh".into(),
+            user_engine: "qwen3-asr".into(),
             client_enabled: false,
             client_engine: "zipformer-en".into(),
             language: "zh".into(),
@@ -190,9 +190,9 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 300,
-            user_engine: "paraformer-zh".into(),
+            user_engine: "qwen3-asr".into(),
             client_enabled: true,
-            client_engine: "paraformer-zh".into(),
+            client_engine: "qwen3-asr".into(),
             language: "zh".into(),
             client_language: "zh".into(),
             translation_mode: TranslationMode::Off,
@@ -209,7 +209,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 300,
-            user_engine: "paraformer-zh".into(),
+            user_engine: "qwen3-asr".into(),
             client_enabled: true,
             client_engine: "zipformer-en".into(),
             language: "zh".into(),
@@ -228,7 +228,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 300,
-            user_engine: "paraformer-zh".into(),
+            user_engine: "qwen3-asr".into(),
             client_enabled: false,
             client_engine: "zipformer-en".into(),
             language: "zh".into(),
@@ -247,9 +247,9 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 0,
-            user_engine: "paraformer-zh".into(),
+            user_engine: "qwen3-asr".into(),
             client_enabled: true,
-            client_engine: "paraformer-zh".into(),
+            client_engine: "qwen3-asr".into(),
             language: "zh".into(),
             client_language: "zh".into(),
             translation_mode: TranslationMode::Off,
@@ -266,7 +266,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 300,
-            user_engine: "paraformer-zh".into(),
+            user_engine: "qwen3-asr".into(),
             client_enabled: false,
             client_engine: "zipformer-en".into(),
             language: "zh".into(),
@@ -285,7 +285,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 0,
-            user_engine: "paraformer-zh".into(),
+            user_engine: "qwen3-asr".into(),
             client_enabled: true,
             client_engine: "zipformer-en".into(),
             language: "zh".into(),
@@ -565,7 +565,7 @@ impl TerminologyConfig {
 impl Default for AsrConfig {
     fn default() -> Self {
         Self {
-            engine_zh: "paraformer-zh".into(),
+            engine_zh: "qwen3-asr".into(),
             engine_en: "zipformer-en".into(),
             backend: "auto".into(),
             terminology: TerminologyConfig::default(),
@@ -1215,7 +1215,7 @@ mod tests {
         let _env = env_lock();
         let mgr = ConfigManager::load(None, None).unwrap();
         let c = mgr.snapshot();
-        assert_eq!(c.asr.engine_zh, "paraformer-zh");
+        assert_eq!(c.asr.engine_zh, "qwen3-asr");
         assert_eq!(c.server.host, "127.0.0.1");
         assert!(!c.server.enabled);
         assert_eq!(c.audio.vad.effective(), (0.50, 0.25, 0.50, 512, 30.0));
@@ -1250,7 +1250,7 @@ min_segment_ms = 600
         // 最短提交时长（噪音短段抑制）
         assert_eq!(c.audio.min_segment_ms, Some(600));
         // 未覆盖字段保持默认
-        assert_eq!(c.asr.engine_zh, "paraformer-zh");
+        assert_eq!(c.asr.engine_zh, "qwen3-asr");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1284,7 +1284,7 @@ min_segment_ms = 600
         assert_eq!(reloaded.snapshot().llm.default, "kimi");
         assert!(!reloaded.snapshot().plugins.get_bool("translator", "enabled", true));
         // 未修改字段保持默认
-        assert_eq!(reloaded.snapshot().asr.engine_zh, "paraformer-zh");
+        assert_eq!(reloaded.snapshot().asr.engine_zh, "qwen3-asr");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1306,7 +1306,7 @@ min_segment_ms = 600
         assert_eq!(p.vad_preset, VadPreset::Standard);
         assert!(!p.denoise_enabled);
         assert_eq!(p.min_segment_ms, 300);
-        assert_eq!(p.user_engine, "paraformer-zh");
+        assert_eq!(p.user_engine, "qwen3-asr");
         assert!(p.client_enabled);
         assert_eq!(p.language, "zh");
         assert_eq!(

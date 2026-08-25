@@ -213,10 +213,10 @@ mod tests {
         let meta = f.store.get_session(sid).unwrap().meta.expect("meta 应已落库");
         assert_eq!(meta.quality_label(), label, "返回的标签应与落库的一致");
         assert_eq!(meta.master_recording.as_deref(), Some("session-1_master.wav"));
-        // 运行环境快照应写入（默认场景=一对一会话，用户引擎=paraformer-zh）
+        // 运行环境快照应写入（默认场景=一对一会话，用户引擎=qwen3-asr）
         let ri = meta.runtime_info.expect("应写入运行环境快照");
         assert_eq!(ri.scene_mode, "conversation");
-        assert_eq!(ri.user_engine, "paraformer-zh");
+        assert_eq!(ri.user_engine, "qwen3-asr");
         assert!(ri.client_enabled, "默认场景应双流");
         assert_eq!(ri.sample_rate, 16_000);
         assert_eq!(ri.app_version, talksage_core::VERSION);
