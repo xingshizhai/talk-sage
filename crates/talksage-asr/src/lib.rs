@@ -20,6 +20,11 @@ use sherpa_onnx::{
 /// 模型管理（下载 / 删除 / 磁盘占用；应用内「转写引擎」页使用）。
 pub mod models;
 
+/// Punctuation restoration using sherpa-onnx CT-Transformer model.
+pub mod punct;
+pub use punct::{PunctuationRestorer, is_punct_model_available};
+pub use models::{download_punct_model, remove_punct_model, is_punct_model_installed, punct_download_size_mb};
+
 /// 段级识别引擎接口（统一流式与离线段级模型）。
 ///
 /// - 流式（paraformer/zipformer）：`accept` 逐块返回增量文本，`finish` 返回最终文本。

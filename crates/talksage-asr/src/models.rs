@@ -11,6 +11,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::EngineKind;
@@ -134,6 +135,51 @@ pub fn remove_engine(kind: EngineKind, models_root: &Path) -> std::io::Result<()
         if p.exists() {
             let _ = std::fs::remove_file(&p);
         }
+    }
+    Ok(())
+}
+
+/// True if the punct ONNX model file is present on disk.
+pub fn is_punct_model_installed(models_root: &Path) -> bool {
+    crate::punct::is_punct_model_available(models_root)
+}
+
+/// Approximate download size for the punct model in MB.
+pub fn punct_download_size_mb() -> u64 {
+    20
+}
+
+/// Download the punctuation model into `<models_root>/punct-ct-transformer/`.
+pub fn download_punct_model(
+    models_root: &Path,
+    cancel: Arc<AtomicBool>,
+    tx: Option<std::sync::mpsc::Sender<(u64, u64)>>,
+) -> anyhow::Result<()> {
+    use crate::punct::PUNCT_MODEL_DIR;
+    if is_punct_model_installed(models_root) {
+        return Ok(());
+    }
+    let dir = models_root.join(PUNCT_MODEL_DIR);
+    std::fs::create_dir_all(&dir)?;
+    let url = "https://huggingface.co/csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab500k-2023-04-12/resolve/main/model.onnx";
+    let dest = dir.join("model.onnx");
+    let part = dir.join("model.onnx.part");
+    let progress_box: Option<Box<ProgressFn>> = tx.map(|sender| {
+        Box::new(move |received: u64, total: u64| {
+            let _ = sender.send((received, total));
+        }) as Box<ProgressFn>
+    });
+    download_file(url, &part, progress_box.as_deref(), Some(cancel.as_ref()))?;
+    std::fs::rename(&part, &dest)?;
+    Ok(())
+}
+
+/// Remove the punct model directory.
+pub fn remove_punct_model(models_root: &Path) -> std::io::Result<()> {
+    use crate::punct::PUNCT_MODEL_DIR;
+    let dir = models_root.join(PUNCT_MODEL_DIR);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
     }
     Ok(())
 }
