@@ -1,0 +1,667 @@
+<title>ASR 竞品分析</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+
+<style>
+  :root {
+    --bg: #F9F7F3;
+    --bg-surface: #FFFFFF;
+    --bg-table-head: #F0EDE7;
+    --bg-code: #EDEAE4;
+    --border: #DDD9D0;
+    --text: #1A1C24;
+    --text-muted: #6B6775;
+    --text-mono: #2D5FA6;
+    --accent: #2563EB;
+    --accent-soft: #EBF1FF;
+    --red: #DC2626;
+    --red-soft: #FEF2F2;
+    --green: #16A34A;
+    --green-soft: #F0FDF4;
+    --amber: #D97706;
+    --amber-soft: #FFFBEB;
+    --toc-width: 220px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0D1117;
+      --bg-surface: #161B27;
+      --bg-table-head: #1C2338;
+      --bg-code: #1C2338;
+      --border: #252D3D;
+      --text: #E2E6F0;
+      --text-muted: #7A849E;
+      --text-mono: #7BB3FF;
+      --accent: #4A9EFF;
+      --accent-soft: #1A2A45;
+      --red: #F87171;
+      --red-soft: #2D1515;
+      --green: #4ADE80;
+      --green-soft: #0F2A1A;
+      --amber: #FCD34D;
+      --amber-soft: #2A2010;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #0D1117;
+    --bg-surface: #161B27;
+    --bg-table-head: #1C2338;
+    --bg-code: #1C2338;
+    --border: #252D3D;
+    --text: #E2E6F0;
+    --text-muted: #7A849E;
+    --text-mono: #7BB3FF;
+    --accent: #4A9EFF;
+    --accent-soft: #1A2A45;
+    --red: #F87171;
+    --red-soft: #2D1515;
+    --green: #4ADE80;
+    --green-soft: #0F2A1A;
+    --amber: #FCD34D;
+    --amber-soft: #2A2010;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.7;
+    min-height: 100vh;
+  }
+
+  /* Layout */
+  .layout {
+    display: flex;
+    max-width: 1060px;
+    margin: 0 auto;
+    padding: 0 24px;
+    gap: 48px;
+  }
+
+  /* TOC */
+  .toc {
+    width: var(--toc-width);
+    flex-shrink: 0;
+    padding-top: 80px;
+  }
+  .toc-inner {
+    position: sticky;
+    top: 32px;
+  }
+  .toc-label {
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+  }
+  .toc-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .toc-list a {
+    display: block;
+    font-size: 13px;
+    color: var(--text-muted);
+    text-decoration: none;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: color 0.15s, background 0.15s;
+    line-height: 1.4;
+  }
+  .toc-list a:hover {
+    color: var(--text);
+    background: var(--bg-code);
+  }
+  .toc-list .toc-sub a {
+    padding-left: 18px;
+    font-size: 12px;
+  }
+
+  /* Main content */
+  .main {
+    flex: 1;
+    min-width: 0;
+    padding: 64px 0 120px;
+  }
+
+  /* Header */
+  .doc-header {
+    margin-bottom: 56px;
+    padding-bottom: 36px;
+    border-bottom: 1px solid var(--border);
+  }
+  .doc-eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin-bottom: 16px;
+  }
+  .doc-title {
+    font-family: 'DM Serif Display', Georgia, serif;
+    font-size: 42px;
+    line-height: 1.15;
+    color: var(--text);
+    margin-bottom: 16px;
+    text-wrap: balance;
+  }
+  .doc-subtitle {
+    font-size: 16px;
+    color: var(--text-muted);
+    max-width: 560px;
+    line-height: 1.65;
+  }
+  .doc-meta {
+    display: flex;
+    gap: 24px;
+    margin-top: 20px;
+    flex-wrap: wrap;
+  }
+  .meta-item {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .meta-item strong {
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  /* Sections */
+  .section {
+    margin-bottom: 56px;
+  }
+  .section-title {
+    font-family: 'DM Serif Display', Georgia, serif;
+    font-size: 26px;
+    color: var(--text);
+    margin-bottom: 20px;
+    padding-top: 8px;
+  }
+  .section-title .num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-right: 10px;
+    font-weight: 400;
+  }
+  .subsection {
+    margin-bottom: 36px;
+  }
+  .subsection-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .subsection-title::before {
+    content: '';
+    display: inline-block;
+    width: 3px;
+    height: 16px;
+    background: var(--accent);
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  p {
+    color: var(--text);
+    margin-bottom: 12px;
+  }
+  p:last-child { margin-bottom: 0; }
+
+  /* Tables */
+  .table-wrap {
+    overflow-x: auto;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    margin: 16px 0;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13.5px;
+  }
+  thead tr {
+    background: var(--bg-table-head);
+  }
+  th {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 10px 14px;
+    text-align: left;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.5;
+  }
+  tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--bg-table-head); }
+
+  code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--text-mono);
+    background: var(--bg-code);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+
+  /* Pills */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 100px;
+    white-space: nowrap;
+  }
+  .pill-red { background: var(--red-soft); color: var(--red); }
+  .pill-amber { background: var(--amber-soft); color: var(--amber); }
+  .pill-green { background: var(--green-soft); color: var(--green); }
+  .pill-blue { background: var(--accent-soft); color: var(--accent); }
+  .pill-gray { background: var(--bg-code); color: var(--text-muted); }
+
+  /* Callout */
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 14px 18px;
+    border-radius: 0 6px 6px 0;
+    margin: 20px 0;
+    font-size: 14px;
+    line-height: 1.65;
+  }
+  .callout strong { color: var(--accent); }
+  .callout-warn {
+    border-left-color: var(--amber);
+    background: var(--amber-soft);
+  }
+  .callout-warn strong { color: var(--amber); }
+
+  /* Diagnosis cards */
+  .diagnosis-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-top: 16px;
+  }
+  .diagnosis-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 20px;
+  }
+  .diagnosis-card-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .diagnosis-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted);
+    background: var(--bg-code);
+    padding: 2px 6px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .diagnosis-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.4;
+  }
+  .diagnosis-body {
+    font-size: 13.5px;
+    color: var(--text-muted);
+    line-height: 1.65;
+    padding-left: 36px;
+  }
+  .diagnosis-body strong { color: var(--text); }
+
+  /* Road map */
+  .roadmap-item {
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    gap: 16px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+    align-items: start;
+  }
+  .roadmap-item:last-child { border-bottom: none; }
+  .roadmap-when {
+    font-size: 12px;
+    font-weight: 600;
+    padding-top: 2px;
+  }
+  .roadmap-desc {
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--text-muted);
+  }
+  .roadmap-desc strong { color: var(--text); }
+
+  /* Footer */
+  .doc-footer {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  @media (max-width: 768px) {
+    .layout { flex-direction: column; gap: 0; padding: 0 16px; }
+    .toc { display: none; }
+    .main { padding: 40px 0 80px; }
+    .doc-title { font-size: 30px; }
+  }
+</style>
+
+<div class="layout">
+  <!-- TOC -->
+  <nav class="toc" aria-label="目录">
+    <div class="toc-inner">
+      <div class="toc-label">目录</div>
+      <ul class="toc-list">
+        <li><a href="#s1">竞品 ASR 模型概览</a></li>
+        <li><a href="#s2">架构模式分类</a></li>
+        <li><a href="#s3">识别效果差距诊断</a></li>
+        <li class="toc-sub"><ul class="toc-list">
+          <li><a href="#d1">流式 vs 全上下文</a></li>
+          <li><a href="#d2">模型参数量</a></li>
+          <li><a href="#d3">CPU-only 限制</a></li>
+          <li><a href="#d4">VAD 切段质量</a></li>
+          <li><a href="#d5">标点与语义切句</a></li>
+        </ul></li>
+        <li><a href="#s4">改善路径</a></li>
+        <li><a href="#s5">结论</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <main class="main">
+    <header class="doc-header">
+      <div class="doc-eyebrow">TalkSage · 内部技术文档</div>
+      <h1 class="doc-title">ASR 竞品分析与<br>识别质量诊断</h1>
+      <p class="doc-subtitle">对六款竞品/参考项目的 ASR 技术栈进行系统梳理，诊断 TalkSage 当前识别效果不理想的根本原因，并给出改善优先级。</p>
+      <div class="doc-meta">
+        <span class="meta-item"><strong>日期</strong> 2026-08-25</span>
+        <span class="meta-item"><strong>作者</strong> James Ding</span>
+        <span class="meta-item"><strong>状态</strong> 内部参考</span>
+      </div>
+    </header>
+
+    <!-- Section 1 -->
+    <section class="section" id="s1">
+      <h2 class="section-title"><span class="num">01</span>竞品 ASR 模型概览</h2>
+      <p>共分析六款产品或参考项目，涵盖云端、离线批处理、流式三种部署形态。</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>产品</th>
+              <th>ASR 引擎</th>
+              <th>推理后端</th>
+              <th>硬件加速</th>
+              <th>模式</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Call.md</strong></td>
+              <td>VideoDB 云端 WS</td>
+              <td>云服务</td>
+              <td>云端 GPU</td>
+              <td><span class="pill pill-gray">离线/云端</span></td>
+            </tr>
+            <tr>
+              <td><strong>Meetily</strong></td>
+              <td><code>whisper.cpp</code> + NVIDIA Parakeet ONNX</td>
+              <td>ORT (ONNX Runtime)</td>
+              <td>Metal / CUDA / Vulkan</td>
+              <td><span class="pill pill-blue">离线分块</span></td>
+            </tr>
+            <tr>
+              <td><strong>noScribe</strong></td>
+              <td><code>faster-whisper</code> large-v2</td>
+              <td>CTranslate2</td>
+              <td>CUDA / CPU</td>
+              <td><span class="pill pill-blue">离线批处理</span></td>
+            </tr>
+            <tr>
+              <td><strong>VibeVoice</strong></td>
+              <td>Qwen2.5 LLM + 7.5Hz VAE tokenizer</td>
+              <td>vLLM / HF Transformers</td>
+              <td>GPU（研究用途）</td>
+              <td><span class="pill pill-gray">长音频单次</span></td>
+            </tr>
+            <tr>
+              <td><strong>whisper-flow</strong></td>
+              <td><code>openai-whisper</code> tiny–large</td>
+              <td>PyTorch</td>
+              <td>CPU / GPU 自动</td>
+              <td><span class="pill pill-green">窗口重转写</span></td>
+            </tr>
+            <tr>
+              <td><strong>WhisperLiveKit</strong></td>
+              <td>Faster-Whisper / MLX / Voxtral / Qwen3 ASR</td>
+              <td>CTranslate2 / MLX / vLLM</td>
+              <td>CUDA / Metal</td>
+              <td><span class="pill pill-green">流式分块</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout">
+        <strong>关键规律：</strong>除 Call.md 走云端外，其余本地产品几乎全部基于 <strong>Whisper 系列</strong>（faster-whisper / whisper.cpp）或其衍生（Parakeet、Voxtral），且普遍使用 <strong>GPU 加速推理</strong>。没有竞品在实时会议场景中使用 Paraformer 流式模型。
+      </div>
+    </section>
+
+    <!-- Section 2 -->
+    <section class="section" id="s2">
+      <h2 class="section-title"><span class="num">02</span>架构模式分类</h2>
+      <p>竞品实现可归为三类架构，TalkSage 目前处于第一类（流式），精度天然低于后两类。</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>架构类型</th>
+              <th>代表产品</th>
+              <th>精度</th>
+              <th>延迟</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>流式推理</strong></td>
+              <td>TalkSage（Paraformer-zh）</td>
+              <td><span class="pill pill-amber">中等</span></td>
+              <td><span class="pill pill-green">低 &lt;300ms</span></td>
+              <td>每帧实时输出，无法回望后续音频修正错误</td>
+            </tr>
+            <tr>
+              <td><strong>VAD 切段 + 离线批处理</strong></td>
+              <td>Meetily、noScribe、WLK</td>
+              <td><span class="pill pill-green">高</span></td>
+              <td><span class="pill pill-amber">中 1–3s</span></td>
+              <td>VAD 切段后跑全上下文 Encoder-Decoder，Beam Search 充分</td>
+            </tr>
+            <tr>
+              <td><strong>窗口重转写</strong></td>
+              <td>whisper-flow</td>
+              <td><span class="pill pill-green">高</span></td>
+              <td><span class="pill pill-amber">中 &lt;1s</span></td>
+              <td>滑动窗口积累音频后整体重跑，随时间延迟劣化</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Section 3 -->
+    <section class="section" id="s3">
+      <h2 class="section-title"><span class="num">03</span>识别效果差距诊断</h2>
+      <p>TalkSage 中文识别效果偏弱有五个相互叠加的原因，从最根本到可快速修复排列如下。</p>
+
+      <div class="diagnosis-grid">
+        <!-- D1 -->
+        <div class="diagnosis-card" id="d1">
+          <div class="diagnosis-card-header">
+            <span class="diagnosis-num">根因 1</span>
+            <div class="diagnosis-title">流式架构的精度天花板</div>
+          </div>
+          <div class="diagnosis-body">
+            TalkSage 中文核心引擎是 <strong>Paraformer-zh（streaming）</strong>——流式模型每隔数百毫秒就必须输出结果，<strong>没有机会看到后续音频来修正当前帧的识别错误</strong>。竞品普遍使用的 Whisper / faster-whisper 是 Encoder-Decoder 离线架构：等整段音频结束（或 VAD 切段后）再推理，能利用完整语音上下文，Beam Search 也更充分。相同说话人、相同句子，Whisper large-v2 的 CER 通常比 Paraformer-zh streaming 低 5–15 个百分点。
+          </div>
+        </div>
+
+        <!-- D2 -->
+        <div class="diagnosis-card" id="d2">
+          <div class="diagnosis-card-header">
+            <span class="diagnosis-num">根因 2</span>
+            <div class="diagnosis-title">模型参数量：轻量档 vs 竞品主力档</div>
+          </div>
+          <div class="diagnosis-body">
+            <div class="table-wrap" style="margin: 8px 0 12px;">
+              <table>
+                <thead><tr><th>引擎</th><th>参数量</th><th>产品</th></tr></thead>
+                <tbody>
+                  <tr><td><code>Paraformer-zh streaming</code>（当前默认中文）</td><td>~220M</td><td>TalkSage</td></tr>
+                  <tr><td><code>Whisper Base</code></td><td>74M</td><td>TalkSage 备用</td></tr>
+                  <tr><td><code>Whisper Small</code> / <code>Qwen3-ASR</code></td><td>244M / 0.6–1.7B</td><td>TalkSage 可选</td></tr>
+                  <tr><td><code>NVIDIA Parakeet-TDT</code></td><td>~1.1B</td><td>Meetily</td></tr>
+                  <tr><td><code>faster-whisper large-v2</code></td><td>~1.5B</td><td>noScribe</td></tr>
+                  <tr><td><code>Voxtral 4B</code></td><td>4B</td><td>WhisperLiveKit</td></tr>
+                </tbody>
+              </table>
+            </div>
+            TalkSage 最大可用模型仍属小参数档；竞品主力引擎普遍是其 <strong>3–6 倍体量</strong>。
+          </div>
+        </div>
+
+        <!-- D3 -->
+        <div class="diagnosis-card" id="d3">
+          <div class="diagnosis-card-header">
+            <span class="diagnosis-num">根因 3</span>
+            <div class="diagnosis-title">CPU-only 推理限制了可用模型规模</div>
+          </div>
+          <div class="diagnosis-body">
+            sherpa-onnx 支持 GPU，但 TalkSage 目前走 CPU 路径。GPU 推理比 CPU 快 5–10 倍，让竞品<strong>能负担更大模型而不卡顿</strong>。当前在 CPU 上跑 WhisperSmall 的 RTF ≈ 0.8–1.2，勉强实时；large 系列在普通笔记本 CPU 上 RTF > 5，完全无法用于实时场景。Meetily 默认 Metal/CUDA，noScribe 默认 CUDA，Apple Silicon 上的 MLX Whisper RTF 可达 0.05 以下。
+          </div>
+        </div>
+
+        <!-- D4 -->
+        <div class="diagnosis-card" id="d4">
+          <div class="diagnosis-card-header">
+            <span class="diagnosis-num">根因 4</span>
+            <div class="diagnosis-title">VAD 切段工程精细度不足</div>
+          </div>
+          <div class="diagnosis-body">
+            Paraformer-zh 流式结果质量强依赖 VAD 切段粒度。sherpa-onnx 内置 VAD 在快速语速、长句、语速不均匀时切段不准确，导致模型拿到残缺音频帧产出错误。<br><br>
+            竞品的对策：
+            <strong>Meetily</strong> 使用 Silero VAD + 能量过滤 + redemption timer 三层 VAD 工程化调优；<strong>WLK</strong> 的 LocalAgreement 策略等多轮转写结果稳定后才提交 final；<strong>whisper-flow</strong> 以"文本连续 N 轮不变"为 final 信号，避免 VAD 漏判。
+          </div>
+        </div>
+
+        <!-- D5 -->
+        <div class="diagnosis-card" id="d5">
+          <div class="diagnosis-card-header">
+            <span class="diagnosis-num">已修复</span>
+            <div class="diagnosis-title">无标点输出 + 纯停顿断句</div>
+          </div>
+          <div class="diagnosis-body">
+            流式 Paraformer-zh 不输出标点，历史上断句完全依赖停顿——长句不停就不断，语义完全不切分。<br><br>
+            <strong>已解决</strong>：本周新增 CT-Transformer 标点恢复模型（<code>PunctuationRestorer</code>），在 <code>finish_speech()</code> 中对 Paraformer 输出补标点后按 <code>。！？</code> 做语义切句（<code>split_on_strong_boundaries()</code>），每个子句独立发出 <code>DomainEvent::Segment</code>，时间戳按字数比例分配。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 4 -->
+    <section class="section" id="s4">
+      <h2 class="section-title"><span class="num">04</span>改善路径</h2>
+      <div class="roadmap-item">
+        <span class="roadmap-when"><span class="pill pill-green">立即</span></span>
+        <div class="roadmap-desc">
+          <strong>引导用户在会后开启 Whisper 模式。</strong>精度要求高的场景，会后用 WhisperSmall / Qwen3-ASR 离线转写，比实时流式精度高显著。界面上可在录音结束后自动触发离线重转写并替换字幕。
+        </div>
+      </div>
+      <div class="roadmap-item">
+        <span class="roadmap-when"><span class="pill pill-amber">中期</span></span>
+        <div class="roadmap-desc">
+          <strong>在 Apple Silicon 上开启 Metal/CoreML 加速。</strong>sherpa-onnx 支持 CoreML backend，M 系芯片可将 WhisperSmall / Qwen3-ASR 加速 3–5×，RTF 降到 0.2 以下，届时可实时跑中型模型。
+        </div>
+      </div>
+      <div class="roadmap-item">
+        <span class="roadmap-when"><span class="pill pill-amber">中期</span></span>
+        <div class="roadmap-desc">
+          <strong>实时路径切换为"VAD 切段 + 离线引擎"模式。</strong>仿 Meetily / WLK 思路：Silero VAD 切段后交给 Qwen3-ASR（离线）推理，延迟约 1–2s，精度大幅提升，同时保留标点恢复流程。
+        </div>
+      </div>
+      <div class="roadmap-item">
+        <span class="roadmap-when"><span class="pill pill-blue">长期</span></span>
+        <div class="roadmap-desc">
+          <strong>评估接入 Parakeet-TDT 或 whisper-large-v3-turbo。</strong>NVIDIA Parakeet-TDT（~1.1B）是目前英文 ASR 开源最优解之一，fast-whisper large-v3-turbo 在精度与速度间取得良好平衡。中文方向可关注 SenseVoice-Large（阿里）的 ONNX 移植进展。
+        </div>
+      </div>
+      <div class="roadmap-item">
+        <span class="roadmap-when"><span class="pill pill-blue">长期</span></span>
+        <div class="roadmap-desc">
+          <strong>AISHELL-1 基准进 CI。</strong>已有 <code>bench_cer</code> 工具 + <code>download_aishell1_test.py</code> 脚本，将 7176 条测试集 CER/RTF 作为每次发布的质量门禁，量化任何模型或参数变更的识别影响。
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 5 -->
+    <section class="section" id="s5">
+      <h2 class="section-title"><span class="num">05</span>结论</h2>
+      <div class="callout callout-warn">
+        <strong>核心结论：</strong>TalkSage 识别效果偏弱的主要原因是<strong>流式架构的精度天花板</strong>加上 <strong>CPU 限制了可用模型规模</strong>，而非代码实现问题。竞品走的是"VAD 切段 → 离线大模型推理"路线，用稍高延迟换取显著更高的精度。
+      </div>
+      <p>已完成的标点恢复与语义切句解决了最明显的断句问题。下一步最有价值的改进是：</p>
+      <ol style="padding-left: 20px; display: flex; flex-direction: column; gap: 6px; margin-top: 8px;">
+        <li style="font-size: 14px; color: var(--text);">短期：引导用户在会后使用更大的离线引擎重转写</li>
+        <li style="font-size: 14px; color: var(--text);">中期：在 Apple Silicon 上启用硬件加速，实现实时路径上跑中型模型</li>
+        <li style="font-size: 14px; color: var(--text);">长期：实时路径架构迁移为"VAD 切段 + 离线批处理"，向竞品对齐</li>
+      </ol>
+    </section>
+
+    <footer class="doc-footer">
+      <span>TalkSage 内部技术文档 · 竞品 ASR 分析</span>
+      <span>2026-08-25</span>
+    </footer>
+  </main>
+</div>
