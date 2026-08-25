@@ -102,6 +102,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/listen/stop", axum::routing::post(stop_listen_api))
         .route("/listen/pause", axum::routing::post(pause_listen_api))
         .route("/noise_level", axum::routing::post(set_noise_level_api))
+        .route("/asr/gpu_status", get(gpu_status_handler))
         .route("/voiceprint/status", axum::routing::get(voiceprint_status_api))
         .route("/voiceprint/enroll", axum::routing::post(voiceprint_enroll_api))
         .route("/voiceprint/remove", axum::routing::post(voiceprint_remove_api))
@@ -153,6 +154,15 @@ fn token_ok_v1(state: &ServerState, headers: &axum::http::HeaderMap) -> bool {
 }
 
 // ── API handlers ──────────────────────────────────────────
+
+async fn gpu_status_handler() -> axum::Json<serde_json::Value> {
+    let gpu = talksage_asr::GpuBackend::detect();
+    axum::Json(serde_json::json!({
+        "backend": gpu.provider_str(),
+        "display_name": gpu.display_name(),
+        "is_accelerated": gpu.is_accelerated(),
+    }))
+}
 
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true, "version": talksage_core::VERSION }))

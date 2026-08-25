@@ -767,6 +767,17 @@ fn export_session_markdown(session_id: i64, state: tauri::State<'_, AppState>) -
     Ok(serde_json::json!({ "path": path.display().to_string(), "content": content }))
 }
 
+/// GPU 后端状态（加速后端探测）。
+#[tauri::command]
+fn get_gpu_status() -> serde_json::Value {
+    let gpu = talksage_asr::GpuBackend::detect();
+    serde_json::json!({
+        "backend": gpu.provider_str(),
+        "display_name": gpu.display_name(),
+        "is_accelerated": gpu.is_accelerated(),
+    })
+}
+
 /// 整理会中已落库要点（历史详情；无 LLM 时返回错误，前端提示）。
 #[tauri::command]
 fn generate_highlights(session_id: i64, state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
@@ -828,7 +839,8 @@ pub fn run() {
             generate_trio_notes,
             export_session_markdown,
             generate_highlights,
-            read_logs
+            read_logs,
+            get_gpu_status
         ])
         .setup(move |app| {
             if let Err(e) = std::fs::create_dir_all(&data_dir) {
