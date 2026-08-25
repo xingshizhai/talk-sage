@@ -336,6 +336,19 @@ impl TalkSageService {
         let model_dir =Self::resolve_models_dir().ok_or_else(|| anyhow!("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）"))?;
         let snapshot = self.config.snapshot();
         let gpu = talksage_asr::GpuBackend::detect();
+        let cloud_configured = !snapshot.asr.aliyun_access_key_id.trim().is_empty()
+            && !snapshot.asr.aliyun_access_key_secret.trim().is_empty()
+            && !snapshot.asr.aliyun_app_key.trim().is_empty();
+        log::info!(
+            "ASR 能力探测: physical_gpu={} runtime_backend={} accelerated={} mode={} configured_backend={} cloud_credentials_complete={} note={}",
+            talksage_asr::GpuBackend::hardware_candidate(),
+            gpu.display_name(),
+            gpu.is_accelerated(),
+            snapshot.asr.asr_mode,
+            snapshot.asr.backend,
+            cloud_configured,
+            talksage_asr::GpuBackend::availability_note(),
+        );
         let asr_route = talksage_asr::resolve_asr_route(
             &snapshot.asr.asr_mode,
             &snapshot.asr.backend,
@@ -345,7 +358,18 @@ impl TalkSageService {
                 access_key_secret: &snapshot.asr.aliyun_access_key_secret,
                 app_key: &snapshot.asr.aliyun_app_key,
             },
-        )?;
+        )
+        .map_err(|error| {
+            log::error!(
+                "ASR 路由不可用: mode={} configured_backend={} runtime_backend={} cloud_credentials_complete={} error={}",
+                snapshot.asr.asr_mode,
+                snapshot.asr.backend,
+                gpu.display_name(),
+                cloud_configured,
+                error,
+            );
+            error
+        })?;
         let tokio_handle = tokio::runtime::Handle::try_current().ok();
         if asr_route == talksage_asr::AsrRoute::AliyunCloud && tokio_handle.is_none() {
             return Err(anyhow!("云端 ASR 需要 Tokio runtime，当前启动入口不支持云端模式"));
@@ -367,7 +391,7 @@ impl TalkSageService {
         // - Custom 模式：用 scene.user_engine / scene.client_engine（全量用户控制）
         // - Bilingual：user 流 = scene.language 对应引擎，client 流 = scene.client_language 对应引擎
         // - 其他单语言场景：两流均用 scene.language 对应引擎（消除中英混杂）
-        let (user_engine_kind, client_engine_kind) = match snapshot.scene.mode {
+        let (mut user_engine_kind, mut client_engine_kind) = match snapshot.scene.mode {
             talksage_config::SceneMode::Custom => (
                 EngineKind::from_name(&scene.user_engine).unwrap_or(EngineKind::ParaformerZh),
                 EngineKind::from_name(&scene.client_engine).unwrap_or(EngineKind::ZipformerEn),
@@ -381,6 +405,11 @@ impl TalkSageService {
                 (e, e)
             }
         };
+        if asr_route == (talksage_asr::AsrRoute::Local { backend: talksage_asr::GpuBackend::Metal }) {
+            user_engine_kind = EngineKind::WhisperLargeV3TurboMetal;
+            client_engine_kind = EngineKind::WhisperLargeV3TurboMetal;
+            log::info!("Apple Metal 路由已选择，用户流与客户流使用 Whisper large-v3-turbo Q5_0");
+        }
         let user_engine = req.user_engine.unwrap_or(user_engine_kind);
         let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
         let user_model = model_dir.join(user_engine.model_dir_name());

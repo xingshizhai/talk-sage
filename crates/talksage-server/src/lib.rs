@@ -174,13 +174,22 @@ async fn gpu_status_handler(
             app_key: &cfg.asr.aliyun_app_key,
         },
     );
+    let route_error = route.as_ref().err().map(ToString::to_string);
+    if let Some(error) = &route_error {
+        log::warn!(
+            "ASR 状态查询发现路由不可用: physical_gpu={} runtime_backend={} mode={} configured_backend={} error={} note={}",
+            talksage_asr::GpuBackend::hardware_candidate(), gpu.display_name(), cfg.asr.asr_mode,
+            cfg.asr.backend, error, talksage_asr::GpuBackend::availability_note()
+        );
+    }
     Json(serde_json::json!({
         "backend": gpu.provider_str(),
         "display_name": gpu.display_name(),
         "hardware_candidate": talksage_asr::GpuBackend::hardware_candidate(),
+        "availability_note": talksage_asr::GpuBackend::availability_note(),
         "is_accelerated": gpu.is_accelerated(),
         "effective_route": route.as_ref().ok().map(|r| r.display_name()),
-        "route_error": route.err().map(|e| e.to_string()),
+        "route_error": route_error,
     }))
     .into_response()
 }

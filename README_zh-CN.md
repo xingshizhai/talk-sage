@@ -72,7 +72,7 @@ python scripts/download_models.py whisper-metal # Apple Metal 模型（可预下
 python scripts/download_models.py legacy        # 仅测试需要的旧模型
 ```
 
-默认高精度路径是 VAD + Qwen3-ASR（中英文两路一致）：NVIDIA CUDA 可运行本地模型；没有可用推理后端时使用阿里云实时 ASR（三项凭证必须完整）。注意：M 系列芯片虽有 GPU，但当前随项目分发的 sherpa-onnx macOS 静态库会把 CoreML 请求回退到 CPU，不能把它视为 GPU 加速。Apple Silicon 的正式本地 GPU 路线将使用独立的 Metal 适配器；旧的 Paraformer/Zipformer 和显式 CPU 本地模式仍可用于诊断。
+默认高精度路径是 VAD + 段级本地 GPU ASR：NVIDIA CUDA 使用 Qwen3-ASR，Apple Silicon 使用 whisper.cpp/Metal 运行 Whisper large-v3-turbo Q5_0；没有可用推理后端时使用阿里云实时 ASR（三项凭证必须完整）。旧的 Paraformer/Zipformer 和显式 CPU 本地模式仍可用于诊断。
 
 下载到 `models/`：
 

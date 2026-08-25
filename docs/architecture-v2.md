@@ -110,7 +110,7 @@ flowchart TB
 | 应用壳 | **Tauri 2**（Rust） | 原生窗口控制 + 系统集成 + Web 技术栈 UI；Meetily 同场景已验证 |
 | 后端语言 | **Rust**（workspace） | 音频原生、ASR 原生绑定、单二进制、并发强 |
 | Web 框架 | **axum**（仅 headless 模式） | tokio 生态，WebSocket/静态托管一体 |
-| ASR 运行时 | **段级引擎适配层** | 当前本地产品引擎为 sherpa-onnx Qwen3-ASR（CUDA/显式 CPU）；无可用 GPU 时走阿里云。Apple GPU 由独立 whisper.cpp/Metal 适配器承载，模型可预下载但适配器尚未启用 |
+| ASR 运行时 | **段级引擎适配层** | NVIDIA 使用 sherpa-onnx Qwen3-ASR（CUDA/显式 CPU）；Apple Silicon 使用 whisper.cpp large-v3-turbo（Metal）；无可用 GPU 时走阿里云 |
 | 前端 | **Vite + React + TypeScript** | 流式列表/虚拟化/分区表达力强，HMR 快 |
 | 音频采集 | cpal + Windows WASAPI loopback | macOS ScreenCaptureKit / 虚拟声卡尚未接线 |
 | VAD | sherpa-onnx 内置 VAD（或 silero-vad Rust 绑定） | 流式端点检测 |
@@ -225,22 +225,22 @@ flowchart LR
   ```
   旧：麦克风 → VAD → Paraformer-zh 流式（每帧增量）→ partial 文本
   新：麦克风 → Silero VAD 切段 → [NVIDIA CUDA] Qwen3-ASR 0.6B → 高精度文本
-                                   [Apple Metal] Whisper large-v3-turbo（适配器待接入）
+                                   [Apple Metal] Whisper large-v3-turbo（whisper.cpp）
                                    [无可用 GPU] 阿里云 WebSocket 实时语音 → 高精度文本
   ```
 - **段级接口**：`SegmentEngine`（流式与离线同一 trait）
   - Qwen3-ASR：`accept` 只攒音频，VAD 段结束 `finish()` 整段识别（无 partial）
-  - Whisper large-v3-turbo Q5_0：允许通过模型管理预下载；在 Metal adapter 完成前 `selectable=false`，不会进入设置选择框
+  - Whisper large-v3-turbo Q5_0：Apple Silicon 上通过 whisper.cpp/Metal 运行；其他平台 `selectable=false`
   - Paraformer / Zipformer / 旧 sherpa Whisper：只保留内部解析与自动化测试兼容，不出现在产品模型目录
   - 云端 `AliyunEngine`：`accept` 推送 PCM 至阿里云 WebSocket，服务端自带 VAD，`finish()` 等待 SentenceEnd
 - **GPU 加速**：`GpuBackend::detect()` 运行时检测
   - Windows/Linux：尝试 `dlopen nvcuda.dll / libcuda.so.1`，成功则 `GpuBackend::Cuda`
-  - macOS：当前 sherpa-onnx 静态库请求 CoreML 会回退 CPU，因此运行时返回“无可用加速后端”；同时以 `hardware_candidate` 展示 Apple Metal 硬件候选，不把芯片型号冒充实际加速
+  - macOS Apple Silicon：独立 whisper.cpp/Metal adapter；native 初始化日志必须确认 `using Metal backend`。不再请求会回退 CPU 的 sherpa-onnx CoreML provider
   - `resolve_asr_route` 统一裁决 GPU/云端路线；provider 先进入 `EngineOptions` 再进入引擎池
 - **阿里云云端引擎**（无 GPU 时回退）
   - `aliyun::TokenManager`：HMAC-SHA1 POP 签名，Token 24h 缓存，到期前 5 分钟自动刷新
   - `aliyun::AliyunEngine`：WebSocket `wss://nls-gateway-cn-shanghai.aliyuncs.com/ws/v1`；StartTranscription → binary PCM → StopTranscription → SentenceEnd
-  - 自动选择逻辑（`asr_mode`）：`auto`（当前仅已验证 CUDA → 本地，否则要求阿里云完整凭证）、`local`（强制本地，可显式 CPU）、`cloud`（强制云端）。Apple GPU 将由独立 whisper.cpp/Metal 适配器承载；Intel GPU 为后续扩展点
+  - 自动选择逻辑（`asr_mode`）：`auto`（CUDA → Qwen3-ASR；Apple Metal → large-v3-turbo；否则要求阿里云完整凭证）、`local`（强制本地，可显式 CPU/CUDA/Metal）、`cloud`（强制云端）。Intel GPU 为后续扩展点
 - **引擎池**：`EnginePool` 按 `(kind, model_dir, options.signature())` 缓存，含 provider 隔离；GPU 引擎与 CPU 引擎独立缓存
 - **GPU 状态 API**：`GET /api/asr/gpu_status` + Tauri `get_gpu_status` → `{backend, display_name, hardware_candidate, is_accelerated, effective_route, route_error}`
 - **模型管理**：模型目录解析、可选状态、断点续传、磁盘预检、完整性校验与下载日志见 [模型管理架构](model-management.md)
@@ -610,7 +610,7 @@ revision / processed_until_sample / committed_until_sample
 麦克风 → Silero VAD 切段 → 段内累积音频
                               ↓ 段结束（静音超阈值）
                    [NVIDIA CUDA] Qwen3-ASR 0.6B → 高精度文本
-                   [Apple Metal] Whisper large-v3-turbo Q5_0 → 适配器待接入
+                   [Apple Metal] Whisper large-v3-turbo Q5_0 → whisper.cpp 段级推理
                    [无 GPU + 有 AccessKey] 阿里云 WebSocket → 高精度文本（200–500ms）
                    [无 GPU + 无 key]      明确报错并引导配置云端；local 可显式使用 CPU
 ```

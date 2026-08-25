@@ -21,12 +21,12 @@
 | ID | 文件 | 状态 | 用途 |
 |---|---|---|---|
 | `qwen3-asr` | `sherpa-onnx-qwen3-asr-0.6b/` | 可选择 | CUDA/显式 CPU 本地段级识别 |
-| `whisper-large-v3-turbo-metal` | `whisper.cpp-large-v3-turbo-q5_0/ggml-large-v3-turbo-q5_0.bin` | 可预下载 | Apple Silicon Metal adapter 的默认候选 |
+| `whisper-large-v3-turbo-metal` | `whisper.cpp-large-v3-turbo-q5_0/ggml-large-v3-turbo-q5_0.bin` | Apple Silicon 可选择 | Apple Silicon 的本地 whisper.cpp/Metal 默认模型 |
 | `punct` | `punct-ct-transformer/model.onnx` | 可选择的辅助模型 | 中英文标点恢复与语义分句 |
 
 Paraformer、Zipformer、旧 sherpa ONNX Whisper 已从产品模型目录和产品下载 API 移除，只保留内部枚举解析与 `download_models.py legacy`，供自动化回归和历史对比使用。
 
-`ModelProfile::selectable` 将“允许下载”和“已有可运行 adapter”分开。Metal adapter 完成前，large-v3-turbo 可以预下载，但不会出现在 ASR 引擎选择框或 OpenAI 兼容模型 API 中。
+`ModelProfile::selectable` 将“允许下载”和“当前平台已有可运行 adapter”分开。large-v3-turbo 在 Apple Silicon 上可选择并通过 whisper.cpp/Metal 运行；其他平台仍不暴露该引擎。
 
 ## 下载状态机
 

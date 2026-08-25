@@ -95,7 +95,7 @@ python3 scripts/evaluate.py asr \
 python3 scripts/download_models.py qwen3-asr
 ```
 
-Apple Silicon 的 Whisper large-v3-turbo Q5_0 可以通过 `whisper-metal` 目标预下载，但 Metal adapter 完成前不会进入可运行对比。Paraformer、Zipformer 和旧 sherpa Whisper 只用于历史回归，可通过 `legacy` 目标准备。下载后重新运行 `./scripts/talksage.sh build` 和评估命令。
+Apple Silicon 的 Whisper large-v3-turbo Q5_0 可通过 `whisper-metal` 目标下载，并使用 `whisper-large-v3-turbo-metal` 引擎参加真实 Metal 对比。Paraformer、Zipformer 和旧 sherpa Whisper 只用于历史回归，可通过 `legacy` 目标准备。下载后重新运行 `./scripts/talksage.sh build` 和评估命令。
 
 ## 5. 检查真实麦克风
 

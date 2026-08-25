@@ -83,7 +83,7 @@ fn resolve_local_backend(preference: &str, detected: GpuBackend) -> anyhow::Resu
         "" | "auto" => detected,
         "cpu" => GpuBackend::None,
         "cuda" if detected == GpuBackend::Cuda => GpuBackend::Cuda,
-        "coreml" | "metal" if detected == GpuBackend::CoreMl => GpuBackend::CoreMl,
+        "coreml" | "metal" if detected == GpuBackend::Metal => GpuBackend::Metal,
         "cuda" => anyhow::bail!("已强制选择 CUDA，但当前机器未检测到 NVIDIA CUDA"),
         "coreml" | "metal" => {
             anyhow::bail!("已强制选择 CoreML/Metal，但当前 ASR 运行时未提供可用的 Apple GPU 后端")
@@ -118,8 +118,8 @@ mod tests {
             AsrRoute::Local { backend: GpuBackend::Cuda }
         );
         assert_eq!(
-            resolve_asr_route("auto", "auto", GpuBackend::CoreMl, CLOUD).unwrap(),
-            AsrRoute::Local { backend: GpuBackend::CoreMl }
+            resolve_asr_route("auto", "auto", GpuBackend::Metal, CLOUD).unwrap(),
+            AsrRoute::Local { backend: GpuBackend::Metal }
         );
     }
 

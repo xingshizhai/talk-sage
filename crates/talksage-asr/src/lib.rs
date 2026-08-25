@@ -22,6 +22,8 @@ pub mod aliyun;
 
 /// GPU 后端检测（CUDA / CoreML / CPU）。
 pub mod gpu;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod metal;
 pub use gpu::GpuBackend;
 
 /// Hardware/cloud execution routing.
@@ -189,7 +191,7 @@ impl EngineKind {
             Self::WhisperBase => ModelProfile { kind: self, label: "Whisper base ONNX（旧模型）", languages: "multilingual", streaming: false, speed: "balanced", description: "旧 sherpa ONNX 模型，不再提供下载", selectable: false },
             Self::WhisperSmall => ModelProfile { kind: self, label: "Whisper small ONNX（旧模型）", languages: "multilingual", streaming: false, speed: "accurate", description: "旧 sherpa ONNX 模型，不再提供下载", selectable: false },
             Self::Qwen3Asr => ModelProfile { kind: self, label: "Qwen3-ASR 0.6B int8", languages: "multilingual", streaming: false, speed: "accurate", description: "CUDA/CPU 本地高精度模型；中文与专业术语优先", selectable: true },
-            Self::WhisperLargeV3TurboMetal => ModelProfile { kind: self, label: "Whisper large-v3-turbo Q5_0（Apple Metal）", languages: "multilingual", streaming: false, speed: "balanced", description: "M 系列推荐模型，约 547 MiB；Metal 引擎接入前可预下载但暂不可选择", selectable: false },
+            Self::WhisperLargeV3TurboMetal => ModelProfile { kind: self, label: "Whisper large-v3-turbo Q5_0（Apple Metal）", languages: "multilingual", streaming: false, speed: "balanced", description: "Apple Silicon 本地 GPU 段级识别，约 547 MiB", selectable: cfg!(all(target_os = "macos", target_arch = "aarch64")) },
             Self::AliyunCloud => ModelProfile { kind: self, label: "阿里云实时语音", languages: "zh,en", streaming: true, speed: "realtime", description: "云端流式识别，需配置 AccessKey；无本地 GPU 时自动启用", selectable: true },
         }
     }
@@ -512,9 +514,7 @@ impl OfflineSegmentEngine {
                     ..Default::default()
                 }
             }
-            EngineKind::WhisperLargeV3TurboMetal => {
-                anyhow::bail!("Apple Metal ASR 适配器尚未接入；模型可以预下载，但当前不能用于识别")
-            }
+            EngineKind::WhisperLargeV3TurboMetal => anyhow::bail!("whisper.cpp Metal 使用独立引擎工厂"),
             _ => anyhow::bail!("{} 不是离线引擎", kind.display_name()),
         };
         let config = OfflineRecognizerConfig {
@@ -564,6 +564,16 @@ pub fn create_engine(kind: EngineKind, model_dir: &Path, num_threads: i32) -> an
 }
 
 pub fn create_engine_with_options(kind: EngineKind, model_dir: &Path, num_threads: i32, options: &EngineOptions) -> anyhow::Result<Box<dyn SegmentEngine>> {
+    if kind == EngineKind::WhisperLargeV3TurboMetal {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            return Ok(Box::new(metal::WhisperMetalEngine::new(model_dir, num_threads, options)?));
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            anyhow::bail!("Whisper Metal 仅支持 Apple Silicon macOS");
+        }
+    }
     if kind.is_streaming() {
         Ok(Box::new(SherpaStreamingEngine::new_with_options(kind, model_dir, num_threads, options)?))
     } else {
@@ -624,7 +634,7 @@ mod tests {
         }
         assert_eq!(EngineKind::ALL, [EngineKind::Qwen3Asr, EngineKind::WhisperLargeV3TurboMetal]);
         assert!(EngineKind::Qwen3Asr.profile().selectable);
-        assert!(!EngineKind::WhisperLargeV3TurboMetal.profile().selectable);
+        assert_eq!(EngineKind::WhisperLargeV3TurboMetal.profile().selectable, cfg!(all(target_os = "macos", target_arch = "aarch64")));
         assert!(!EngineKind::ParaformerZh.is_product_model());
     }
 

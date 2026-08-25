@@ -12,8 +12,8 @@
 pub enum GpuBackend {
     /// NVIDIA CUDA GPU（Windows/Linux）。
     Cuda,
-    /// Apple CoreML（保留给带 CoreML EP 的自定义运行时）。
-    CoreMl,
+    /// Apple Silicon Metal（whisper.cpp adapter）。
+    Metal,
     /// 无受支持的 GPU，使用 CPU 推理。
     None,
 }
@@ -23,11 +23,10 @@ impl GpuBackend {
     pub fn detect() -> Self {
         #[cfg(target_os = "macos")]
         {
-            // 不能按芯片型号推断 provider 可用性。本项目当前预编译 sherpa-onnx
-            // 在 M 系列机器收到 provider=coreml 时会输出 `Fallback to cpu!`。
-            // Apple GPU 后端接入 whisper.cpp/Metal 或自定义 CoreML 构建后，再由
-            // 对应适配器返回 CoreMl；在此之前必须诚实报告 CPU。
-            Self::None
+            #[cfg(target_arch = "aarch64")]
+            { Self::Metal }
+            #[cfg(not(target_arch = "aarch64"))]
+            { Self::None }
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -43,7 +42,7 @@ impl GpuBackend {
     pub fn provider_str(self) -> &'static str {
         match self {
             Self::Cuda => "cuda",
-            Self::CoreMl => "coreml",
+            Self::Metal => "metal",
             Self::None => "cpu",
         }
     }
@@ -57,7 +56,7 @@ impl GpuBackend {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Cuda => "NVIDIA CUDA",
-            Self::CoreMl => "Apple CoreML (Metal)",
+            Self::Metal => "Apple Metal (whisper.cpp)",
             Self::None => "CPU",
         }
     }
@@ -66,11 +65,31 @@ impl GpuBackend {
     /// GPU”误报为“当前推理运行时正在使用 GPU”。
     pub fn hardware_candidate() -> &'static str {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        { "Apple Silicon GPU（当前 sherpa-onnx 构建未启用 CoreML）" }
+        { "Apple Silicon GPU（Metal）" }
         #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
         { "Intel Mac（尚无本地 GPU 后端）" }
         #[cfg(not(target_os = "macos"))]
         { Self::detect().display_name() }
+    }
+
+    /// 解释物理 GPU 与当前 ASR 推理后端为何可能不一致，供 UI 和日志诊断。
+    pub fn availability_note() -> &'static str {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            "已检测到 Apple Silicon GPU；本地 ASR 使用 whisper.cpp Metal adapter，不使用会回退 CPU 的 sherpa-onnx CoreML provider"
+        }
+        #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+        {
+            "已检测到 Intel Mac；当前尚未接入 Intel GPU ASR 后端"
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            match Self::detect() {
+                Self::Cuda => "已检测到可供 ASR 使用的 NVIDIA CUDA runtime",
+                Self::Metal => "已检测到可供 ASR 使用的 Apple Metal runtime",
+                Self::None => "未检测到当前 ASR 运行时支持的 GPU 后端",
+            }
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -90,27 +109,32 @@ mod tests {
     #[test]
     fn detect_returns_a_valid_variant() {
         let b = GpuBackend::detect();
-        assert!(matches!(b, GpuBackend::Cuda | GpuBackend::CoreMl | GpuBackend::None));
+        assert!(matches!(b, GpuBackend::Cuda | GpuBackend::Metal | GpuBackend::None));
     }
 
     #[test]
     fn provider_str_matches_backend() {
         assert_eq!(GpuBackend::Cuda.provider_str(), "cuda");
-        assert_eq!(GpuBackend::CoreMl.provider_str(), "coreml");
+        assert_eq!(GpuBackend::Metal.provider_str(), "metal");
         assert_eq!(GpuBackend::None.provider_str(), "cpu");
     }
 
     #[test]
     fn is_accelerated_only_for_gpu_backends() {
         assert!(GpuBackend::Cuda.is_accelerated());
-        assert!(GpuBackend::CoreMl.is_accelerated());
+        assert!(GpuBackend::Metal.is_accelerated());
         assert!(!GpuBackend::None.is_accelerated());
     }
 
     #[test]
     fn display_name_is_human_readable() {
         assert!(!GpuBackend::Cuda.display_name().is_empty());
-        assert!(!GpuBackend::CoreMl.display_name().is_empty());
+        assert!(!GpuBackend::Metal.display_name().is_empty());
         assert!(!GpuBackend::None.display_name().is_empty());
+    }
+
+    #[test]
+    fn availability_note_is_not_empty() {
+        assert!(!GpuBackend::availability_note().is_empty());
     }
 }

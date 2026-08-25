@@ -514,8 +514,8 @@ pub struct AsrConfig {
     /// 英文场景使用的引擎（两流均用此引擎）。
     #[serde(alias = "client_engine")]
     pub engine_en: String,
-    /// 本地推理后端：auto | cpu | cuda。Apple GPU 由独立 Metal 引擎管理，
-    /// 不再伪装成 sherpa-onnx provider。
+    /// 本地推理后端：auto | cpu | cuda | metal。Apple GPU 由独立
+    /// whisper.cpp/Metal 引擎管理，不使用 sherpa-onnx CoreML provider。
     pub backend: String,
     /// 专业术语热词和确定性纠错配置。
     pub terminology: TerminologyConfig,

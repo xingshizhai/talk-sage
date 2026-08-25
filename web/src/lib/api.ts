@@ -371,6 +371,7 @@ export interface AsrRuntimeStatus {
   backend: string;
   display_name: string;
   hardware_candidate?: string;
+  availability_note?: string;
   is_accelerated: boolean;
   effective_route?: string | null;
   route_error?: string | null;

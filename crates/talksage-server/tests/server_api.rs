@@ -90,6 +90,8 @@ async fn config_and_asr_status_expose_routing_state() {
     assert_eq!(status, StatusCode::OK);
     let runtime: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(runtime.get("backend").is_some());
+    assert!(runtime.get("hardware_candidate").is_some());
+    assert!(runtime.get("availability_note").is_some());
     assert!(runtime.get("effective_route").is_some());
     assert!(runtime.get("route_error").is_some());
 }
@@ -343,7 +345,11 @@ async fn openai_models_lists_engines() {
     if root.join("sherpa-onnx-qwen3-asr-0.6b").is_dir() {
         assert!(body.contains("qwen3-asr"), "body={body}");
     }
-    assert!(!body.contains("whisper-large-v3-turbo-metal"), "尚未接入的 Metal 模型不能出现在可调用模型 API: {body}");
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        assert!(body.contains("whisper-large-v3-turbo-metal"));
+    } else {
+        assert!(!body.contains("whisper-large-v3-turbo-metal"));
+    }
 }
 
 #[tokio::test]

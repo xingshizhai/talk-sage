@@ -67,7 +67,7 @@ See [Model management architecture](docs/model-management.md) for model availabi
 # export https_proxy=http://127.0.0.1:10808 http_proxy=http://127.0.0.1:10808
 python scripts/download_models.py all            # current product/common models
 python scripts/download_models.py qwen3-asr      # CUDA/CPU model
-python scripts/download_models.py whisper-metal # Apple Metal model (pre-download)
+python scripts/download_models.py whisper-metal # Apple Silicon Metal model
 python scripts/download_models.py legacy        # legacy test models only
 ```
 
@@ -76,13 +76,13 @@ This downloads into `models/`:
 | Model | Purpose |
 |---|---|
 | `sherpa-onnx-qwen3-asr-0.6b` | Qwen3-ASR 0.6B offline segment-level (int8, ~878 MB; distributed via official GitHub release, HF repo is gated) |
-| `whisper.cpp-large-v3-turbo-q5_0` | Apple Silicon Metal default candidate (~547 MiB; may be pre-downloaded before adapter activation) |
+| `whisper.cpp-large-v3-turbo-q5_0` | Apple Silicon Metal default (~547 MiB; whisper.cpp adapter) |
 | `silero-vad/silero_vad.onnx` | Voice activity detection |
 | `wespeaker/wespeaker_zh_cnceleb_resnet34.onnx` | Speaker embedding (voiceprint) |
 
 Paraformer, Zipformer, and sherpa ONNX Whisper have been removed from the product model catalog. Existing directories are not deleted automatically because they may contain test fixtures; use the explicit `legacy` script target only for old benchmarks.
 
-The default high-accuracy path is VAD + Qwen3-ASR for both Chinese and English. NVIDIA CUDA can run the local model; machines without an available inference backend use Aliyun realtime ASR and require all three Aliyun credentials. Apple Silicon has a capable GPU, but the sherpa-onnx macOS static library currently bundled by the project falls back to CPU when CoreML is requested, so it is not reported as GPU acceleration. A dedicated Metal adapter is the planned Apple GPU path. Legacy streaming Paraformer/Zipformer and explicit local CPU remain available for diagnostics.
+The default high-accuracy path is segment-level local GPU ASR: NVIDIA CUDA uses Qwen3-ASR, while Apple Silicon uses Whisper large-v3-turbo Q5_0 through whisper.cpp/Metal. Machines without a supported GPU backend use Aliyun realtime ASR and require all three credentials. Legacy streaming Paraformer/Zipformer and explicit local CPU remain available for diagnostics.
 
 ### 2. Build
 

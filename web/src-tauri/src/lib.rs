@@ -535,6 +535,7 @@ fn ping(app: tauri::AppHandle) -> Result<(), String> {
 /// 同步 command 会占住 Tauri 主线程（窗口消息循环冻结，UI 假死）。
 #[tauri::command]
 async fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    log::info!("收到开始实时监听请求");
     let app = app.clone();
     let service = state.service.clone();
     let running = state.running.clone();
@@ -552,8 +553,12 @@ async fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) 
                     let _ = app.emit("talksage://event", ev);
                 }),
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                log::error!("开始实时监听失败: {e:#}");
+                e.to_string()
+            })?;
         *guard = Some(started);
+        log::info!("实时监听启动成功");
         Ok::<(), String>(())
     })
     .await
@@ -815,13 +820,35 @@ fn get_gpu_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
             app_key: &cfg.asr.aliyun_app_key,
         },
     );
+    let route_error = route.as_ref().err().map(ToString::to_string);
+    if let Some(error) = &route_error {
+        log::warn!(
+            "ASR 运行状态不可用: physical_gpu={} runtime_backend={} mode={} configured_backend={} error={} note={}",
+            talksage_asr::GpuBackend::hardware_candidate(),
+            gpu.display_name(),
+            cfg.asr.asr_mode,
+            cfg.asr.backend,
+            error,
+            talksage_asr::GpuBackend::availability_note(),
+        );
+    } else {
+        log::info!(
+            "ASR 运行状态: physical_gpu={} runtime_backend={} accelerated={} route={} note={}",
+            talksage_asr::GpuBackend::hardware_candidate(),
+            gpu.display_name(),
+            gpu.is_accelerated(),
+            route.as_ref().map(|r| r.display_name()).unwrap_or("unknown"),
+            talksage_asr::GpuBackend::availability_note(),
+        );
+    }
     serde_json::json!({
         "backend": gpu.provider_str(),
         "display_name": gpu.display_name(),
         "hardware_candidate": talksage_asr::GpuBackend::hardware_candidate(),
+        "availability_note": talksage_asr::GpuBackend::availability_note(),
         "is_accelerated": gpu.is_accelerated(),
         "effective_route": route.as_ref().ok().map(|r| r.display_name()),
-        "route_error": route.err().map(|e| e.to_string()),
+        "route_error": route_error,
     })
 }
 
@@ -841,6 +868,14 @@ pub fn run() {
     let data_dir = config.data_dir().to_path_buf();
     let _log_guard = talksage_logging::init(Some(&data_dir));
     log::info!("TalkSage 桌面应用启动，数据目录: {}", data_dir.display());
+    let startup_gpu = talksage_asr::GpuBackend::detect();
+    log::info!(
+        "启动时 ASR 硬件诊断: physical_gpu={} runtime_backend={} accelerated={} note={}",
+        talksage_asr::GpuBackend::hardware_candidate(),
+        startup_gpu.display_name(),
+        startup_gpu.is_accelerated(),
+        talksage_asr::GpuBackend::availability_note(),
+    );
     let sessions = Arc::new(
         SessionStore::open(&data_dir.join("sessions.db").to_string_lossy()).expect("打开会话库失败"),
     );

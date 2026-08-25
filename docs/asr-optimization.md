@@ -12,7 +12,7 @@ TalkSage ASR 采用"VAD 切段 + 离线整段推理"架构（2026-08-25 迁移�
 麦克风 → Silero VAD 切段 → 段内累积音频
                               ↓ 段结束（静音超阈值）
                    [NVIDIA CUDA] Qwen3-ASR 0.6B → 高精度文本
-                   [Apple Metal] Whisper large-v3-turbo Q5_0（adapter 待接入）
+                   [Apple Metal] Whisper large-v3-turbo Q5_0（whisper.cpp）
                    [无 GPU + 有 AccessKey] 阿里云 WebSocket → 高精度文本（200–500ms）
                    [无受支持 GPU]         阿里云 WebSocket（必须配置完整凭证）
 ```
@@ -27,11 +27,11 @@ TalkSage ASR 采用"VAD 切段 + 离线整段推理"架构（2026-08-25 迁移�
 | ID | 类型 | 路径 | 语言 | 推荐场景 |
 |---|---|---|---|---|
 | `qwen3-asr` | VAD 段级 | `models/sherpa-onnx-qwen3-asr-0.6b/` | 中文/多语言 | CUDA；显式 CPU 诊断 |
-| `whisper-large-v3-turbo-metal` | VAD 段级 | `models/whisper.cpp-large-v3-turbo-q5_0/` | 多语言 | Apple Metal，当前仅预下载 |
+| `whisper-large-v3-turbo-metal` | VAD 段级 | `models/whisper.cpp-large-v3-turbo-q5_0/` | 多语言 | Apple Silicon Metal，可运行 |
 | `punct` | 辅助模型 | `models/punct-ct-transformer/model.onnx` | 中文/英文 | 标点恢复与语义分句 |
 | `aliyun-cloud` | 云端 WebSocket | 无本地模型 | 中文/英文 | 无 GPU + 有 AccessKey |
 
-模型能力由 `talksage-asr::EngineKind::ALL` 和 `ModelProfile` 统一声明。产品目录只包含 Qwen3-ASR 0.6B 与 Whisper large-v3-turbo Q5_0 Metal；Paraformer、Zipformer、旧 sherpa ONNX Whisper 不再出现在模型管理或设置中，仅保留内部解析用于自动化测试。`ModelProfile::selectable` 把“允许预下载”和“已经可以运行”分开，Metal adapter 完成前不会把新模型放进引擎选择框。
+模型能力由 `talksage-asr::EngineKind::ALL` 和 `ModelProfile` 统一声明。产品目录只包含 Qwen3-ASR 0.6B 与 Whisper large-v3-turbo Q5_0 Metal；Paraformer、Zipformer、旧 sherpa ONNX Whisper 不再出现在模型管理或设置中，仅保留内部解析用于自动化测试。`ModelProfile::selectable` 按编译平台暴露能力：Apple Silicon 构建启用 Metal 引擎，其他平台不把该模型放进引擎选择框。
 
 模型管理细节、状态机、下载源与完整性规则见 [模型管理架构](model-management.md)。
 
@@ -167,7 +167,7 @@ cargo run -p talksage-asr --bin bench_cer --release -- \
 |---|---|---|
 | 旧：Paraformer-zh 流式 | <500ms | ~15–25% |
 | 新：Qwen3-ASR (GPU) | 1–3s（段结束后） | <5% |
-| 规划：large-v3-turbo Q5_0 (Metal) | 待 M4 基准 | 待固定语料实测 |
+| large-v3-turbo Q5_0 (M4 Metal) | 0.607–0.929（段级，首次固定语料） | 固定中英混合语料已输出完整文本；需扩大语料计算稳定 CER |
 | 新：阿里云云端 | 200–500ms（段结束后） | <5% |
 
 > CER 数字为估算，以实际 AISHELL-1 bench 结果为准。

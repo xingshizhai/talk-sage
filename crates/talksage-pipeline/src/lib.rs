@@ -461,7 +461,13 @@ impl StreamWorker {
                 false,
             )
         } else {
-            let provider = asr_route.provider().expect("local route has provider");
+            // Metal 是独立 whisper.cpp adapter，不依赖 sherpa provider。离线 bench
+            // 可能构造 CPU route，但实际引擎仍必须如实记录/隔离为 Metal。
+            let provider = if cfg.engine_kind == talksage_asr::EngineKind::WhisperLargeV3TurboMetal {
+                "metal"
+            } else {
+                asr_route.provider().expect("local route has provider")
+            };
             effective_options.provider = provider.to_string();
             log::info!("ASR 引擎：本地 {:?} (provider={provider})", cfg.engine_kind);
             let engine = match &engine_pool {

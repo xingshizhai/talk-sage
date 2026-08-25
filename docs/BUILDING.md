@@ -174,7 +174,7 @@ $env:SHERPA_ONNX_ARCHIVE_DIR = "$PWD\.tools\sherpa-onnx-archives"
 python scripts\download_models.py all
 # 下载到 models/
 #   sherpa-onnx-qwen3-asr-0.6b/             （CUDA/CPU 段级 ASR，约 878 MB）
-#   whisper.cpp-large-v3-turbo-q5_0/       （Apple Metal 候选，约 547 MiB；适配器待启用）
+#   whisper.cpp-large-v3-turbo-q5_0/       （Apple Silicon Metal ASR，约 547 MiB）
 #   silero-vad/silero_vad.onnx              （VAD）
 #   wespeaker/                               （实时声纹）
 #   diarization/                             （会后分离）

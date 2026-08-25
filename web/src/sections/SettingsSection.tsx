@@ -813,6 +813,7 @@ export default function SettingsSection({
             <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-2)" }}>
               <div>物理硬件：{gpuStatus.hardware_candidate ?? gpuStatus.display_name}</div>
               <div>当前推理后端：<span style={{ color: gpuStatus.is_accelerated ? "var(--live)" : undefined }}>{gpuStatus.display_name}</span></div>
+              {gpuStatus.availability_note && <div>说明：{gpuStatus.availability_note}</div>}
               {gpuStatus.effective_route && <div>当前生效路线：{gpuStatus.effective_route}</div>}
               {gpuStatus.route_error && <div style={{ color: "var(--danger, #c33)" }}>配置不可用：{gpuStatus.route_error}</div>}
             </div>
@@ -824,7 +825,7 @@ export default function SettingsSection({
             onChange={(e) => setAsrMode(e.target.value)}
             style={{ ...inputStyle, marginBottom: 4 }}
           >
-            <option value="auto">自动（有 GPU 用本地，否则云端）</option>
+            <option value="auto">自动（有已接入的 GPU 后端用本地，否则云端）</option>
             <option value="local">本地优先</option>
             <option value="cloud">阿里云云端</option>
           </select>
@@ -839,11 +840,12 @@ export default function SettingsSection({
                 <option value="auto">自动检测</option>
                 <option value="cpu">CPU（诊断/离线）</option>
                 <option value="cuda">NVIDIA CUDA</option>
+                <option value="metal">Apple Metal（Apple Silicon）</option>
               </select>
             </label>
           )}
           <div style={hint}>
-            自动模式：当前支持 NVIDIA CUDA 本地识别；Apple Silicon 的 Metal 引擎正在接入，完成前使用阿里云或显式 CPU。Intel GPU 后端尚未支持。
+            自动模式：NVIDIA 使用 CUDA + Qwen3-ASR；Apple Silicon 使用 Metal + Whisper large-v3-turbo。Intel GPU 后端尚未支持。
           </div>
 
           {(asrMode === "auto" || asrMode === "cloud") && (

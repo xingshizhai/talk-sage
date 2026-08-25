@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { invoke } from "@tauri-apps/api/core";
 import { getApi } from "./lib/transport";
-import type { AppConfig, ConversationMetrics, DomainEvent, NotesTemplate, NudgeEvent, SceneMode, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./lib/api";
+import type { AppConfig, AsrRuntimeStatus, ConversationMetrics, DomainEvent, NotesTemplate, NudgeEvent, SceneMode, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./lib/api";
 import { TranscriptAccumulator } from "./lib/transcript";
 import { toKeyPoint, type KeyPoint } from "./lib/highlights";
 import { applyIncomingNudge } from "./lib/nudge";
@@ -61,7 +60,7 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
   const [version, setVersion] = useState<string>("—");
   const [config, setConfig] = useState<AppConfig | null>(null);
-  const [gpuStatus, setGpuStatus] = useState<{ backend: string; display_name: string; is_accelerated: boolean } | null>(null);
+  const [gpuStatus, setGpuStatus] = useState<AsrRuntimeStatus | null>(null);
   const [listening, setListening] = useState(false);
   const [paused, setPaused] = useState(false);
   const [status, setStatus] = useState<string>("待机");
@@ -100,8 +99,7 @@ export default function App() {
   useEffect(() => {
     api.getVersion().then(setVersion).catch(console.error);
     api.getConfig().then(setConfig).catch(console.error);
-    invoke<{ backend: string; display_name: string; is_accelerated: boolean }>("get_gpu_status")
-      .then(setGpuStatus).catch(() => {});
+    api.getAsrRuntimeStatus().then(setGpuStatus).catch((error) => console.error("读取 ASR 运行状态失败:", error));
     // Windows 桌面：最小化 → 隐藏到系统托盘（托盘点击恢复；macOS 遵循系统惯例最小化到 Dock，不做此处理）
     const isTauri = !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     const isWindows = /Windows/i.test(navigator.userAgent);
@@ -267,13 +265,10 @@ export default function App() {
 
   const asrBackendLabel = (() => {
     if (!config) return "加载中…";
-    const mode = config.asr.asr_mode ?? "auto";
-    const hasCloud = !!config.asr.aliyun_access_key_id && !!config.asr.aliyun_app_key;
-    if (mode === "cloud") return "云端（阿里云）";
-    if (mode === "local") return gpuStatus?.is_accelerated ? `GPU (${gpuStatus.display_name})` : "CPU 本地";
-    // auto
-    if (!gpuStatus?.is_accelerated && hasCloud) return "云端（阿里云）";
-    return gpuStatus?.is_accelerated ? `GPU (${gpuStatus.display_name})` : "CPU 本地";
+    if (!gpuStatus) return "检测中…";
+    if (gpuStatus.route_error) return "配置不可用";
+    if (gpuStatus.effective_route) return gpuStatus.effective_route;
+    return gpuStatus.is_accelerated ? `GPU (${gpuStatus.display_name})` : gpuStatus.display_name;
   })();
 
   // 运行状态行：场景置顶，监听过程中始终可见。
@@ -282,7 +277,7 @@ export default function App() {
     { dot: paused ? "var(--brief)" : listening ? "var(--live)" : "var(--muted)", label: "监听", value: paused ? "暂停" : listening ? "活跃" : "待机" },
     { dot: "var(--client)", label: "客户流(VAD)", value: "双流" },
     { dot: "var(--me)", label: "用户流", value: "qwen3-asr" },
-    { dot: gpuStatus?.is_accelerated ? "var(--live)" : "var(--brief)", label: "ASR", value: asrBackendLabel },
+    { dot: gpuStatus?.route_error ? "var(--danger)" : gpuStatus?.is_accelerated ? "var(--live)" : "var(--brief)", label: "ASR", value: asrBackendLabel },
   ];
 
   const navItems: NavItem[] = [
