@@ -62,11 +62,14 @@ pub trait StreamingASREngine {
 pub struct EngineOptions {
     pub hotwords: Vec<String>,
     pub hotword_score: f32,
+    /// sherpa-onnx provider: "cpu" | "cuda" | "coreml". Empty string defaults to "cpu".
+    pub provider: String,
 }
 
 impl EngineOptions {
     fn signature(&self) -> String {
-        format!("{:.3}|{}", self.hotword_score, self.hotwords.join("\u{1f}"))
+        let provider = if self.provider.is_empty() { "cpu" } else { &self.provider };
+        format!("{:.3}|{}|{}", self.hotword_score, self.hotwords.join("\u{1f}"), provider)
     }
 }
 
@@ -412,7 +415,7 @@ impl OfflineSegmentEngine {
                     tokens: Some(model_dir.join(format!("{stem}-tokens.txt")).to_string_lossy().into()),
                     num_threads,
                     debug: false,
-                    provider: Some("cpu".into()),
+                    provider: Some(if options.provider.is_empty() { "cpu".into() } else { options.provider.clone() }),
                     model_type: Some("whisper".into()),
                     ..Default::default()
                 }
@@ -462,7 +465,7 @@ impl OfflineSegmentEngine {
                     },
                     num_threads,
                     debug: false,
-                    provider: Some("cpu".into()),
+                    provider: Some(if options.provider.is_empty() { "cpu".into() } else { options.provider.clone() }),
                     model_type: Some("qwen3_asr".into()),
                     ..Default::default()
                 }
@@ -523,6 +526,19 @@ pub fn create_engine_with_options(kind: EngineKind, model_dir: &Path, num_thread
     }
 }
 
+/// Create an engine with automatic provider selection based on detected GPU.
+pub fn create_engine_auto(
+    kind: EngineKind,
+    model_dir: &Path,
+    num_threads: i32,
+    gpu: GpuBackend,
+    options: &EngineOptions,
+) -> anyhow::Result<Box<dyn SegmentEngine>> {
+    let provider = gpu.provider_str().to_string();
+    let opts = EngineOptions { provider, ..options.clone() };
+    create_engine_with_options(kind, model_dir, num_threads, &opts)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -559,6 +575,30 @@ mod tests {
             assert!(ids.insert(kind.display_name()), "模型 id 重复");
             assert!(matches!(profile.speed, "realtime" | "balanced" | "accurate"));
         }
+    }
+
+    #[test]
+    fn engine_options_has_provider_field() {
+        let opts = EngineOptions {
+            provider: "cpu".into(),
+            ..Default::default()
+        };
+        assert_eq!(opts.provider, "cpu");
+    }
+
+    #[test]
+    fn create_engine_auto_exists() {
+        // Just verify it compiles — no model needed
+        use std::path::Path;
+        let _ = std::panic::catch_unwind(|| {
+            let _ = crate::create_engine_auto(
+                crate::EngineKind::WhisperBase,
+                Path::new("/nonexistent"),
+                1,
+                crate::GpuBackend::None,
+                &crate::EngineOptions::default(),
+            );
+        });
     }
 
     /// 0 字节模型文件不得被判定为已安装（空 onnx 会让 sherpa-onnx native 崩溃）。
@@ -713,8 +753,8 @@ mod pool_tests {
     #[test]
     fn pool_key_isolated_by_meeting_hotwords() {
         let dir = Path::new("models/example");
-        let a = EngineOptions { hotwords: vec!["TalkSage".into()], hotword_score: 1.5 };
-        let b = EngineOptions { hotwords: vec!["WhisperLiveKit".into()], hotword_score: 1.5 };
+        let a = EngineOptions { hotwords: vec!["TalkSage".into()], hotword_score: 1.5, ..Default::default() };
+        let b = EngineOptions { hotwords: vec!["WhisperLiveKit".into()], hotword_score: 1.5, ..Default::default() };
         assert_ne!(EnginePool::key(EngineKind::ZipformerEn, dir, &a), EnginePool::key(EngineKind::ZipformerEn, dir, &b));
     }
 
@@ -727,6 +767,7 @@ mod pool_tests {
         let options = EngineOptions {
             hotwords: vec!["TalkSage".into(), "Whisper Live Kit".into()],
             hotword_score: 1.5,
+            ..Default::default()
         };
         let mut engine = create_engine_with_options(EngineKind::ZipformerEn, &dir, 1, &options)
             .expect("普通文本热词应由 sherpa 内部 BPE 编译");
