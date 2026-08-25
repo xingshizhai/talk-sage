@@ -103,7 +103,7 @@ impl TokenManager {
     }
 }
 
-pub(crate) fn build_canonical_query(params: &BTreeMap<&str, String>) -> String {
+pub fn build_canonical_query(params: &BTreeMap<&str, String>) -> String {
     params
         .iter()
         .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
@@ -111,7 +111,7 @@ pub(crate) fn build_canonical_query(params: &BTreeMap<&str, String>) -> String {
         .join("&")
 }
 
-pub(crate) fn sign_hmac_sha1(key: &str, data: &str) -> String {
+pub fn sign_hmac_sha1(key: &str, data: &str) -> String {
     let mut mac = Hmac::<Sha1>::new_from_slice(key.as_bytes())
         .expect("HMAC accepts any key length");
     mac.update(data.as_bytes());
