@@ -370,6 +370,7 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
                 "dictation" => talksage_config::SceneMode::Dictation,
                 "conversation" => talksage_config::SceneMode::Conversation,
                 "translation" | "bilingual" => talksage_config::SceneMode::Bilingual,
+                "live_translation" => talksage_config::SceneMode::LiveTranslation,
                 "meeting" => talksage_config::SceneMode::Meeting,
                 "lecture" => talksage_config::SceneMode::Lecture,
                 "custom" => talksage_config::SceneMode::Custom,

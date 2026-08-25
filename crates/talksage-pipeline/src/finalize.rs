@@ -64,19 +64,28 @@ fn runtime_info_from_config(cfg: &talksage_config::Config) -> talksage_session::
     let vad = scene.to_vad_config().effective();
     let audio = &cfg.audio;
     let asr = &cfg.asr;
+    // 与 service.rs engine_for_language 逻辑保持一致：lang="zh" → engine_zh，其他 → engine_en。
+    let engine_for_lang = |lang: &str| -> String {
+        if lang == "zh" { asr.engine_zh.clone() } else { asr.engine_en.clone() }
+    };
     let user_engine = match cfg.scene.mode {
         talksage_config::SceneMode::Custom => {
-            if scene.user_engine.is_empty() { asr.engine_zh.clone() } else { scene.user_engine.clone() }
+            if scene.user_engine.is_empty() { engine_for_lang(&scene.language) } else { scene.user_engine.clone() }
         }
-        _ => asr.engine_zh.clone(), // 与 service.rs 一致：非自定义场景用全局引擎
+        _ => engine_for_lang(&scene.language),
+    };
+    let client_engine_name = match cfg.scene.mode {
+        talksage_config::SceneMode::Custom => {
+            if scene.client_engine.is_empty() { engine_for_lang(&scene.client_language) } else { scene.client_engine.clone() }
+        }
+        talksage_config::SceneMode::Bilingual => engine_for_lang(&scene.client_language),
+        _ => engine_for_lang(&scene.language),
     };
     talksage_session::SessionRuntimeInfo {
         app_version: talksage_core::VERSION.to_string(),
         scene_mode: format!("{:?}", cfg.scene.mode).to_ascii_lowercase(),
         user_engine,
-        client_engine: scene.client_enabled.then(|| {
-            if scene.client_engine.is_empty() { asr.engine_en.clone() } else { scene.client_engine.clone() }
-        }),
+        client_engine: scene.client_enabled.then_some(client_engine_name),
         client_enabled: scene.client_enabled,
         vad_preset: format!("{:?}", scene.vad_preset).to_ascii_lowercase(),
         vad_threshold: vad.0,
