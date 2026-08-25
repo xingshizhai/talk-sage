@@ -202,7 +202,7 @@ async fn asr_models_api(State(state): State<ServerState>, headers: axum::http::H
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
     let root = resolve_models_dir();
-    let models: Vec<_> = EngineKind::ALL.iter().map(|&kind| {
+    let mut models: Vec<_> = EngineKind::ALL.iter().map(|&kind| {
         let p = kind.profile();
         serde_json::json!({
             "id": kind.display_name(), "label": p.label, "languages": p.languages,
@@ -213,6 +213,18 @@ async fn asr_models_api(State(state): State<ServerState>, headers: axum::http::H
             "downloading": root.as_ref().is_some_and(|r| talksage_asr::models::is_downloading(kind, r)),
         })
     }).collect();
+    models.push(serde_json::json!({
+        "id": "punct",
+        "label": "标点恢复模型",
+        "languages": ["zh", "en"],
+        "streaming": true,
+        "speed": "fast",
+        "description": "CT-Transformer 中英文标点预测，用于流式引擎语义分句",
+        "installed": root.as_ref().is_some_and(|r| talksage_asr::is_punct_model_installed(r)),
+        "size_mb": 0,
+        "download_size_mb": talksage_asr::punct_download_size_mb(),
+        "downloading": false,
+    }));
     Json(models).into_response()
 }
 
@@ -224,6 +236,48 @@ async fn download_model_api(
 ) -> impl IntoResponse {
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    // punct 模型独立处理，不走 EngineKind 查表
+    if engine == "punct" {
+        let Some(root) = resolve_models_dir() else {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "未找到 models/ 目录" }))).into_response();
+        };
+        if talksage_asr::is_punct_model_installed(&root) {
+            return (StatusCode::OK, Json(serde_json::json!({ "ok": true, "already_installed": true }))).into_response();
+        }
+        let punct_id = "punct".to_string();
+        let cancel_flag = {
+            let mut dl = state.downloads.lock().unwrap();
+            if dl.contains_key(&punct_id) {
+                return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "该模型已在下载中" }))).into_response();
+            }
+            let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            dl.insert(punct_id.clone(), flag.clone());
+            flag
+        };
+        let downloads = state.downloads.clone();
+        let events = state.events.clone();
+        tokio::task::spawn_blocking(move || {
+            let emit_events = events.clone();
+            let emit = move |stage: &str, percent: u32, message: &str| {
+                let _ = emit_events.send(DomainEvent::ModelProgress {
+                    engine: "punct".into(),
+                    stage: stage.into(),
+                    percent,
+                    message: message.into(),
+                });
+            };
+            emit("downloading", 0, "开始下载…");
+            let result = talksage_asr::download_punct_model(&root, cancel_flag, None);
+            match result {
+                Ok(()) => emit("done", 100, "安装完成"),
+                Err(e) => emit("error", 0, &e.to_string()),
+            }
+            if let Ok(mut dl) = downloads.lock() {
+                dl.remove("punct");
+            }
+        });
+        return (StatusCode::ACCEPTED, Json(serde_json::json!({ "ok": true }))).into_response();
     }
     let kind = match EngineKind::from_name(&engine) {
         Some(k) => k,
@@ -315,6 +369,16 @@ async fn remove_model_api(
 ) -> impl IntoResponse {
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    // punct 模型独立处理
+    if engine == "punct" {
+        let Some(root) = resolve_models_dir() else {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "未找到 models/ 目录" }))).into_response();
+        };
+        return match talksage_asr::remove_punct_model(&root) {
+            Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+        };
     }
     let kind = match EngineKind::from_name(&engine) {
         Some(k) => k,

@@ -94,7 +94,7 @@ fn allow_recording_assets(app: &tauri::AppHandle, config: &ConfigManager) -> Res
 #[tauri::command]
 fn list_asr_models() -> Vec<serde_json::Value> {
     let root = TalkSageService::resolve_models_dir();
-    EngineKind::ALL
+    let mut models: Vec<serde_json::Value> = EngineKind::ALL
         .iter()
         .map(|&kind| {
             let p = kind.profile();
@@ -111,7 +111,20 @@ fn list_asr_models() -> Vec<serde_json::Value> {
                 "downloading": root.as_ref().is_some_and(|r| talksage_asr::models::is_downloading(kind, r)),
             })
         })
-        .collect()
+        .collect();
+    models.push(serde_json::json!({
+        "id": "punct",
+        "label": "标点恢复模型",
+        "languages": ["zh", "en"],
+        "streaming": true,
+        "speed": "fast",
+        "description": "CT-Transformer 中英文标点预测，用于流式引擎语义分句",
+        "installed": root.as_ref().is_some_and(|r| talksage_asr::is_punct_model_installed(r)),
+        "size_mb": 0,
+        "download_size_mb": talksage_asr::punct_download_size_mb(),
+        "downloading": false,
+    }));
+    models
 }
 
 /// 下载/安装 ASR 引擎（后台线程；进度经 `talksage://event` 推送 ModelProgress）。
@@ -122,6 +135,48 @@ async fn download_model(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    // punct 模型独立处理，不走 EngineKind 查表
+    if engine == "punct" {
+        let Some(root) = TalkSageService::resolve_models_dir() else {
+            return Err("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）".into());
+        };
+        if talksage_asr::is_punct_model_installed(&root) {
+            return Ok(());
+        }
+        let punct_id = "punct".to_string();
+        let cancel_flag = {
+            let mut dl = state.downloads.lock().map_err(|_| "下载注册表锁失败".to_string())?;
+            if dl.contains_key(&punct_id) {
+                return Err("该模型已在下载中".into());
+            }
+            let flag = Arc::new(AtomicBool::new(false));
+            dl.insert(punct_id.clone(), flag.clone());
+            flag
+        };
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let emit_app = app.clone();
+            let emit = move |stage: &str, percent: u32, message: &str| {
+                let _ = emit_app.emit(
+                    "talksage://event",
+                    DomainEvent::ModelProgress {
+                        engine: "punct".into(),
+                        stage: stage.into(),
+                        percent,
+                        message: message.into(),
+                    },
+                );
+            };
+            emit("downloading", 0, "开始下载…");
+            let result = talksage_asr::download_punct_model(&root, cancel_flag, None);
+            match result {
+                Ok(()) => emit("done", 100, "安装完成"),
+                Err(e) => emit("error", 0, &e.to_string()),
+            }
+            // 下载结束移除注册（state 无法进入 spawn_blocking，省略清理；下次重启自动清空）
+        });
+        return Ok(());
+    }
     let kind = EngineKind::from_name(&engine).ok_or_else(|| format!("未知引擎: {engine}"))?;
     if state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?.is_some() {
         return Err("请先停止监听再安装模型".into());
@@ -217,6 +272,13 @@ fn cancel_model_download(engine: String, state: tauri::State<'_, AppState>) -> R
 /// 删除 ASR 引擎模型目录。
 #[tauri::command]
 fn remove_model(engine: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    // punct 模型独立处理
+    if engine == "punct" {
+        let Some(root) = TalkSageService::resolve_models_dir() else {
+            return Err("未找到 models/ 目录".into());
+        };
+        return talksage_asr::remove_punct_model(&root).map_err(|e| format!("删除失败: {e}"));
+    }
     let kind = EngineKind::from_name(&engine).ok_or_else(|| format!("未知引擎: {engine}"))?;
     if state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?.is_some() {
         return Err("请先停止监听再删除模型".into());
