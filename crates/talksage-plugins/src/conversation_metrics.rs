@@ -18,6 +18,8 @@ pub struct ConversationMetricsObserver {
     nudge: Mutex<NudgeEngine>,
     /// 会话起点，用于 nudge 的 call_ms。
     started: Instant,
+    /// 是否启用实时教练提示（默认关闭）。
+    nudge_enabled: bool,
 }
 
 impl Default for ConversationMetricsObserver {
@@ -26,6 +28,7 @@ impl Default for ConversationMetricsObserver {
             seg_log: Mutex::new(Vec::new()),
             nudge: Mutex::new(NudgeEngine::default()),
             started: Instant::now(),
+            nudge_enabled: false,
         }
     }
 }
@@ -53,9 +56,11 @@ impl SegmentObserver for ConversationMetricsObserver {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        if let Some(nudge) = self.nudge.lock().unwrap().evaluate(&metrics, call_ms, now_ms) {
-            log::info!("会中提示[{:?}] {}", nudge.kind, nudge.message);
-            out.push(DomainEvent::Nudge { nudge });
+        if self.nudge_enabled {
+            if let Some(nudge) = self.nudge.lock().unwrap().evaluate(&metrics, call_ms, now_ms) {
+                log::info!("会中提示[{:?}] {}", nudge.kind, nudge.message);
+                out.push(DomainEvent::Nudge { nudge });
+            }
         }
         out
     }
@@ -80,11 +85,15 @@ impl Plugin for ConversationMetricsPlugin {
     }
 
     fn default_config(&self) -> PluginConfig {
-        PluginConfig::from_value(json!({ "enabled": true }))
+        PluginConfig::from_value(json!({ "enabled": true, "nudge_enabled": false }))
     }
 
-    fn register(&self, _cfg: &PluginConfig, _ctx: &PluginContext, hooks: &mut HookRegistry) {
-        hooks.add_observer(Arc::new(ConversationMetricsObserver::default()));
+    fn register(&self, cfg: &PluginConfig, _ctx: &PluginContext, hooks: &mut HookRegistry) {
+        let nudge_enabled = cfg.get_bool("nudge_enabled", false);
+        hooks.add_observer(Arc::new(ConversationMetricsObserver {
+            nudge_enabled,
+            ..ConversationMetricsObserver::default()
+        }));
     }
 }
 
