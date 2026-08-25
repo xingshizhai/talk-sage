@@ -1,7 +1,7 @@
 # TalkSage v2 架构设计（推翻重设计）
 
-**日期：** 2026-08（初版）；2026-08-20 修订（共享服务 / 采样时钟 / 有界采集）
-**状态：** 当前实现基线。M0–M3 主路径可用；共享服务、模块拆分、有界采集、异步持久化、插件注册表与有界插件执行器均已落地（见 §19）。版本化增量协议仍为后续产品项。
+**日期：** 2026-08（初版）；2026-08-20 修订（共享服务 / 采样时钟 / 有界采集）；2026-08-25 修订（ASR 架构迁移：VAD 切段 + GPU 加速 + 阿里云云端回退）
+**状态：** 当前实现基线。M0–M3 主路径可用；共享服务、模块拆分、有界采集、异步持久化、插件注册表与有界插件执行器均已落地（见 §19）。ASR 已迁移至 VAD 切段 + 离线批量推理（见 §19、§8.2 及 §20）。版本化增量协议仍为后续产品项。
 **对照：** 旧 Python/PySide6 实现（v1）已随 v2 重写从仓库移除（git 历史可查）
 
 ---
@@ -221,12 +221,27 @@ flowchart LR
 ### 8.2 ASR 域（talksage-asr）
 
 - **统一运行时**：sherpa-onnx（Rust 绑定），模型为 ONNX（`models/` 清单 + 下载脚本）
+- **架构（2026-08-25 迁移）**：已从”流式逐帧增量”切换为”VAD 切段 + 离线整段推理”
+  ```
+  旧：麦克风 → VAD → Paraformer-zh 流式（每帧增量）→ partial 文本
+  新：麦克风 → Silero VAD 切段 → [本地有 GPU] Qwen3-ASR / WhisperSmall (GPU) → 高精度文本
+                                   [无 GPU]    阿里云 WebSocket 实时语音 → 高精度文本
+  ```
 - **段级接口**：`SegmentEngine`（流式与离线同一 trait）
-  - 流式 paraformer-zh / zipformer-en：`accept` 出 hypothesis，`finish` 出 committed
-  - 离线 Whisper base/small、Qwen3-ASR：`accept` 只攒音频，VAD 段结束 `finish()` 整段识别（无 partial）
-- **引擎池**：`EnginePool` 按 `(kind, model_dir)` 缓存 `Box<dyn SegmentEngine>`，监听会话间 `reset` 复用
-- **说话人**：角色策略分为关闭、按物理通道和 WeSpeaker 声纹聚类。只有多人会议（或自定义 voiceprint）加载声纹模型。主人声纹不是聚类前置条件，只负责把匹配身份命名为“我”。段内使用 1.5s 滑动声纹窗口、500ms 步长和连续两次确认检测换人，确认后复用 `finish_speech` 安全切段。推理由每流容量 1 的后台 worker 执行，忙时跳过新窗口而不阻塞 ASR
-- **GPU**：配置里有 `backend = auto`；CUDA / CoreML 真正接线仍是产品项，不是本轮架构门
+  - 离线 Qwen3-ASR（默认）、Whisper base/small：`accept` 只攒音频，VAD 段结束 `finish()` 整段识别（无 partial）
+  - 流式 paraformer-zh / zipformer-en：保留枚举值，不再作为自动选择路径的默认选项
+  - 云端 `AliyunEngine`：`accept` 推送 PCM 至阿里云 WebSocket，服务端自带 VAD，`finish()` 等待 SentenceEnd
+- **GPU 加速**：`GpuBackend::detect()` 运行时检测
+  - Windows/Linux：尝试 `dlopen nvcuda.dll / libcuda.so.1`，成功则 `GpuBackend::Cuda`
+  - macOS：编译期 `cfg(target_os = “macos”)` → `GpuBackend::CoreMl`
+  - `EngineOptions.provider` 传 `”cuda” / “coreml” / “cpu”` 给 sherpa-onnx；`create_engine_auto(gpu)` 自动映射
+- **阿里云云端引擎**（无 GPU 时回退）
+  - `aliyun::TokenManager`：HMAC-SHA1 POP 签名，Token 24h 缓存，到期前 5 分钟自动刷新
+  - `aliyun::AliyunEngine`：WebSocket `wss://nls-gateway-cn-shanghai.aliyuncs.com/ws/v1`；StartTranscription → binary PCM → StopTranscription → SentenceEnd
+  - 自动选择逻辑（`asr_mode`）：`auto`（无 GPU + 配置了 AccessKey → 云端，否则本地）、`local`（强制本地）、`cloud`（强制云端）
+- **引擎池**：`EnginePool` 按 `(kind, model_dir, options.signature())` 缓存，含 provider 隔离；GPU 引擎与 CPU 引擎独立缓存
+- **GPU 状态 API**：`GET /api/asr/gpu_status` + Tauri `get_gpu_status` → `{backend, display_name, is_accelerated}`
+- **说话人**：角色策略分为关闭、按物理通道和 WeSpeaker 声纹聚类。只有多人会议（或自定义 voiceprint）加载声纹模型。主人声纹不是聚类前置条件，只负责把匹配身份命名为”我”。段内使用 1.5s 滑动声纹窗口、500ms 步长和连续两次确认检测换人，确认后复用 `finish_speech` 安全切段。推理由每流容量 1 的后台 worker 执行，忙时跳过新窗口而不阻塞 ASR
 
 ### 8.3 管道与插件（talksage-pipeline / talksage-plugins）
 
@@ -345,9 +360,12 @@ enum DomainEvent {
 
 ```toml
 [asr]
-client_engine = "zipformer-en"        # 或 whisper
-user_engine = "paraformer-zh"
-backend = "auto"                      # auto | cpu | cuda | metal
+client_engine = "qwen3-asr"           # 默认离线高精度（2026-08-25 起）
+user_engine = "qwen3-asr"
+asr_mode = "auto"                     # auto | local | cloud
+aliyun_access_key_id = ""             # 阿里云 AccessKey ID（云端模式必填）
+aliyun_access_key_secret = ""         # 阿里云 AccessKey Secret
+aliyun_app_key = ""                   # 阿里云 NLS 项目 AppKey
 
 [audio]
 mic_device = null
@@ -571,3 +589,81 @@ revision / processed_until_sample / committed_until_sample
 - AlignAtt / token 级 CommitPolicy
 - 把 VAD、ASR、UI 每一步都拆成独立 task；当前拆分以真实背压边界为准
 - 版本化 Delta + 序号 resync（阶段 4，按需）
+
+---
+
+## 20. ASR 架构迁移（2026-08-25）：GPU 加速 + 阿里云云端回退
+
+### 20.1 动机
+
+竞品分析（Meetily / noScribe / WhisperFlow）显示流式推理在中文准确率上存在天花板：
+- Paraformer-zh 流式精度低于同参数量的离线模型（每帧增量触发更多错误纠正与更新）
+- CPU 推理限制模型规模（无法运行 Qwen3-ASR 等大模型）
+- VAD 切段后离线整段推理（1–3s 出字）精度可达 CER <5%，与 noScribe 同档
+
+### 20.2 新架构
+
+```
+麦克风 → Silero VAD 切段 → 段内累积音频
+                              ↓ 段结束（静音超阈值）
+                   [本地有 GPU] Qwen3-ASR / WhisperSmall (GPU) → 高精度文本
+                   [无 GPU + 有 AccessKey] 阿里云 WebSocket → 高精度文本（200–500ms）
+                   [无 GPU + 无 key]      WhisperSmall (CPU) → 本地兜底
+```
+
+延迟特征：
+- GPU 本地：VAD 段 1–3s 后出文本，无网络延迟
+- 阿里云云端：段结束后 200–500ms 出文本，需网络
+- 旧流式路径：首字 <500ms，但准确率低（已移除为主路径）
+
+### 20.3 新增模块
+
+| 模块 | 位置 | 功能 |
+|---|---|---|
+| `GpuBackend` | `talksage-asr::gpu` | 运行时检测 CUDA / CoreML / CPU |
+| `EngineOptions.provider` | `talksage-asr::lib` | 传递 sherpa-onnx provider 参数 |
+| `create_engine_auto` | `talksage-asr::lib` | 按 GpuBackend 自动选 provider |
+| `aliyun::TokenManager` | `talksage-asr::aliyun::token` | HMAC-SHA1 POP 签名 + Token 缓存 |
+| `aliyun::AliyunEngine` | `talksage-asr::aliyun::engine` | WebSocket 实时 ASR，实现 SegmentEngine |
+| `EngineKind::AliyunCloud` | `talksage-asr::lib` | 云端引擎类型标识 |
+| `AsrConfig.asr_mode` | `talksage-config` | auto / local / cloud 三选一 |
+| `AsrConfig.aliyun_*` | `talksage-config` | 阿里云凭证字段 |
+| Pipeline 自动选择 | `talksage-pipeline::lib` | StreamWorker 按 mode+gpu 决定引擎 |
+| `GET /api/asr/gpu_status` | `talksage-server` | 查询 GPU 后端信息 |
+| Tauri `get_gpu_status` | `web/src-tauri` | 桌面端同步 GPU 状态 |
+| Settings UI | `web/src/sections/SettingsSection.tsx` | GPU 状态、ASR 模式、阿里云凭证 |
+
+### 20.4 配置
+
+```toml
+[asr]
+asr_mode = "auto"                    # auto | local | cloud
+aliyun_access_key_id = "LTAI..."     # 阿里云 RAM AccessKey
+aliyun_access_key_secret = "..."
+aliyun_app_key = "..."               # NLS 项目 AppKey
+```
+
+`auto` 模式决策逻辑：
+```
+if asr_mode == "cloud" → AliyunEngine
+elif asr_mode == "local" → create_engine_auto(gpu)
+else (auto):
+    if !gpu.is_accelerated() && aliyun_access_key_id != "" && aliyun_app_key != "" → AliyunEngine
+    else → create_engine_auto(gpu)
+```
+
+### 20.5 阿里云接入说明
+
+- **Token 端点**：`http://nls-meta.cn-shanghai.aliyuncs.com/`（Action=CreateToken）
+- **签名算法**：HMAC-SHA1 POP（参数按字典序 + RFC 3986 编码 + `GET&%2F&{canonical}`）
+- **WebSocket**：`wss://nls-gateway-cn-shanghai.aliyuncs.com/ws/v1?token={token}`
+- **协议**：StartTranscription → binary PCM（16kHz mono int16 LE）→ StopTranscription → SentenceEnd
+- **Token 有效期**：约 24h，`TokenManager` 到期前 5 分钟自动刷新
+- **所需权限**：RAM 用户需授权 `AliyunNLSFullAccess` 策略
+
+### 20.6 验证状态
+
+- ✅ Token 获取（HMAC-SHA1 签名 + 阿里云 API 响应）
+- ✅ WebSocket 连接 + PCM 流推送 + `finish()` 正常返回
+- ✅ 全量单元测试（36 个，含 GPU 检测、Token 签名、WebSocket 消息构建）
+- ✅ 集成测试：`cargo test -p talksage-asr --test aliyun_token_live --test aliyun_ws_live`
