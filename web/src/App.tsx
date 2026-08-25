@@ -38,7 +38,8 @@ const CLIENT_COLORS = ["var(--client)", "var(--term)", "var(--brief)", "var(--li
 const SCENE_LABELS: Record<SceneMode, string> = {
   dictation: "单人听写",
   conversation: "一对一会话",
-  translation: "双语对话",
+  bilingual: "双语对话",
+  live_translation: "实时翻译",
   meeting: "多人会议",
   lecture: "演讲/课堂",
   custom: "自定义",

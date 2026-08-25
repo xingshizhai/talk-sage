@@ -8,8 +8,8 @@
 /** 应用配置快照（与 Rust 侧 Config 对应）。 */
 export interface AppConfig {
   asr: {
-    client_engine: string;
-    user_engine: string;
+    engine_zh: string;
+    engine_en: string;
     backend: string;
     terminology: {
       enabled: boolean;
@@ -68,7 +68,14 @@ export interface AppConfig {
   [key: string]: unknown;
 }
 
-export type SceneMode = "dictation" | "conversation" | "translation" | "meeting" | "lecture" | "custom";
+export type SceneMode =
+  | "dictation"
+  | "conversation"
+  | "bilingual"
+  | "live_translation"
+  | "meeting"
+  | "lecture"
+  | "custom";
 
 /**
  * 插件元数据（与 Rust 侧 `plugin_metadata()` 对应）。设置页据此**生成**表单。
@@ -123,10 +130,14 @@ export interface SceneParams {
   denoise_enabled: boolean;
   denoise_gate: number;
   min_segment_ms: number;
+  /** 自定义模式：用户流引擎（其他模式由 engine_zh/engine_en 决定）。 */
   user_engine: string;
   client_enabled: boolean;
+  /** 自定义模式：客户流引擎。 */
   client_engine: string;
-  user_language: "zh" | "en";
+  /** 本场景主语言："zh" | "en"。双语中为「我的语言」，实时翻译中为「输入语言」。 */
+  language: "zh" | "en";
+  /** 对方语言（双语）或翻译目标（实时翻译）。 */
   client_language: "zh" | "en";
   translation_mode: "off" | "client_to_user" | "bidirectional";
   /** 该场景允许启用的分析类插件 id；不在列表里的一律关闭（allowlist，非 denylist）。 */
