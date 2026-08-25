@@ -71,6 +71,7 @@ fn sources(kind: EngineKind) -> Vec<(String, String)> {
             // 由 `download_qwen3_asr` 走归档下载。
             (String::new(), String::new()),
         ],
+        EngineKind::AliyunCloud => vec![], // 云端引擎：无本地模型文件
     }
 }
 
@@ -82,6 +83,7 @@ fn hf_repo(kind: EngineKind) -> &'static str {
         EngineKind::WhisperBase => "csukuangfj/sherpa-onnx-whisper-base",
         EngineKind::WhisperSmall => "csukuangfj/sherpa-onnx-whisper-small",
         EngineKind::Qwen3Asr => "",
+        EngineKind::AliyunCloud => "",
     }
 }
 
@@ -93,6 +95,7 @@ pub fn download_size_mb(kind: EngineKind) -> u64 {
         EngineKind::WhisperBase => 280,
         EngineKind::WhisperSmall => 950,
         EngineKind::Qwen3Asr => 878,
+        EngineKind::AliyunCloud => 0, // 云端引擎：无下载
     }
 }
 

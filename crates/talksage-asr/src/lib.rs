@@ -105,6 +105,8 @@ pub enum EngineKind {
     WhisperSmall,
     /// Qwen3-ASR 0.6B（离线，段级；中英等多语言，需模型仓库开放后下载）。
     Qwen3Asr,
+    /// 阿里云实时语音识别（云端流式，需配置 AccessKey）。
+    AliyunCloud,
 }
 
 /// 单一事实来源的模型能力描述，供配置界面和服务 API 共用。
@@ -136,6 +138,7 @@ impl EngineKind {
             "whisper" | "whisper-base" => Some(Self::WhisperBase),
             "whisper-small" => Some(Self::WhisperSmall),
             "qwen3-asr" | "qwen3" => Some(Self::Qwen3Asr),
+            "aliyun" | "aliyun-cloud" => Some(Self::AliyunCloud),
             _ => None,
         }
     }
@@ -148,12 +151,13 @@ impl EngineKind {
             Self::WhisperBase => "whisper-base",
             Self::WhisperSmall => "whisper-small",
             Self::Qwen3Asr => "qwen3-asr",
+            Self::AliyunCloud => "aliyun-cloud",
         }
     }
 
     /// 是否流式（逐块增量出 partial）。false = 离线段级（VAD 段结束后整段识别）。
     pub fn is_streaming(self) -> bool {
-        matches!(self, Self::ParaformerZh | Self::ZipformerEn)
+        matches!(self, Self::ParaformerZh | Self::ZipformerEn | Self::AliyunCloud)
     }
 
     /// 模型目录名（下载脚本约定，与 `scripts/download_models.py` 输出一致）。
@@ -164,6 +168,7 @@ impl EngineKind {
             Self::WhisperBase => "sherpa-onnx-whisper-base",
             Self::WhisperSmall => "sherpa-onnx-whisper-small",
             Self::Qwen3Asr => "sherpa-onnx-qwen3-asr-0.6b",
+            Self::AliyunCloud => "aliyun-cloud",
         }
     }
 
@@ -174,6 +179,7 @@ impl EngineKind {
             Self::WhisperBase => ModelProfile { kind: self, label: "Whisper base", languages: "multilingual", streaming: false, speed: "balanced", description: "段结束后识别，多语言准确率与速度平衡" },
             Self::WhisperSmall => ModelProfile { kind: self, label: "Whisper small", languages: "multilingual", streaming: false, speed: "accurate", description: "段结束后识别，准确率优先但延迟更高" },
             Self::Qwen3Asr => ModelProfile { kind: self, label: "Qwen3-ASR 0.6B", languages: "multilingual", streaming: false, speed: "accurate", description: "段结束后识别；仅在模型完整安装后可选" },
+            Self::AliyunCloud => ModelProfile { kind: self, label: "阿里云实时语音", languages: "zh,en", streaming: true, speed: "realtime", description: "云端流式识别，需配置 AccessKey；无本地 GPU 时自动启用" },
         }
     }
 
@@ -204,6 +210,7 @@ impl EngineKind {
                         || (has("encoder.int8.onnx") && has("decoder.int8.onnx")))
                     && (has("tokenizer.json") || has_tokenizer_dir())
             }
+            Self::AliyunCloud => true, // 云端引擎：无本地模型文件，始终可用
         }
     }
 }
@@ -275,6 +282,9 @@ impl SherpaStreamingEngine {
             }
             EngineKind::WhisperBase | EngineKind::WhisperSmall | EngineKind::Qwen3Asr => {
                 anyhow::bail!("{} 是离线段级引擎，请用 OfflineSegmentEngine::new", kind.display_name())
+            }
+            EngineKind::AliyunCloud => {
+                anyhow::bail!("AliyunCloud 是云端引擎，请直接构造 AliyunEngine")
             }
         };
 
