@@ -520,6 +520,18 @@ pub struct AsrConfig {
     pub terminology: TerminologyConfig,
     /// 是否启用标点恢复与语义分段（流式引擎且模型已安装时生效）。
     pub punct_enabled: bool,
+    /// 阿里云智能语音 AccessKey ID。
+    #[serde(default)]
+    pub aliyun_access_key_id: String,
+    /// 阿里云智能语音 AccessKey Secret。
+    #[serde(default)]
+    pub aliyun_access_key_secret: String,
+    /// 阿里云 NLS 项目 AppKey。
+    #[serde(default)]
+    pub aliyun_app_key: String,
+    /// ASR 模式："auto" | "local" | "cloud"。
+    #[serde(default = "default_asr_mode")]
+    pub asr_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -570,6 +582,10 @@ impl Default for AsrConfig {
             backend: "auto".into(),
             terminology: TerminologyConfig::default(),
             punct_enabled: true,
+            aliyun_access_key_id: String::new(),
+            aliyun_access_key_secret: String::new(),
+            aliyun_app_key: String::new(),
+            asr_mode: "auto".into(),
         }
     }
 }
@@ -1067,6 +1083,10 @@ fn merge_config(default: Config, user: Config) -> Config {
             backend: take_or(user.asr.backend, default.asr.backend),
             terminology: user.asr.terminology,
             punct_enabled: user.asr.punct_enabled,
+            aliyun_access_key_id: user.asr.aliyun_access_key_id,
+            aliyun_access_key_secret: user.asr.aliyun_access_key_secret,
+            aliyun_app_key: user.asr.aliyun_app_key,
+            asr_mode: user.asr.asr_mode,
         },
         audio: AudioConfig {
             mic_device: user.audio.mic_device.or(default.audio.mic_device),
@@ -1152,6 +1172,8 @@ fn merge_config(default: Config, user: Config) -> Config {
         },
     }
 }
+
+fn default_asr_mode() -> String { "auto".into() }
 
 fn take_or(user: String, default: String) -> String {
     if user.trim().is_empty() {
@@ -1533,6 +1555,15 @@ knob = 42
         terminology.corrections.insert("拓思者".into(), "TalkSage".into());
         assert_eq!(terminology.normalized_terms(), vec!["TalkSage", "向量数据库"]);
         assert_eq!(terminology.correct("拓思者使用向量数据库"), "TalkSage使用Vector DB");
+    }
+
+    #[test]
+    fn asr_config_has_aliyun_fields() {
+        let cfg = AsrConfig::default();
+        assert!(cfg.aliyun_access_key_id.is_empty());
+        assert!(cfg.aliyun_access_key_secret.is_empty());
+        assert!(cfg.aliyun_app_key.is_empty());
+        assert_eq!(cfg.asr_mode, "auto");
     }
 
     #[test]

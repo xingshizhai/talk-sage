@@ -12,6 +12,10 @@ export interface AppConfig {
     engine_en: string;
     backend: string;
     punct_enabled: boolean;
+    aliyun_access_key_id: string;
+    aliyun_access_key_secret: string;
+    aliyun_app_key: string;
+    asr_mode: string;
     terminology: {
       enabled: boolean;
       hotword_score: number;
