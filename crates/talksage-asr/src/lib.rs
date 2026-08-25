@@ -17,6 +17,10 @@ use sherpa_onnx::{
     OnlineRecognizer, OnlineRecognizerConfig, OnlineStream, OnlineTransducerModelConfig,
 };
 
+/// GPU 后端检测（CUDA / CoreML / CPU）。
+pub mod gpu;
+pub use gpu::GpuBackend;
+
 /// 模型管理（下载 / 删除 / 磁盘占用；应用内「转写引擎」页使用）。
 pub mod models;
 

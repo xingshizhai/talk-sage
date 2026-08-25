@@ -5,6 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+libloading = "0.8"
+
 [dependencies]
 talksage-core = { path = "../talksage-core" }
 anyhow = { workspace = true }
