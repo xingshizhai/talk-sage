@@ -39,6 +39,8 @@ $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
 # ── 环境变量（项目内隔离，避免污染用户全局） ──────────────────
+# 清除代理环境变量，避免 Cargo 走系统代理导致 503/连接失败（.cargo-home/config.toml 已配置国内镜像）
+$env:HTTP_PROXY = ""; $env:HTTPS_PROXY = ""; $env:http_proxy = ""; $env:https_proxy = ""
 $env:CARGO_HOME = Join-Path $Root ".cargo-home"
 $env:SHERPA_ONNX_ARCHIVE_DIR = Join-Path $Root ".tools\sherpa-onnx-archives"
 $env:TALKSAGE_DATA_DIR = Join-Path $Root ".tools\data"
