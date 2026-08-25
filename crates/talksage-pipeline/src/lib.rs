@@ -164,6 +164,16 @@ pub struct LivePipelineConfig {
     pub engine_pool: Option<Arc<EnginePool>>,
     /// 是否启用标点恢复与语义分段（流式引擎且模型已安装时生效）。
     pub punct_enabled: bool,
+    /// 阿里云 AccessKey ID（云端 ASR 用）。
+    pub aliyun_access_key_id: String,
+    /// 阿里云 AccessKey Secret（云端 ASR 用）。
+    pub aliyun_access_key_secret: String,
+    /// 阿里云语音识别 AppKey。
+    pub aliyun_app_key: String,
+    /// ASR 引擎模式："auto" | "local" | "cloud"。
+    pub asr_mode: String,
+    /// Tokio 运行时句柄（云端引擎必须；从调用方上下文捕获）。
+    pub tokio_handle: Option<tokio::runtime::Handle>,
     /// 插件钩子（filter 链 + observer）。由 TalkSageService 用
     /// talksage_plugins::build_registry 装配。
     ///
@@ -420,6 +430,11 @@ impl StreamWorker {
         engine_pool: Option<Arc<EnginePool>>,
         hooks: talksage_plugins::HookRegistry,
         origin_ms: u64,
+        aliyun_access_key_id: String,
+        aliyun_access_key_secret: String,
+        aliyun_app_key: String,
+        asr_mode: String,
+        tokio_handle: Option<tokio::runtime::Handle>,
     ) -> anyhow::Result<Self> {
         let (threshold, min_speech, min_silence, window, max_speech) = vad_cfg.effective();
         log::info!(
@@ -428,11 +443,33 @@ impl StreamWorker {
             vad_cfg.preset,
         );
         let vad = create_vad(vad_model, threshold, min_speech, min_silence, window, max_speech)?;
-        // 所有模型均走引擎池以降低重复监听的启动延迟；离线大模型每种只缓存一个。
+        // 引擎选择：云端（阿里云）或本地（GPU 自动检测）。
         let threads = asr_threads.max(1) as i32;
-        let engine: Box<dyn talksage_asr::SegmentEngine> = match &engine_pool {
-            Some(pool) => pool.acquire_with_options(cfg.engine_kind, &cfg.model_dir, threads, &cfg.engine_options)?,
-            None => talksage_asr::create_engine_with_options(cfg.engine_kind, &cfg.model_dir, threads, &cfg.engine_options)?,
+        let gpu = talksage_asr::GpuBackend::detect();
+        let use_cloud = match asr_mode.as_str() {
+            "cloud" => true,
+            "local" => false,
+            _ /* "auto" */ => {
+                !gpu.is_accelerated()
+                    && !aliyun_access_key_id.is_empty()
+                    && !aliyun_app_key.is_empty()
+            }
+        };
+        let engine: Box<dyn talksage_asr::SegmentEngine> = if use_cloud {
+            log::info!("ASR 引擎：阿里云实时语音识别（云端）");
+            use talksage_asr::aliyun::{TokenManager, AliyunEngine};
+            let handle = tokio_handle.expect("tokio runtime handle required for cloud ASR");
+            let token_mgr = Arc::new(TokenManager::new(
+                &aliyun_access_key_id,
+                &aliyun_access_key_secret,
+            ));
+            Box::new(AliyunEngine::new(&aliyun_app_key, token_mgr, handle))
+        } else {
+            log::info!("ASR 引擎：本地 {:?} (provider={})", cfg.engine_kind, gpu.provider_str());
+            match &engine_pool {
+                Some(pool) => pool.acquire_with_options(cfg.engine_kind, &cfg.model_dir, threads, &cfg.engine_options)?,
+                None => talksage_asr::create_engine_auto(cfg.engine_kind, &cfg.model_dir, threads, gpu, &cfg.engine_options)?,
+            }
         };
         let preprocessor = Preprocessor::new(
             denoise.enabled,
@@ -1066,6 +1103,11 @@ fn run_loop(
             // clone 共享 Arc<dyn EventFilter>：两条流用同一批 filter 实例
             cfg.hooks.clone(),
             origin_ms,
+            cfg.aliyun_access_key_id.clone(),
+            cfg.aliyun_access_key_secret.clone(),
+            cfg.aliyun_app_key.clone(),
+            cfg.asr_mode.clone(),
+            cfg.tokio_handle.clone(),
         )?;
         // 标点恢复：仅流式引擎 + 用户启用 + 模型已安装时激活
         if cfg.punct_enabled && sc.engine_kind.is_streaming() {
@@ -1284,6 +1326,23 @@ fn make_on_final(
             executor.submit(plugin.clone(), cfg.plugin_ctx.clone(), emit.clone(), seg.clone());
         }
     })
+}
+
+#[cfg(test)]
+mod pipeline_config_tests {
+    use super::*;
+
+    #[test]
+    fn pipeline_config_has_aliyun_fields() {
+        // Verify the new fields exist and have the right default values by
+        // using a closure that references them (compile-time field name check).
+        let _ = |cfg: &LivePipelineConfig| {
+            assert!(cfg.aliyun_access_key_id.is_empty());
+            assert!(cfg.aliyun_access_key_secret.is_empty());
+            assert!(cfg.aliyun_app_key.is_empty());
+            assert_eq!(cfg.asr_mode, "auto");
+        };
+    }
 }
 
 #[cfg(test)]

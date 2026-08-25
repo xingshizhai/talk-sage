@@ -336,6 +336,7 @@ impl TalkSageService {
         let engine_options = talksage_asr::EngineOptions {
             hotwords: terminology.normalized_terms(),
             hotword_score: terminology.hotword_score.clamp(0.0, 10.0),
+            provider: String::new(),
         };
         let scene = snapshot.scene.effective();
         // 引擎解析规则：
@@ -506,6 +507,11 @@ impl TalkSageService {
             engine_pool: Some(self.engines.clone()),
             hooks,
             punct_enabled: snapshot.asr.punct_enabled,
+            aliyun_access_key_id: snapshot.asr.aliyun_access_key_id.clone(),
+            aliyun_access_key_secret: snapshot.asr.aliyun_access_key_secret.clone(),
+            aliyun_app_key: snapshot.asr.aliyun_app_key.clone(),
+            asr_mode: snapshot.asr.asr_mode.clone(),
+            tokio_handle: tokio::runtime::Handle::try_current().ok(),
         })
     }
 

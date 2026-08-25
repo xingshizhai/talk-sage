@@ -84,6 +84,11 @@ pub fn transcribe_file(
             &talksage_plugins::PluginContext::new(),
         ),
         punct_enabled: false,
+        aliyun_access_key_id: String::new(),
+        aliyun_access_key_secret: String::new(),
+        aliyun_app_key: String::new(),
+        asr_mode: "local".into(),
+        tokio_handle: None,
     };
 
     let start = Instant::now();
