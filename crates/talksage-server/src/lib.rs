@@ -165,8 +165,8 @@ async fn get_config_api(State(state): State<ServerState>, headers: axum::http::H
     let cfg = state.config.snapshot();
     let body = serde_json::json!({
         "asr": {
-            "client_engine": cfg.asr.client_engine,
-            "user_engine": cfg.asr.user_engine,
+            "engine_en": cfg.asr.engine_en,
+            "engine_zh": cfg.asr.engine_zh,
             "backend": cfg.asr.backend,
             "terminology": cfg.asr.terminology,
         },
@@ -394,11 +394,11 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
         }
     }
     if let Some(asr) = updates.get("asr") {
-        if let Some(e) = asr.get("client_engine").and_then(|v| v.as_str()) {
-            c.asr.client_engine = e.to_string();
+        if let Some(e) = asr.get("engine_en").and_then(|v| v.as_str()) {
+            c.asr.engine_en = e.to_string();
         }
-        if let Some(e) = asr.get("user_engine").and_then(|v| v.as_str()) {
-            c.asr.user_engine = e.to_string();
+        if let Some(e) = asr.get("engine_zh").and_then(|v| v.as_str()) {
+            c.asr.engine_zh = e.to_string();
         }
         if let Some(b) = asr.get("backend").and_then(|v| v.as_str()) {
             c.asr.backend = b.to_string();
@@ -1091,7 +1091,7 @@ async fn transcribe_api(
 
     // 引擎：model 字段 → EngineKind；缺省用配置的 user_engine
     let kind = EngineKind::from_name(model.trim())
-        .unwrap_or_else(|| EngineKind::from_name(&state.config.snapshot().asr.user_engine).unwrap_or(EngineKind::ParaformerZh));
+        .unwrap_or_else(|| EngineKind::from_name(&state.config.snapshot().asr.engine_zh).unwrap_or(EngineKind::ParaformerZh));
     let (vad_model, engine_dir) = match engine_paths(kind) {
         Ok(p) => p,
         Err(e) => {

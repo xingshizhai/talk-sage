@@ -286,11 +286,11 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
         }
     }
     if let Some(asr) = updates.get("asr") {
-        if let Some(e) = asr.get("client_engine").and_then(|v| v.as_str()) {
-            c.asr.client_engine = e.to_string();
+        if let Some(e) = asr.get("engine_en").and_then(|v| v.as_str()) {
+            c.asr.engine_en = e.to_string();
         }
-        if let Some(e) = asr.get("user_engine").and_then(|v| v.as_str()) {
-            c.asr.user_engine = e.to_string();
+        if let Some(e) = asr.get("engine_zh").and_then(|v| v.as_str()) {
+            c.asr.engine_zh = e.to_string();
         }
         if let Some(b) = asr.get("backend").and_then(|v| v.as_str()) {
             c.asr.backend = b.to_string();
@@ -369,7 +369,7 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
             c.scene.mode = match m {
                 "dictation" => talksage_config::SceneMode::Dictation,
                 "conversation" => talksage_config::SceneMode::Conversation,
-                "translation" => talksage_config::SceneMode::Translation,
+                "translation" | "bilingual" => talksage_config::SceneMode::Bilingual,
                 "meeting" => talksage_config::SceneMode::Meeting,
                 "lecture" => talksage_config::SceneMode::Lecture,
                 "custom" => talksage_config::SceneMode::Custom,

@@ -407,7 +407,7 @@ async fn openai_transcribe_wav_returns_text() {
     eprintln!("openai 转写结果: {text}");
 }
 
-/// 设置页保存的 ASR 引擎应持久化：POST /config 写 asr.user_engine 后，
+/// 设置页保存的 ASR 引擎应持久化：POST /config 写 asr.engine_zh 后，
 /// 内存快照立即反映新值（前端保存后 getConfig 应读到它）。
 #[tokio::test]
 async fn save_config_persists_asr_engine_choice() {
@@ -420,13 +420,13 @@ async fn save_config_persists_asr_engine_choice() {
                 .method("POST")
                 .uri("/api/config")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"asr":{"user_engine":"whisper-base"}}"#))
+                .body(Body::from(r#"{"asr":{"engine_zh":"whisper-base"}}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(state.config.snapshot().asr.user_engine, "whisper-base");
+    assert_eq!(state.config.snapshot().asr.engine_zh, "whisper-base");
 }
 
 /// 场景自定义里的引擎同样应持久化（pipeline 实际按场景引擎运行）。

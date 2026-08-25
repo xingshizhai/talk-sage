@@ -939,7 +939,7 @@ fn cmd_doctor() -> ExitCode {
         }
     };
     let c = mgr.snapshot();
-    println!("asr engines  : client={} user={} backend={}", c.asr.client_engine, c.asr.user_engine, c.asr.backend);
+    println!("asr engines  : en={} zh={} backend={}", c.asr.engine_en, c.asr.engine_zh, c.asr.backend);
     println!("server       : enabled={} ({}:{})", c.server.enabled, c.server.host, c.server.port);
     print_plugin_status(&c);
     let rec_dir = c.recording.resolve_dir(mgr.data_dir());

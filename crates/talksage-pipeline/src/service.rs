@@ -137,6 +137,16 @@ pub struct RecoveryReport {
     pub sessions: Vec<i64>,
 }
 
+/// 从语言代码（"zh" / "en"）和全局 ASR 配置解析引擎种类。
+/// 中文 → engine_zh，其他一律 engine_en。
+fn engine_for_language(lang: &str, asr: &talksage_config::AsrConfig) -> EngineKind {
+    if lang == "zh" {
+        EngineKind::from_name(&asr.engine_zh).unwrap_or(EngineKind::ParaformerZh)
+    } else {
+        EngineKind::from_name(&asr.engine_en).unwrap_or(EngineKind::ZipformerEn)
+    }
+}
+
 impl TalkSageService {
     pub fn new(config: Arc<ConfigManager>, sessions: Option<Arc<SessionStore>>, engines: Arc<EnginePool>) -> Self {
         Self {
@@ -328,18 +338,25 @@ impl TalkSageService {
             hotword_score: terminology.hotword_score.clamp(0.0, 10.0),
         };
         let scene = snapshot.scene.effective();
-        // 引擎来源：场景自定义参数优先；**非自定义场景的用户流引擎跟随全局 ASR
-        // 设置**（[asr].user_engine），让「转写引擎」页的选择真正生效。客户流引擎
-        // 仍由场景模板决定（双语/会议场景按语言配英文引擎），避免全局设置破坏
-        // 场景的语言搭配。调用方的显式 StartListen override 仍具有最高优先级。
-        let (configured_user_engine, configured_client_engine): (String, String) = match snapshot.scene.mode {
-            talksage_config::SceneMode::Custom => (scene.user_engine.clone(), scene.client_engine.clone()),
-            _ => (snapshot.asr.user_engine.clone(), scene.client_engine.clone()),
+        // 引擎解析规则：
+        // - Custom 模式：用 scene.user_engine / scene.client_engine（全量用户控制）
+        // - Bilingual：user 流 = scene.language 对应引擎，client 流 = scene.client_language 对应引擎
+        // - 其他单语言场景：两流均用 scene.language 对应引擎（消除中英混杂）
+        let (user_engine_kind, client_engine_kind) = match snapshot.scene.mode {
+            talksage_config::SceneMode::Custom => (
+                EngineKind::from_name(&scene.user_engine).unwrap_or(EngineKind::ParaformerZh),
+                EngineKind::from_name(&scene.client_engine).unwrap_or(EngineKind::ZipformerEn),
+            ),
+            talksage_config::SceneMode::Bilingual => (
+                engine_for_language(&scene.language, &snapshot.asr),
+                engine_for_language(&scene.client_language, &snapshot.asr),
+            ),
+            _ => {
+                let e = engine_for_language(&scene.language, &snapshot.asr);
+                (e, e)
+            }
         };
-        let user_engine = req
-            .user_engine
-            .or_else(|| EngineKind::from_name(&configured_user_engine))
-            .unwrap_or(EngineKind::ParaformerZh);
+        let user_engine = req.user_engine.unwrap_or(user_engine_kind);
         let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
         let user_model = model_dir.join(user_engine.model_dir_name());
         if !vad_model.is_file() {
@@ -362,7 +379,7 @@ impl TalkSageService {
             None
         };
 
-        let client_engine = EngineKind::from_name(&configured_client_engine).unwrap_or(EngineKind::ZipformerEn);
+        let client_engine = client_engine_kind;
         let client_model = model_dir.join(client_engine.model_dir_name());
         let client = Self::resolve_client_input(scene.client_enabled, &req.client).and_then(|input| {
             if !client_engine.is_available(&model_dir) {
@@ -430,7 +447,7 @@ impl TalkSageService {
                     TranslationMode::ClientToUser => talksage_plugins::LiveTranslationMode::ClientToUser,
                     TranslationMode::Bidirectional => talksage_plugins::LiveTranslationMode::Bidirectional,
                 },
-                user_language: scene.user_language.clone(),
+                user_language: scene.language.clone(),           // 改：scene.user_language → scene.language
                 client_language: scene.client_language.clone(),
             }),
         };
@@ -904,7 +921,7 @@ mod tests {
         for mode in [
             SceneMode::Dictation,
             SceneMode::Conversation,
-            SceneMode::Translation,
+            SceneMode::Bilingual,
             SceneMode::Meeting,
             SceneMode::Lecture,
             SceneMode::Custom,
@@ -1109,37 +1126,30 @@ mod tests {
     /// 非自定义场景：用户流引擎跟随全局 [asr].user_engine（「转写引擎」页的选择
     /// 必须真正生效）；自定义场景：用场景参数。
     #[test]
-    fn engine_resolution_follows_global_asr_outside_custom_scene() {
-        use talksage_config::{Config, SceneMode};
+    fn engine_resolution_uses_engine_for_language() {
+        use talksage_config::{AsrConfig, SceneMode};
 
-        // 默认场景是 conversation（非 custom）→ 用全局 [asr].user_engine
-        let mut cfg = Config::default();
-        cfg.asr.user_engine = "whisper-base".into();
-        cfg.asr.client_engine = "whisper-base".into();
-        let dir = tempfile_dir::TempDir::new();
-        let mgr = ConfigManager::from_config(cfg, dir.path().to_path_buf());
-        let snap = mgr.snapshot();
-        let scene = snap.scene.effective();
-        assert_ne!(snap.scene.mode, SceneMode::Custom);
-        // 复制 service.rs 的解析逻辑做断言（引擎选择不依赖模型存在）
-        let user = match snap.scene.mode {
-            SceneMode::Custom => scene.user_engine.clone(),
-            _ => snap.asr.user_engine.clone(),
-        };
-        assert_eq!(user, "whisper-base", "非自定义场景应使用全局用户引擎");
+        // engine_for_language: zh → engine_zh, other → engine_en
+        let mut asr = AsrConfig::default();
+        asr.engine_zh = "paraformer-zh".into();
+        asr.engine_en = "zipformer-en".into();
+        let zh_engine = engine_for_language("zh", &asr);
+        let en_engine = engine_for_language("en", &asr);
+        assert_eq!(zh_engine, EngineKind::ParaformerZh, "zh 语言应解析为 ParaformerZh");
+        assert_eq!(en_engine, EngineKind::ZipformerEn, "en 语言应解析为 ZipformerEn");
 
         // 自定义场景 → 用场景参数（即使全局不同）
-        let mut cfg2 = Config::default();
-        cfg2.asr.user_engine = "whisper-base".into();
+        let dir = tempfile_dir::TempDir::new();
+        let mut cfg2 = talksage_config::Config::default();
         cfg2.scene.mode = SceneMode::Custom;
         cfg2.scene.custom.user_engine = "qwen3-asr".into();
         let mgr2 = ConfigManager::from_config(cfg2, dir.path().join("cfg2").to_path_buf());
         let snap2 = mgr2.snapshot();
         let scene2 = snap2.scene.effective();
         let user2 = match snap2.scene.mode {
-            SceneMode::Custom => scene2.user_engine.clone(),
-            _ => snap2.asr.user_engine.clone(),
+            SceneMode::Custom => EngineKind::from_name(&scene2.user_engine),
+            _ => None,
         };
-        assert_eq!(user2, "qwen3-asr", "自定义场景应使用场景参数引擎");
+        assert_eq!(user2, Some(EngineKind::Qwen3Asr), "自定义场景应使用场景参数引擎");
     }
 }
