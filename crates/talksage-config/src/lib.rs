@@ -114,7 +114,7 @@ pub struct SceneParams {
     pub denoise_gate: f32,
     /// 最短提交时长（ms；0 = 不限制，噪音短段抑制）。
     pub min_segment_ms: u64,
-    /// 用户流引擎（paraformer-zh | zipformer-en）。
+    /// 用户流引擎（默认 Qwen3-ASR；仍可显式选择旧流式或 Whisper）。
     pub user_engine: String,
     /// 是否启用客户流（双流；系统回环 + 英文引擎）。
     pub client_enabled: bool,
@@ -173,7 +173,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             min_segment_ms: 0,
             user_engine: "qwen3-asr".into(),
             client_enabled: false,
-            client_engine: "zipformer-en".into(),
+            client_engine: "qwen3-asr".into(),
             language: "zh".into(),
             client_language: "en".into(),
             translation_mode: TranslationMode::Off,
@@ -211,7 +211,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             min_segment_ms: 300,
             user_engine: "qwen3-asr".into(),
             client_enabled: true,
-            client_engine: "zipformer-en".into(),
+            client_engine: "qwen3-asr".into(),
             language: "zh".into(),
             client_language: "en".into(),
             translation_mode: TranslationMode::Bidirectional,
@@ -230,7 +230,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             min_segment_ms: 300,
             user_engine: "qwen3-asr".into(),
             client_enabled: false,
-            client_engine: "zipformer-en".into(),
+            client_engine: "qwen3-asr".into(),
             language: "zh".into(),
             client_language: "en".into(),
             translation_mode: TranslationMode::Bidirectional,
@@ -268,7 +268,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             min_segment_ms: 300,
             user_engine: "qwen3-asr".into(),
             client_enabled: false,
-            client_engine: "zipformer-en".into(),
+            client_engine: "qwen3-asr".into(),
             language: "zh".into(),
             client_language: "en".into(),
             translation_mode: TranslationMode::Off,
@@ -287,7 +287,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             min_segment_ms: 0,
             user_engine: "qwen3-asr".into(),
             client_enabled: true,
-            client_engine: "zipformer-en".into(),
+            client_engine: "qwen3-asr".into(),
             language: "zh".into(),
             client_language: "en".into(),
             translation_mode: TranslationMode::Off,
@@ -514,7 +514,8 @@ pub struct AsrConfig {
     /// 英文场景使用的引擎（两流均用此引擎）。
     #[serde(alias = "client_engine")]
     pub engine_en: String,
-    /// 推理后端：auto | cpu | cuda | metal。
+    /// 本地推理后端：auto | cpu | cuda。Apple GPU 由独立 Metal 引擎管理，
+    /// 不再伪装成 sherpa-onnx provider。
     pub backend: String,
     /// 专业术语热词和确定性纠错配置。
     pub terminology: TerminologyConfig,
@@ -578,7 +579,7 @@ impl Default for AsrConfig {
     fn default() -> Self {
         Self {
             engine_zh: "qwen3-asr".into(),
-            engine_en: "zipformer-en".into(),
+            engine_en: "qwen3-asr".into(),
             backend: "auto".into(),
             terminology: TerminologyConfig::default(),
             punct_enabled: true,
@@ -1560,6 +1561,8 @@ knob = 42
     #[test]
     fn asr_config_has_aliyun_fields() {
         let cfg = AsrConfig::default();
+        assert_eq!(cfg.engine_zh, "qwen3-asr");
+        assert_eq!(cfg.engine_en, "qwen3-asr");
         assert!(cfg.aliyun_access_key_id.is_empty());
         assert!(cfg.aliyun_access_key_secret.is_empty());
         assert!(cfg.aliyun_app_key.is_empty());

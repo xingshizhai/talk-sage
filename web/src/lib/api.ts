@@ -356,6 +356,8 @@ export interface AsrModelInfo {
   streaming: boolean;
   speed: "realtime" | "balanced" | "accurate";
   description: string;
+  /** 已接入可运行引擎；false 表示目前仅可预下载。 */
+  selectable?: boolean;
   installed: boolean;
   /** 已安装目录磁盘占用（MB）。 */
   size_mb?: number;
@@ -365,10 +367,20 @@ export interface AsrModelInfo {
   downloading?: boolean;
 }
 
+export interface AsrRuntimeStatus {
+  backend: string;
+  display_name: string;
+  hardware_candidate?: string;
+  is_accelerated: boolean;
+  effective_route?: string | null;
+  route_error?: string | null;
+}
+
 /** 应用 API 表面。 */
 export interface AppApi {
   getVersion(): Promise<string>;
   getConfig(): Promise<AppConfig>;
+  getAsrRuntimeStatus(): Promise<AsrRuntimeStatus>;
   listAsrModels(): Promise<AsrModelInfo[]>;
   /** 下载/安装 ASR 引擎（进度经 model_progress 事件推送）。 */
   downloadModel(engine: string): Promise<void>;

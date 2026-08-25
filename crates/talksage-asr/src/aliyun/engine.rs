@@ -12,6 +12,7 @@ use crate::EngineKind;
 
 #[derive(Debug)]
 enum AliyunEvent {
+    Ready,
     Partial(String),
     Final(String),
     Error(String),
@@ -29,7 +30,6 @@ pub struct AliyunEngine {
 struct AliyunSession {
     tx: mpsc::Sender<SessionCmd>,
     rx: mpsc::Receiver<AliyunEvent>,
-    task_id: String,
 }
 
 enum SessionCmd {
@@ -46,7 +46,11 @@ impl AliyunEngine {
         Self {
             app_key: app_key.into(),
             token_manager,
-            http_client: reqwest::Client::new(),
+            http_client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("valid Aliyun HTTP client configuration"),
             runtime,
             session: None,
             current_partial: String::new(),
@@ -81,19 +85,31 @@ impl AliyunEngine {
                     return;
                 }
             };
-            if ws.send(Message::Text(start_msg.into())).await.is_err() {
+            if let Err(e) = ws.send(Message::Text(start_msg.into())).await {
+                let _ = evt_tx.send(AliyunEvent::Error(e.to_string())).await;
                 return;
             }
+            let mut ready = false;
+            let mut pending_audio = std::collections::VecDeque::<Vec<u8>>::new();
+            let mut stop_pending = false;
             loop {
                 tokio::select! {
                     cmd = cmd_rx.recv() => {
                         match cmd {
                             Some(SessionCmd::Audio(pcm)) => {
-                                if ws.send(Message::Binary(pcm.into())).await.is_err() { break; }
+                                if ready {
+                                    if ws.send(Message::Binary(pcm.into())).await.is_err() { break; }
+                                } else {
+                                    pending_audio.push_back(pcm);
+                                }
                             }
                             Some(SessionCmd::Stop) => {
-                                let stop = build_stop_message(&app_key, &task_id_clone);
-                                let _ = ws.send(Message::Text(stop.into())).await;
+                                if ready {
+                                    let stop = build_stop_message(&app_key, &task_id_clone);
+                                    let _ = ws.send(Message::Text(stop.into())).await;
+                                } else {
+                                    stop_pending = true;
+                                }
                             }
                             None => break,
                         }
@@ -102,6 +118,18 @@ impl AliyunEngine {
                         match msg {
                             Some(Ok(Message::Text(text))) => {
                                 if let Some(evt) = parse_event(&text) {
+                                    if matches!(evt, AliyunEvent::Ready) {
+                                        ready = true;
+                                        while let Some(pcm) = pending_audio.pop_front() {
+                                            if ws.send(Message::Binary(pcm.into())).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        if stop_pending {
+                                            let stop = build_stop_message(&app_key, &task_id_clone);
+                                            let _ = ws.send(Message::Text(stop.into())).await;
+                                        }
+                                    }
                                     let done = matches!(evt, AliyunEvent::Final(_) | AliyunEvent::Error(_));
                                     let _ = evt_tx.send(evt).await;
                                     if done { break; }
@@ -115,19 +143,27 @@ impl AliyunEngine {
             }
         });
 
-        self.session = Some(AliyunSession { tx: cmd_tx, rx: evt_rx, task_id });
+        self.session = Some(AliyunSession { tx: cmd_tx, rx: evt_rx });
         Ok(())
     }
 
     fn drain_events(&mut self) {
+        let mut failed = false;
         if let Some(ref mut sess) = self.session {
             while let Ok(evt) = sess.rx.try_recv() {
                 match evt {
+                    AliyunEvent::Ready => {}
                     AliyunEvent::Partial(t) => self.current_partial = t,
                     AliyunEvent::Final(t) => self.current_partial = t,
-                    AliyunEvent::Error(e) => log::warn!("阿里云 ASR 事件错误: {e}"),
+                    AliyunEvent::Error(e) => {
+                        failed = true;
+                        log::warn!("阿里云 ASR 事件错误，将在下一音频块重连: {e}");
+                    }
                 }
             }
+        }
+        if failed {
+            self.session = None;
         }
     }
 }
@@ -141,7 +177,9 @@ impl crate::SegmentEngine for AliyunEngine {
         let pcm = f32_to_i16_pcm(samples);
         let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
         if let Some(ref sess) = self.session {
-            let _ = sess.tx.try_send(SessionCmd::Audio(bytes));
+            if let Err(e) = sess.tx.try_send(SessionCmd::Audio(bytes)) {
+                log::warn!("阿里云 ASR 音频发送队列已满或关闭，本块音频未发送: {e}");
+            }
         }
         self.drain_events();
         if self.current_partial.is_empty() { None } else { Some(self.current_partial.clone()) }
@@ -159,6 +197,7 @@ impl crate::SegmentEngine for AliyunEngine {
                     Ok(AliyunEvent::Final(t)) => { final_text = t; break; }
                     Ok(AliyunEvent::Partial(t)) => { final_text = t; }
                     Ok(AliyunEvent::Error(e)) => { log::warn!("finish 时收到错误: {e}"); break; }
+                    Ok(AliyunEvent::Ready) => {}
                     Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
                 }
             }
@@ -213,6 +252,7 @@ fn parse_event(text: &str) -> Option<AliyunEvent> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let name = v["header"]["name"].as_str()?;
     match name {
+        "TranscriptionStarted" => Some(AliyunEvent::Ready),
         "TranscriptionResultChanged" => {
             Some(AliyunEvent::Partial(v["payload"]["result"].as_str().unwrap_or("").to_string()))
         }

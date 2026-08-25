@@ -93,6 +93,13 @@ fn zh_file_pipeline(root: &Path, wav: &Path) -> LivePipelineConfig {
         engine_pool: None,
         hooks: hooks_with_min_commit_ms(0),
         punct_enabled: false,
+        aliyun_access_key_id: String::new(),
+        aliyun_access_key_secret: String::new(),
+        aliyun_app_key: String::new(),
+        asr_route: talksage_asr::AsrRoute::Local {
+            backend: talksage_asr::GpuBackend::None,
+        },
+        tokio_handle: None,
     }
 }
 
@@ -595,6 +602,13 @@ fn plugins_emit_term_and_translation_events() {
         engine_pool: None,
         hooks,
         punct_enabled: false,
+        aliyun_access_key_id: String::new(),
+        aliyun_access_key_secret: String::new(),
+        aliyun_app_key: String::new(),
+        asr_route: talksage_asr::AsrRoute::Local {
+            backend: talksage_asr::GpuBackend::None,
+        },
+        tokio_handle: None,
     };
 
     let evs = run_and_collect(cfg);

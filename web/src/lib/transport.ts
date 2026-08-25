@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AppApi, AppConfig, AsrModelInfo, DomainEvent, NotesTemplate, PluginMeta, PluginStatusInfo, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./api";
+import type { AppApi, AppConfig, AsrModelInfo, AsrRuntimeStatus, DomainEvent, NotesTemplate, PluginMeta, PluginStatusInfo, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./api";
 
 /** 统一 fetch 辅助（同源 /api）。 */
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -40,6 +40,10 @@ export const ipcApi: AppApi = {
 
   async getConfig(): Promise<AppConfig> {
     return invoke<AppConfig>("get_config");
+  },
+
+  async getAsrRuntimeStatus() {
+    return invoke<AsrRuntimeStatus>("get_gpu_status");
   },
 
   async listAsrModels(): Promise<AsrModelInfo[]> {
@@ -181,6 +185,10 @@ export const httpApi: AppApi = {
 
   async getConfig(): Promise<AppConfig> {
     return req<AppConfig>("/config");
+  },
+
+  async getAsrRuntimeStatus() {
+    return req<AsrRuntimeStatus>("/asr/gpu_status");
   },
 
   async listAsrModels(): Promise<AsrModelInfo[]> {

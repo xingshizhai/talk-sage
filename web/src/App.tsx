@@ -28,9 +28,9 @@ function fmtTime(ms: number): string {
 }
 
 const SPEAKER_STYLE: Record<string, { color: string; engine: string }> = {
-  我: { color: "var(--me)", engine: "paraformer-zh" },
-  客户: { color: "var(--client)", engine: "zipformer-en" },
-  对方: { color: "var(--client)", engine: "zipformer-en" },
+  我: { color: "var(--me)", engine: "qwen3-asr" },
+  客户: { color: "var(--client)", engine: "qwen3-asr" },
+  对方: { color: "var(--client)", engine: "qwen3-asr" },
 };
 
 // 动态说话人（客户1/客户2…）循环配色
@@ -51,7 +51,7 @@ function speakerStyle(label: string): { color: string; engine: string } {
   const m = /^客户(\d+)$/.exec(label);
   if (m) {
     const n = Number(m[1]);
-    return { color: CLIENT_COLORS[(n - 1) % CLIENT_COLORS.length], engine: "zipformer-en" };
+    return { color: CLIENT_COLORS[(n - 1) % CLIENT_COLORS.length], engine: "qwen3-asr" };
   }
   return SPEAKER_STYLE[label] ?? { color: "var(--muted)", engine: "?" };
 }
@@ -281,7 +281,7 @@ export default function App() {
     { dot: "var(--term)", label: "场景", value: currentSceneLabel },
     { dot: paused ? "var(--brief)" : listening ? "var(--live)" : "var(--muted)", label: "监听", value: paused ? "暂停" : listening ? "活跃" : "待机" },
     { dot: "var(--client)", label: "客户流(VAD)", value: "双流" },
-    { dot: "var(--me)", label: "用户流", value: "paraformer" },
+    { dot: "var(--me)", label: "用户流", value: "qwen3-asr" },
     { dot: gpuStatus?.is_accelerated ? "var(--live)" : "var(--brief)", label: "ASR", value: asrBackendLabel },
   ];
 

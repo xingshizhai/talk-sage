@@ -1,7 +1,7 @@
 //! sherpa-onnx 流式 ASR PoC：验证流式延迟与准确率。
 //!
 //! 用法:
-//!   cargo run -p talksage-asr --bin poc_asr -- <engine> <model-dir> <wav> [--chunk-ms 200]
+//!   cargo run -p talksage-asr --bin poc_asr -- <engine> <model-dir> <wav> [--chunk-ms 200] [--provider cpu|coreml|cuda]
 //!
 //!   engine: paraformer-zh | zipformer-en
 //!
@@ -11,13 +11,13 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use talksage_asr::{EngineKind, SherpaStreamingEngine, StreamingASREngine};
+use talksage_asr::{EngineKind, EngineOptions, SherpaStreamingEngine, StreamingASREngine};
 use sherpa_onnx::Wave;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("用法: poc_asr <paraformer-zh|zipformer-en> <model-dir> <wav> [--chunk-ms N]");
+        eprintln!("用法: poc_asr <paraformer-zh|zipformer-en> <model-dir> <wav> [--chunk-ms N] [--provider cpu|coreml|cuda]");
         std::process::exit(2);
     }
     let kind = EngineKind::from_name(&args[1])
@@ -29,6 +29,14 @@ fn main() -> anyhow::Result<()> {
         .find(|w| w[0] == "--chunk-ms")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(200);
+    let provider = args
+        .windows(2)
+        .find(|w| w[0] == "--provider")
+        .map(|w| w[1].as_str())
+        .unwrap_or("cpu");
+    if !matches!(provider, "cpu" | "coreml" | "cuda") {
+        anyhow::bail!("不支持的 provider: {provider}（应为 cpu、coreml 或 cuda）");
+    }
 
     let wave = Wave::read(wav_path).ok_or_else(|| anyhow::anyhow!("读取 wav 失败: {wav_path}"))?;
     let sample_rate = wave.sample_rate();
@@ -37,17 +45,20 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("PoC 要求 16kHz wav，当前 {sample_rate}Hz（请先重采样）");
     }
     println!(
-        "== {} ==\n模型目录: {}\n音频: {} ({}s, {} samples)  分块: {}ms",
+        "== {} ==\n模型目录: {}\n音频: {} ({}s, {} samples)  分块: {}ms  provider: {}",
         kind.display_name(),
         model_dir.display(),
         wav_path,
         samples.len() as f64 / sample_rate as f64,
         samples.len(),
         chunk_ms,
+        provider,
     );
 
-    let mut engine = SherpaStreamingEngine::new(kind, &model_dir, 2)?;
-    println!("模型加载完成。\n");
+    let load_started = Instant::now();
+    let options = EngineOptions { provider: provider.into(), ..Default::default() };
+    let mut engine = SherpaStreamingEngine::new_with_options(kind, &model_dir, 2, &options)?;
+    println!("模型加载完成（{:.2}s）。\n", load_started.elapsed().as_secs_f64());
 
     let chunk_size = (sample_rate as u64 * chunk_ms / 1000) as usize;
     let mut first_text_ts: Option<f64> = None;

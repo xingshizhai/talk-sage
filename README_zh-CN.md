@@ -57,31 +57,33 @@
 ### 1. 下载模型
 
 **方式 A：应用内安装（推荐）** — 打开左侧 **模型管理**，点「下载」即可；
-安装/删除前需先停止监听，下载在后台进行并可看到进度条。
+安装/删除前需先停止监听，下载在后台进行并可看到进度条。模型管理支持磁盘空间预检、未完成下载续传、完整性校验和安全删除；正式安装时模型保存在用户数据目录，不写入 `.app`。
+
+模型可用状态、目录解析、下载状态机、校验与日志规则见 [模型管理架构](docs/model-management.md)。
 
 **方式 B：命令行脚本**（批量/离线环境）：
 
 ```bash
 # 需要代理时：
 # export https_proxy=http://127.0.0.1:10808 http_proxy=http://127.0.0.1:10808
-python scripts/download_models.py all          # 全部
-python scripts/download_models.py qwen3-asr    # 单个
+python scripts/download_models.py all            # 当前产品模型与公共模型
+python scripts/download_models.py qwen3-asr      # CUDA/CPU 模型
+python scripts/download_models.py whisper-metal # Apple Metal 模型（可预下载）
+python scripts/download_models.py legacy        # 仅测试需要的旧模型
 ```
 
-模型：可多选（设置 → 场景模式 → 自定义 → 我的引擎/客户引擎）：
-- **流式（实时增量）**：中文 paraformer-zh（含 fp32 更准）、英文 zipformer-en
-- **离线段级（更准，段结束出结果）**：Whisper base / Whisper small（多语言，中英夹杂会议效果好）、Qwen3-ASR（约 878MB，官方 GitHub release 分发，HF 仓库为受限私有）
+默认高精度路径是 VAD + Qwen3-ASR（中英文两路一致）：NVIDIA CUDA 可运行本地模型；没有可用推理后端时使用阿里云实时 ASR（三项凭证必须完整）。注意：M 系列芯片虽有 GPU，但当前随项目分发的 sherpa-onnx macOS 静态库会把 CoreML 请求回退到 CPU，不能把它视为 GPU 加速。Apple Silicon 的正式本地 GPU 路线将使用独立的 Metal 适配器；旧的 Paraformer/Zipformer 和显式 CPU 本地模式仍可用于诊断。
 
 下载到 `models/`：
 
 | 模型 | 用途 |
 |---|---|
-| `sherpa-onnx-streaming-paraformer-zh` | 中文流式 ASR |
-| `sherpa-onnx-streaming-zipformer-en-2023-06-26` | 英文流式 ASR |
 | `sherpa-onnx-qwen3-asr-0.6b` | Qwen3-ASR 0.6B 离线段级（int8） |
-| `sherpa-onnx-whisper-base` / `sherpa-onnx-whisper-small` | Whisper 离线段级（多语言） |
+| `whisper.cpp-large-v3-turbo-q5_0` | Apple Silicon Metal 默认候选（约 547 MiB；适配器接入前可预下载） |
 | `silero-vad/silero_vad.onnx` | 语音活动检测（VAD） |
 | `wespeaker/wespeaker_zh_cnceleb_resnet34.onnx` | 声纹模型（说话人识别） |
+
+Paraformer、Zipformer 和 sherpa ONNX Whisper 已从产品模型列表移除；仓库中已有文件不会自动删除，以免破坏测试数据。如需清理，可在确认不再运行旧评测后手动删除对应目录。
 
 ### 2. 构建
 

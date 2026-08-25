@@ -86,17 +86,16 @@ cargo test -p talksage-audio
 
 ```bash
 python3 scripts/evaluate.py asr \
-  --engines paraformer-zh,whisper-base,whisper-small
+  --engines qwen3-asr
 ```
 
-未安装的模型会标记为 `model_not_installed`，不会假装参与比较。可以用对应下载命令安装可选模型，例如：
+未安装的模型会标记为 `model_not_installed`，不会假装参与比较。当前产品可运行的本地段级引擎是 Qwen3-ASR：
 
 ```bash
-python3 scripts/download_models.py whisper-base
-python3 scripts/download_models.py whisper-small
+python3 scripts/download_models.py qwen3-asr
 ```
 
-下载后重新运行 `./scripts/talksage.sh build` 和评估命令。
+Apple Silicon 的 Whisper large-v3-turbo Q5_0 可以通过 `whisper-metal` 目标预下载，但 Metal adapter 完成前不会进入可运行对比。Paraformer、Zipformer 和旧 sherpa Whisper 只用于历史回归，可通过 `legacy` 目标准备。下载后重新运行 `./scripts/talksage.sh build` 和评估命令。
 
 ## 5. 检查真实麦克风
 

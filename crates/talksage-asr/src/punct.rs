@@ -12,7 +12,10 @@ pub fn punct_model_path(models_root: &Path) -> std::path::PathBuf {
 
 /// Returns true if the punct model is installed.
 pub fn is_punct_model_available(models_root: &Path) -> bool {
-    punct_model_path(models_root).exists()
+    punct_model_path(models_root)
+        .metadata()
+        .map(|metadata| metadata.len() >= 200 * 1024 * 1024)
+        .unwrap_or(false)
 }
 
 /// Wraps `sherpa_onnx::OfflinePunctuation` for segment-level punct restoration.

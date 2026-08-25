@@ -1,6 +1,6 @@
 """下载 sherpa-onnx 模型（流式 ASR / 离线 ASR / VAD / 声纹）。
 
-用法: python scripts/download_models.py [paraformer-zh | zipformer-en | whisper-base | whisper-small | qwen3-asr | silero-vad | wespeaker | diarization | all] [--proxy URL]
+用法: python scripts/download_models.py [qwen3-asr | whisper-metal | silero-vad | wespeaker | diarization | legacy | all] [--proxy URL]
 
 代理策略（默认直连）：
   1. --proxy 显式指定；2. 环境变量 https_proxy / HTTPS_PROXY；3. 都没有则直连。
@@ -82,7 +82,14 @@ TARGETS: dict[str, list[tuple[str | None, str, str]]] = {
     # decoder.int8 / tokenizer/ 目录，878MB）。这里下载 tar.bz2 解压到
     # models/sherpa-onnx-qwen3-asr-0.6b/（目录名与代码 EngineKind::model_dir_name 对齐）。
     "qwen3-asr": [],
+    # Apple Silicon 新路线：whisper.cpp Metal 使用的 GGML 量化模型。
+    "whisper-metal": [
+        ("talksage/whisper.cpp-large-v3-turbo-q5_0", "ggml-large-v3-turbo-q5_0.bin", "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"),
+    ],
 }
+
+LEGACY_GROUPS = {"paraformer-zh", "zipformer-en", "whisper-base", "whisper-small"}
+PRODUCT_GROUPS = set(TARGETS) - LEGACY_GROUPS
 
 DIARIZATION_ARCHIVE_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
 DIARIZATION_DIR = "sherpa-onnx-pyannote-segmentation-3-0"
@@ -270,12 +277,13 @@ def main() -> None:
     opener = build_opener(proxy)
 
     want = args[0] if args else "all"
-    if want not in TARGETS and want != "all":
-        print(f"未知目标: {want}（可选: all, {', '.join(TARGETS)}）")
+    if want not in TARGETS and want not in ("all", "legacy"):
+        print(f"未知目标: {want}（可选: all, legacy, {', '.join(TARGETS)}）")
         raise SystemExit(2)
     print(f"源: {BASE}  代理: {proxy or '直连'}  输出: {OUT_ROOT}")
     for name, files in TARGETS.items():
-        if want in ("all", name):
+        selected = want == name or (want == "all" and name in PRODUCT_GROUPS) or (want == "legacy" and name in LEGACY_GROUPS)
+        if selected:
             print(f"== {name} ==")
             for repo, filename, url in files:
                 download(repo, filename, url, name)

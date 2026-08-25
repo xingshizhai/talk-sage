@@ -2,8 +2,7 @@
 // 模型安装/删除在独立的「模型管理」页，不占用本页。
 
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import type { AppConfig, AsrModelInfo, PluginMeta, PluginStatusInfo, SceneMode, SceneParams } from "../lib/api";
+import type { AppConfig, AsrModelInfo, AsrRuntimeStatus, PluginMeta, PluginStatusInfo, SceneMode, SceneParams } from "../lib/api";
 import type { PluginValues } from "../lib/plugins";
 import { analysisPluginIds, buildPluginUpdates, fieldLabel, initialPluginValues, pluginFields, pluginStatusLabel } from "../lib/plugins";
 import { getApi } from "../lib/transport";
@@ -71,9 +70,9 @@ export default function SettingsSection({
     denoise_enabled: config?.scene?.custom?.denoise_enabled ?? false,
     denoise_gate: config?.scene?.custom?.denoise_gate ?? 0.008,
     min_segment_ms: config?.scene?.custom?.min_segment_ms ?? 0,
-    user_engine: config?.scene?.custom?.user_engine ?? "paraformer-zh",
+    user_engine: config?.scene?.custom?.user_engine ?? "qwen3-asr",
     client_enabled: config?.scene?.custom?.client_enabled ?? true,
-    client_engine: config?.scene?.custom?.client_engine ?? "zipformer-en",
+    client_engine: config?.scene?.custom?.client_engine ?? "qwen3-asr",
     language: (config?.scene?.custom?.language as "zh" | "en") ?? "zh",
     client_language: (config?.scene?.custom?.client_language as "zh" | "en") ?? "en",
     translation_mode: config?.scene?.custom?.translation_mode ?? "off",
@@ -95,20 +94,24 @@ export default function SettingsSection({
   // 生效逻辑一致：非自定义场景的用户流引擎跟随 [asr].user_engine）。
   const initialEngineZh = () =>
     config?.scene?.mode === "custom"
-      ? config?.scene?.custom?.user_engine ?? config?.asr?.engine_zh ?? "paraformer-zh"
-      : config?.asr?.engine_zh ?? "paraformer-zh";
+      ? config?.scene?.custom?.user_engine ?? config?.asr?.engine_zh ?? "qwen3-asr"
+      : config?.asr?.engine_zh ?? "qwen3-asr";
   const initialEngineEn = () =>
     config?.scene?.mode === "custom"
-      ? config?.scene?.custom?.client_engine ?? config?.asr?.engine_en ?? "zipformer-en"
-      : config?.asr?.engine_en ?? "zipformer-en";
+      ? config?.scene?.custom?.client_engine ?? config?.asr?.engine_en ?? "qwen3-asr"
+      : config?.asr?.engine_en ?? "qwen3-asr";
   const [engineEn, setEngineEn] = useState<string>(initialEngineEn);
   const [engineZh, setEngineZh] = useState<string>(initialEngineZh);
   const [punctEnabled, setPunctEnabled] = useState<boolean>(config?.asr?.punct_enabled ?? true);
   const [asrMode, setAsrMode] = useState(config?.asr?.asr_mode ?? "auto");
+  const configuredBackend = config?.asr?.backend ?? "auto";
+  const [asrBackend, setAsrBackend] = useState(
+    configuredBackend === "coreml" || configuredBackend === "metal" ? "auto" : configuredBackend,
+  );
   const [aliyunKeyId, setAliyunKeyId] = useState(config?.asr?.aliyun_access_key_id ?? "");
   const [aliyunKeySecret, setAliyunKeySecret] = useState(config?.asr?.aliyun_access_key_secret ?? "");
   const [aliyunAppKey, setAliyunAppKey] = useState(config?.asr?.aliyun_app_key ?? "");
-  const [gpuStatus, setGpuStatus] = useState<{ backend: string; display_name: string; is_accelerated: boolean } | null>(null);
+  const [gpuStatus, setGpuStatus] = useState<AsrRuntimeStatus | null>(null);
   const [terminologyEnabled, setTerminologyEnabled] = useState(config?.asr?.terminology?.enabled ?? false);
   const [hotwordScore, setHotwordScore] = useState(config?.asr?.terminology?.hotword_score ?? 1.5);
   const [terminologyTerms, setTerminologyTerms] = useState((config?.asr?.terminology?.terms ?? []).join("\n"));
@@ -152,7 +155,7 @@ export default function SettingsSection({
       return null;
     };
     (async () => {
-      invoke<{ backend: string; display_name: string; is_accelerated: boolean }>("get_gpu_status")
+      api.getAsrRuntimeStatus()
         .then(setGpuStatus)
         .catch(() => {});
       const [voice, models, metas, statuses] = await Promise.all([
@@ -182,7 +185,7 @@ export default function SettingsSection({
     setPluginValues((prev) => ({ ...prev, [id]: { ...prev[id], [key]: value } }));
   }
 
-  const modelOptions = (selected: string) => asrModels.map((m) => {
+  const modelOptions = (selected: string) => asrModels.filter((m) => m.selectable !== false).map((m) => {
     const speed = m.speed === "realtime" ? "实时" : m.speed === "balanced" ? "平衡" : "准确优先";
     const unavailable = !m.installed && m.id !== selected;
     return <option key={m.id} value={m.id} disabled={unavailable}>{m.label}（{speed}{m.streaming ? " / 流式" : " / 段级"}）{m.installed ? "" : " — 未安装"}</option>;
@@ -356,6 +359,7 @@ export default function SettingsSection({
         asr: {
           engine_en: engineEn,
           engine_zh: engineZh,
+          backend: asrBackend,
           punct_enabled: punctEnabled,
           asr_mode: asrMode,
           aliyun_access_key_id: aliyunKeyId,
@@ -409,7 +413,12 @@ export default function SettingsSection({
         },
       };
       await onSave(updates);
-      setPluginStatus(await api.listPluginStatus());
+      const [statuses, runtimeStatus] = await Promise.all([
+        api.listPluginStatus(),
+        api.getAsrRuntimeStatus(),
+      ]);
+      setPluginStatus(statuses);
+      setGpuStatus(runtimeStatus);
       setMessage("已保存（部分设置重启后生效）");
     } catch (e) {
       setMessage(`保存失败: ${e}`);
@@ -789,21 +798,23 @@ export default function SettingsSection({
             />
             <span>启用语义分句（标点恢复模型）</span>
           </label>
-          <div style={hint}>在停顿断句基础上，用标点模型识别语义边界并自动拆分。仅对 paraformer-zh / zipformer-en 流式引擎生效。</div>
+          <div style={hint}>在停顿断句基础上，用标点模型识别语义边界并自动拆分；本地流式、离线大模型和云端结果统一生效。</div>
           {punctEnabled && (() => {
             const punctModel = asrModels.find((m) => m.id === "punct");
             if (!punctModel) return null;
             return punctModel.installed ? (
               <div style={{ ...hint, color: "var(--live)" }}>✓ 标点恢复模型已安装</div>
             ) : (
-              <div style={{ ...hint, color: "var(--brief)" }}>需要下载标点恢复模型（约 20 MB）。请点击上方「打开模型管理」搜索 punct 下载。</div>
+              <div style={{ ...hint, color: "var(--brief)" }}>需要下载中英文标点恢复模型（约 294 MB）。请点击上方「打开模型管理」下载。</div>
             );
           })()}
 
           {gpuStatus && (
-            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, fontSize: 12, color: "var(--text-2)" }}>
-              <span>GPU：</span>
-              <span style={{ color: gpuStatus.is_accelerated ? "var(--live)" : undefined }}>{gpuStatus.display_name}</span>
+            <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-2)" }}>
+              <div>物理硬件：{gpuStatus.hardware_candidate ?? gpuStatus.display_name}</div>
+              <div>当前推理后端：<span style={{ color: gpuStatus.is_accelerated ? "var(--live)" : undefined }}>{gpuStatus.display_name}</span></div>
+              {gpuStatus.effective_route && <div>当前生效路线：{gpuStatus.effective_route}</div>}
+              {gpuStatus.route_error && <div style={{ color: "var(--danger, #c33)" }}>配置不可用：{gpuStatus.route_error}</div>}
             </div>
           )}
 
@@ -817,6 +828,23 @@ export default function SettingsSection({
             <option value="local">本地优先</option>
             <option value="cloud">阿里云云端</option>
           </select>
+          {asrMode === "local" && (
+            <label style={{ ...labelBlock, marginTop: 6 }}>
+              <span>本地推理后端</span>
+              <select
+                value={asrBackend}
+                onChange={(e) => setAsrBackend(e.target.value)}
+                style={{ ...inputStyle, display: "block", width: "100%", marginTop: 2 }}
+              >
+                <option value="auto">自动检测</option>
+                <option value="cpu">CPU（诊断/离线）</option>
+                <option value="cuda">NVIDIA CUDA</option>
+              </select>
+            </label>
+          )}
+          <div style={hint}>
+            自动模式：当前支持 NVIDIA CUDA 本地识别；Apple Silicon 的 Metal 引擎正在接入，完成前使用阿里云或显式 CPU。Intel GPU 后端尚未支持。
+          </div>
 
           {(asrMode === "auto" || asrMode === "cloud") && (
             <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>

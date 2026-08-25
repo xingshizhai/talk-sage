@@ -66,8 +66,7 @@ talksage record --seconds 30 --input loopback   # 系统回环（会议软件里
 
 ## 5. 用录音做回归测试
 
-1. 把有价值的录音（如真实会议片段）放入 `models/sherpa-onnx-streaming-paraformer-zh/`
-   或单独测试素材目录，参考 `crates/talksage-pipeline/tests/pipeline_live.rs`
+1. 把有价值且已脱敏授权的录音放入独立测试素材目录，不要混入模型目录；参考 `crates/talksage-pipeline/tests/pipeline_live.rs`
    的 `recording_saves_wav_files_for_each_stream` / `file_input_produces_status_and_segments`
    用例模式接入自动测试；
 2. `scripts\run_tests.ps1` 全量跑（Rust 单元/集成 + Vitest）；

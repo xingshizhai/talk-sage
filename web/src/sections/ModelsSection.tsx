@@ -87,11 +87,13 @@ export default function ModelsSection({ listening }: { listening: boolean }) {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700 }}>
                   {m.label}
+                  {m.selectable === false && m.id !== "punct" && <span style={{ color: "var(--brief)", marginLeft: 6 }}>预下载</span>}
                   {m.installed ? <span style={{ color: "var(--live)", marginLeft: 6 }}>✓ 已安装</span> : <span style={{ color: "var(--brief)", marginLeft: 6 }}>未安装</span>}
                 </div>
                 <div style={{ color: "var(--muted)", marginTop: 2 }}>
                   {m.description} · 约 {m.download_size_mb ?? "?"} MB
                   {m.size_mb ? ` · 已占用 ${m.size_mb} MB` : ""}
+                  {m.downloading && !active ? " · 检测到未完成下载，点击可继续" : ""}
                 </div>
                 {active && prog && (prog.stage === "downloading" || prog.stage === "extracting") && (
                   <div style={{ marginTop: 4, height: 5, background: "var(--border)", borderRadius: 3, overflow: "hidden" }}>
@@ -123,7 +125,7 @@ export default function ModelsSection({ listening }: { listening: boolean }) {
         <div style={{ ...hint, color: "var(--brief)" }}>监听中无法安装或删除模型，请先停止监听。</div>
       )}
       <div style={hint}>
-        Qwen3-ASR 由官方 GitHub release 提供（HF 仓库为受限私有）。
+        Qwen3-ASR 由官方 GitHub release 提供（HF 仓库为受限私有）。下载、续传、校验和错误会写入应用日志。
       </div>
       {message && (
         <div style={{ marginTop: 8, fontSize: 11, color: message.includes("失败") ? "var(--danger)" : "var(--live)" }}>{message}</div>

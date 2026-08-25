@@ -45,12 +45,16 @@ env_check() {
     command -v npm >/dev/null && echo "  [OK]   npm $(npm --version)" || echo "  [MISS] npm"
     xcode-select -p >/dev/null 2>&1 && echo "  [OK]   Xcode Command Line Tools" || echo "  [MISS] Xcode Command Line Tools（运行 xcode-select --install）"
     for m in \
-        "models/sherpa-onnx-streaming-paraformer-zh" \
-        "models/sherpa-onnx-streaming-zipformer-en-2023-06-26" \
         "models/silero-vad/silero_vad.onnx" \
         "models/wespeaker/wespeaker_zh_cnceleb_resnet34.onnx"; do
         [ -e "$ROOT/$m" ] && echo "  [OK]   $m" || echo "  [MISS] ${m}（运行 deps）"
     done
+    [ -e "$ROOT/models/sherpa-onnx-qwen3-asr-0.6b" ] \
+        && echo "  [OK]   Qwen3-ASR 0.6B" \
+        || echo "  [OPTIONAL] Qwen3-ASR 未安装（模型管理或 download_models.py qwen3-asr）"
+    [ -e "$ROOT/models/whisper.cpp-large-v3-turbo-q5_0/ggml-large-v3-turbo-q5_0.bin" ] \
+        && echo "  [OK]   Whisper large-v3-turbo Metal" \
+        || echo "  [OPTIONAL] Apple Metal 模型未安装（模型管理或 download_models.py whisper-metal）"
     ls "$SHERPA_ONNX_ARCHIVE_DIR"/sherpa-onnx-*.tar.bz2 >/dev/null 2>&1 \
         && echo "  [OK]   sherpa-onnx 静态库" \
         || echo "  [MISS] sherpa-onnx 静态库（运行 deps）"
@@ -66,9 +70,9 @@ deps() {
     else
         echo "  sherpa 静态库已存在"
     fi
-    # 只下运行必需的四组（约 340MB）。whisper-base/small、qwen3-asr 是可选引擎，
-    # 体积大得多，需要时单独执行 download_models.py <group>。
-    for group in paraformer-zh zipformer-en silero-vad wespeaker diarization; do
+    # bootstrap 只下载音频链路公共模型。ASR 主模型体积较大，由应用模型管理页
+    # 按平台下载；旧 Paraformer/Zipformer 仅用于诊断，不再重复安装。
+    for group in silero-vad wespeaker diarization; do
         python3 scripts/download_models.py "$group" --proxy "$proxy"
     done
     (cd web && npm install --ignore-scripts)

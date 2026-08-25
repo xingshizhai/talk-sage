@@ -170,8 +170,8 @@ pub struct LivePipelineConfig {
     pub aliyun_access_key_secret: String,
     /// 阿里云语音识别 AppKey。
     pub aliyun_app_key: String,
-    /// ASR 引擎模式："auto" | "local" | "cloud"。
-    pub asr_mode: String,
+    /// 启动音频设备前已经解析、校验过的实际执行路线。
+    pub asr_route: talksage_asr::AsrRoute,
     /// Tokio 运行时句柄（云端引擎必须；从调用方上下文捕获）。
     pub tokio_handle: Option<tokio::runtime::Handle>,
     /// 插件钩子（filter 链 + observer）。由 TalkSageService 用
@@ -430,10 +430,9 @@ impl StreamWorker {
         engine_pool: Option<Arc<EnginePool>>,
         hooks: talksage_plugins::HookRegistry,
         origin_ms: u64,
-        aliyun_access_key_id: String,
-        aliyun_access_key_secret: String,
         aliyun_app_key: String,
-        asr_mode: String,
+        asr_route: talksage_asr::AsrRoute,
+        aliyun_token_manager: Option<Arc<talksage_asr::aliyun::TokenManager>>,
         tokio_handle: Option<tokio::runtime::Handle>,
     ) -> anyhow::Result<Self> {
         let (threshold, min_speech, min_silence, window, max_speech) = vad_cfg.effective();
@@ -445,31 +444,41 @@ impl StreamWorker {
         let vad = create_vad(vad_model, threshold, min_speech, min_silence, window, max_speech)?;
         // 引擎选择：云端（阿里云）或本地（GPU 自动检测）。
         let threads = asr_threads.max(1) as i32;
-        let gpu = talksage_asr::GpuBackend::detect();
-        let use_cloud = match asr_mode.as_str() {
-            "cloud" => true,
-            "local" => false,
-            _ /* "auto" */ => {
-                !gpu.is_accelerated()
-                    && !aliyun_access_key_id.is_empty()
-                    && !aliyun_app_key.is_empty()
-            }
-        };
-        let engine: Box<dyn talksage_asr::SegmentEngine> = if use_cloud {
+        let mut effective_options = cfg.engine_options.clone();
+        let (engine, pooled): (Box<dyn talksage_asr::SegmentEngine>, bool) = if asr_route
+            == talksage_asr::AsrRoute::AliyunCloud
+        {
             log::info!("ASR 引擎：阿里云实时语音识别（云端）");
-            use talksage_asr::aliyun::{TokenManager, AliyunEngine};
-            let handle = tokio_handle.expect("tokio runtime handle required for cloud ASR");
-            let token_mgr = Arc::new(TokenManager::new(
-                &aliyun_access_key_id,
-                &aliyun_access_key_secret,
-            ));
-            Box::new(AliyunEngine::new(&aliyun_app_key, token_mgr, handle))
+            use talksage_asr::aliyun::AliyunEngine;
+            let handle = tokio_handle.ok_or_else(|| {
+                anyhow::anyhow!("云端 ASR 需要 Tokio runtime，当前启动入口未提供")
+            })?;
+            let token_mgr = aliyun_token_manager.ok_or_else(|| {
+                anyhow::anyhow!("云端 ASR 路由缺少共享 TokenManager")
+            })?;
+            (
+                Box::new(AliyunEngine::new(&aliyun_app_key, token_mgr, handle)),
+                false,
+            )
         } else {
-            log::info!("ASR 引擎：本地 {:?} (provider={})", cfg.engine_kind, gpu.provider_str());
-            match &engine_pool {
-                Some(pool) => pool.acquire_with_options(cfg.engine_kind, &cfg.model_dir, threads, &cfg.engine_options)?,
-                None => talksage_asr::create_engine_auto(cfg.engine_kind, &cfg.model_dir, threads, gpu, &cfg.engine_options)?,
-            }
+            let provider = asr_route.provider().expect("local route has provider");
+            effective_options.provider = provider.to_string();
+            log::info!("ASR 引擎：本地 {:?} (provider={provider})", cfg.engine_kind);
+            let engine = match &engine_pool {
+                Some(pool) => pool.acquire_with_options(
+                    cfg.engine_kind,
+                    &cfg.model_dir,
+                    threads,
+                    &effective_options,
+                )?,
+                None => talksage_asr::create_engine_with_options(
+                    cfg.engine_kind,
+                    &cfg.model_dir,
+                    threads,
+                    &effective_options,
+                )?,
+            };
+            (engine, engine_pool.is_some())
         };
         let preprocessor = Preprocessor::new(
             denoise.enabled,
@@ -548,9 +557,9 @@ impl StreamWorker {
             seg_audio: Vec::new(),
             speaker_change,
             level,
-            engine_pool,
-            engine_dir: Some(cfg.model_dir.clone()),
-            engine_options: cfg.engine_options.clone(),
+            engine_pool: pooled.then_some(engine_pool).flatten(),
+            engine_dir: pooled.then(|| cfg.model_dir.clone()),
+            engine_options: effective_options,
             engine: Some(engine),
             hooks,
             punct_restorer: None,
@@ -1041,6 +1050,14 @@ fn run_loop(
     let mut plugin_executor = plugin_executor::PluginExecutor::new(2, 32, cancel.clone());
     let plugin_handle = plugin_executor.handle();
 
+    // 双流共享 Token 缓存，避免同一会话重复请求阿里云 Token。
+    let aliyun_token_manager = (cfg.asr_route == talksage_asr::AsrRoute::AliyunCloud).then(|| {
+        Arc::new(talksage_asr::aliyun::TokenManager::new(
+            &cfg.aliyun_access_key_id,
+            &cfg.aliyun_access_key_secret,
+        ))
+    });
+
     // 构建各流（client 流失败降级为仅 user 流，不影响主链路）
     let mut workers: Vec<StreamWorker> = Vec::new();
     // 说话人识别器（共享；模型缺失/未注册 → None，保持流默认标签）
@@ -1103,14 +1120,13 @@ fn run_loop(
             // clone 共享 Arc<dyn EventFilter>：两条流用同一批 filter 实例
             cfg.hooks.clone(),
             origin_ms,
-            cfg.aliyun_access_key_id.clone(),
-            cfg.aliyun_access_key_secret.clone(),
             cfg.aliyun_app_key.clone(),
-            cfg.asr_mode.clone(),
+            cfg.asr_route,
+            aliyun_token_manager.clone(),
             cfg.tokio_handle.clone(),
         )?;
-        // 标点恢复：仅流式引擎 + 用户启用 + 模型已安装时激活
-        if cfg.punct_enabled && sc.engine_kind.is_streaming() {
+        // 标点恢复独立于 ASR 类型；离线大模型和云端结果也需要统一语义分句。
+        if cfg.punct_enabled {
             if let Some(models_root) = sc.model_dir.parent() {
                 w.punct_restorer = talksage_asr::PunctuationRestorer::try_load(models_root);
                 if w.punct_restorer.is_some() {
@@ -1340,7 +1356,9 @@ mod pipeline_config_tests {
             assert!(cfg.aliyun_access_key_id.is_empty());
             assert!(cfg.aliyun_access_key_secret.is_empty());
             assert!(cfg.aliyun_app_key.is_empty());
-            assert_eq!(cfg.asr_mode, "auto");
+            assert_eq!(cfg.asr_route, talksage_asr::AsrRoute::Local {
+                backend: talksage_asr::GpuBackend::None,
+            });
         };
     }
 }

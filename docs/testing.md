@@ -57,13 +57,14 @@ macOS 首次构建、运行和依赖检查统一使用 `./scripts/talksage.sh do
 
 ## 4. 真实模型与测试音频
 
-模型目录探测顺序：`TALKSAGE_MODELS_DIR` → workspace `models/`。使用：
+模型目录探测顺序：`TALKSAGE_MODELS_DIR`（自动创建）→ 已存在的仓库/可执行文件旁 `models/` → 用户数据目录 `models/`（自动创建）。完整规则见 [模型管理架构](model-management.md)。使用：
 
 ```bash
 python3 scripts/download_models.py all
-talksage bench --dir corpus --engine paraformer-zh
-talksage bench --dir corpus --engine zipformer-en
+talksage bench --dir corpus --engine qwen3-asr
 ```
+
+Paraformer、Zipformer 和旧 sherpa Whisper 仅用于历史回归；需要时先执行 `python3 scripts/download_models.py legacy`，不要把其结果当作当前产品默认路线。
 
 真实模型测试缺少模型时会打印跳过原因而不是失败。发布前必须在模型齐全的机器上执行一次，并检查输出中没有意外 skip。
 

@@ -18,7 +18,7 @@ TalkSage 是一款**实时个人 AI 会议助理**：在视频会议或面对面
 ### v2 目标
 
 - **场景不变**：实时会议个人助理（视频会议回环 + 面对面洽谈双形态）
-- **低延迟**：流式 ASR，端到端"跟上会话速度"，快路径全本地
+- **低延迟**：VAD 段结束后尽快提交整段结果，在准确率优先的前提下跟上会话速度
 - **形态**：Tauri 2 桌面应用为主（体验最优），核心域服务化预留（未来多设备/团队）
 - **技术栈**：Rust 全栈核心 + React（Web 技术栈）UI，不再使用 Python
 - **结构参考**：DeepSeek Harness（DSH）的工程结构思想（CLI launcher、能力按域拆包、宿主/客户端分离、配置分层、同一 UI 多载体）
@@ -32,7 +32,7 @@ TalkSage 是一款**实时个人 AI 会议助理**：在视频会议或面对面
 | 定位 | 实时个人助理：听对方讲话 → 关键点 + 关联知识 → 支撑及时回复 | 延迟是核心指标 |
 | 部署 | 先单机；**架构预留团队/多设备** | 传输层可插拔、workspace/auth 抽象 |
 | 会议形态 | 视频会议（系统回环）+ 面对面（纯麦）都要 | 双路链路都要稳，回环可缺省 |
-| 实时性 | 越快越好，至少跟上会话速度 | **流式 ASR 必选**，非块式 |
+| 实时性 | 越快越好，至少跟上会话速度 | VAD 自适应切段 + 段级推理，避免固定块截字并约束 RTF |
 | 平台 | Windows + macOS | Windows 支持 WASAPI 回环；macOS 当前支持麦克风/文件，系统音频为后续项 |
 | 功能 | 术语解释、简报检索、**实时翻译**、**说话人分离**、**录音回放**、**纪要模板化** | pipeline 与事件模型扩展 |
 | 硬件 | CPU 独立运行；有 GPU 优先（NVIDIA CUDA + Apple Metal） | 推理后端自动探测 |
@@ -110,7 +110,7 @@ flowchart TB
 | 应用壳 | **Tauri 2**（Rust） | 原生窗口控制 + 系统集成 + Web 技术栈 UI；Meetily 同场景已验证 |
 | 后端语言 | **Rust**（workspace） | 音频原生、ASR 原生绑定、单二进制、并发强 |
 | Web 框架 | **axum**（仅 headless 模式） | tokio 生态，WebSocket/静态托管一体 |
-| ASR 运行时 | **sherpa-onnx**（k2-fsa） | C API + Rust 绑定；支持 streaming paraformer（中文）、streaming zipformer/whisper（英文）、SenseVoice（导入/重转写高质量后端）、说话人 embedding；CPU/CUDA/CoreML 多后端 |
+| ASR 运行时 | **段级引擎适配层** | 当前本地产品引擎为 sherpa-onnx Qwen3-ASR（CUDA/显式 CPU）；无可用 GPU 时走阿里云。Apple GPU 由独立 whisper.cpp/Metal 适配器承载，模型可预下载但适配器尚未启用 |
 | 前端 | **Vite + React + TypeScript** | 流式列表/虚拟化/分区表达力强，HMR 快 |
 | 音频采集 | cpal + Windows WASAPI loopback | macOS ScreenCaptureKit / 虚拟声卡尚未接线 |
 | VAD | sherpa-onnx 内置 VAD（或 silero-vad Rust 绑定） | 流式端点检测 |
@@ -220,27 +220,30 @@ flowchart LR
 
 ### 8.2 ASR 域（talksage-asr）
 
-- **统一运行时**：sherpa-onnx（Rust 绑定），模型为 ONNX（`models/` 清单 + 下载脚本）
+- **统一接口而非单一运行时**：`SegmentEngine` 屏蔽 sherpa-onnx、阿里云和后续 whisper.cpp/Metal 的实现差异；模型清单由 `EngineKind::ALL` / `ModelProfile` 统一声明
 - **架构（2026-08-25 迁移）**：已从”流式逐帧增量”切换为”VAD 切段 + 离线整段推理”
   ```
   旧：麦克风 → VAD → Paraformer-zh 流式（每帧增量）→ partial 文本
-  新：麦克风 → Silero VAD 切段 → [本地有 GPU] Qwen3-ASR / WhisperSmall (GPU) → 高精度文本
-                                   [无 GPU]    阿里云 WebSocket 实时语音 → 高精度文本
+  新：麦克风 → Silero VAD 切段 → [NVIDIA CUDA] Qwen3-ASR 0.6B → 高精度文本
+                                   [Apple Metal] Whisper large-v3-turbo（适配器待接入）
+                                   [无可用 GPU] 阿里云 WebSocket 实时语音 → 高精度文本
   ```
 - **段级接口**：`SegmentEngine`（流式与离线同一 trait）
-  - 离线 Qwen3-ASR（默认）、Whisper base/small：`accept` 只攒音频，VAD 段结束 `finish()` 整段识别（无 partial）
-  - 流式 paraformer-zh / zipformer-en：保留枚举值，不再作为自动选择路径的默认选项
+  - Qwen3-ASR：`accept` 只攒音频，VAD 段结束 `finish()` 整段识别（无 partial）
+  - Whisper large-v3-turbo Q5_0：允许通过模型管理预下载；在 Metal adapter 完成前 `selectable=false`，不会进入设置选择框
+  - Paraformer / Zipformer / 旧 sherpa Whisper：只保留内部解析与自动化测试兼容，不出现在产品模型目录
   - 云端 `AliyunEngine`：`accept` 推送 PCM 至阿里云 WebSocket，服务端自带 VAD，`finish()` 等待 SentenceEnd
 - **GPU 加速**：`GpuBackend::detect()` 运行时检测
   - Windows/Linux：尝试 `dlopen nvcuda.dll / libcuda.so.1`，成功则 `GpuBackend::Cuda`
-  - macOS：编译期 `cfg(target_os = “macos”)` → `GpuBackend::CoreMl`
-  - `EngineOptions.provider` 传 `”cuda” / “coreml” / “cpu”` 给 sherpa-onnx；`create_engine_auto(gpu)` 自动映射
+  - macOS：当前 sherpa-onnx 静态库请求 CoreML 会回退 CPU，因此运行时返回“无可用加速后端”；同时以 `hardware_candidate` 展示 Apple Metal 硬件候选，不把芯片型号冒充实际加速
+  - `resolve_asr_route` 统一裁决 GPU/云端路线；provider 先进入 `EngineOptions` 再进入引擎池
 - **阿里云云端引擎**（无 GPU 时回退）
   - `aliyun::TokenManager`：HMAC-SHA1 POP 签名，Token 24h 缓存，到期前 5 分钟自动刷新
   - `aliyun::AliyunEngine`：WebSocket `wss://nls-gateway-cn-shanghai.aliyuncs.com/ws/v1`；StartTranscription → binary PCM → StopTranscription → SentenceEnd
-  - 自动选择逻辑（`asr_mode`）：`auto`（无 GPU + 配置了 AccessKey → 云端，否则本地）、`local`（强制本地）、`cloud`（强制云端）
+  - 自动选择逻辑（`asr_mode`）：`auto`（当前仅已验证 CUDA → 本地，否则要求阿里云完整凭证）、`local`（强制本地，可显式 CPU）、`cloud`（强制云端）。Apple GPU 将由独立 whisper.cpp/Metal 适配器承载；Intel GPU 为后续扩展点
 - **引擎池**：`EnginePool` 按 `(kind, model_dir, options.signature())` 缓存，含 provider 隔离；GPU 引擎与 CPU 引擎独立缓存
-- **GPU 状态 API**：`GET /api/asr/gpu_status` + Tauri `get_gpu_status` → `{backend, display_name, is_accelerated}`
+- **GPU 状态 API**：`GET /api/asr/gpu_status` + Tauri `get_gpu_status` → `{backend, display_name, hardware_candidate, is_accelerated, effective_route, route_error}`
+- **模型管理**：模型目录解析、可选状态、断点续传、磁盘预检、完整性校验与下载日志见 [模型管理架构](model-management.md)
 - **说话人**：角色策略分为关闭、按物理通道和 WeSpeaker 声纹聚类。只有多人会议（或自定义 voiceprint）加载声纹模型。主人声纹不是聚类前置条件，只负责把匹配身份命名为”我”。段内使用 1.5s 滑动声纹窗口、500ms 步长和连续两次确认检测换人，确认后复用 `finish_speech` 安全切段。推理由每流容量 1 的后台 worker 执行，忙时跳过新窗口而不阻塞 ASR
 
 ### 8.3 管道与插件（talksage-pipeline / talksage-plugins）
@@ -349,7 +352,7 @@ enum DomainEvent {
 |---|---|---|
 | 回环采集 | WASAPI loopback（壳内 / capture-agent） | ScreenCaptureKit（macOS 13+）或 BlackHole 虚拟声卡 |
 | 权限 | 麦克风；无需额外（回环走 WASAPI） | 麦克风 + 屏幕录制（SCK 必需）权限引导 |
-| GPU | NVIDIA CUDA（ONNX Runtime CUDA） | Apple Metal / CoreML |
+| GPU | NVIDIA CUDA（ONNX Runtime CUDA） | Apple Metal（独立适配器；当前待实现） |
 | 分发 | NSIS 安装包（WebView2 常驻） | dmg（WKWebView） |
 
 ---
@@ -440,7 +443,7 @@ token = ""
 |---|---|
 | [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/DeepSeek-Harness) | CLI launcher + profile；能力按域拆包；宿主默认回环安全；/api + WS 事件；配置分层；同一 UI 跑浏览器或原生壳走 IPC |
 | [Meetily](https://github.com/Zackriya-Solutions/meetily) | Tauri 2 同场景验证；流式 VAD 调参；环形缓冲混音；True-Peak 限幅/EBU R128；增量 checkpoint 保存；纪要模板系统；WAL 恢复；whisper 调参 |
-| [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | 统一 ASR 运行时：streaming paraformer/zipformer、SenseVoice、说话人 embedding；Rust 绑定；CUDA/CoreML 多后端 |
+| [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | ASR 运行时：streaming paraformer/zipformer、SenseVoice、说话人 embedding；Rust 绑定；实际加速能力取决于分发库的编译选项 |
 
 ## 18. 架构演进 v2.1：为扩展而重构（参考 WhisperLiveKit）
 
@@ -606,9 +609,10 @@ revision / processed_until_sample / committed_until_sample
 ```
 麦克风 → Silero VAD 切段 → 段内累积音频
                               ↓ 段结束（静音超阈值）
-                   [本地有 GPU] Qwen3-ASR / WhisperSmall (GPU) → 高精度文本
+                   [NVIDIA CUDA] Qwen3-ASR 0.6B → 高精度文本
+                   [Apple Metal] Whisper large-v3-turbo Q5_0 → 适配器待接入
                    [无 GPU + 有 AccessKey] 阿里云 WebSocket → 高精度文本（200–500ms）
-                   [无 GPU + 无 key]      WhisperSmall (CPU) → 本地兜底
+                   [无 GPU + 无 key]      明确报错并引导配置云端；local 可显式使用 CPU
 ```
 
 延迟特征：
@@ -620,7 +624,10 @@ revision / processed_until_sample / committed_until_sample
 
 | 模块 | 位置 | 功能 |
 |---|---|---|
-| `GpuBackend` | `talksage-asr::gpu` | 运行时检测 CUDA / CoreML / CPU |
+| `GpuBackend` | `talksage-asr::gpu` | 检测真正可用的 CUDA / CPU；CoreML 枚举仅预留，不用芯片型号代替 provider 验证 |
+| `resolve_asr_route` | `talksage-asr::routing` | 集中裁决 auto/local/cloud 的有效路线和错误信息 |
+| `EngineKind::ALL` / `ModelProfile` | `talksage-asr::models` | 统一产品模型目录，并区分可下载与可选择 |
+| 模型管理器 | `web/src-tauri` | 统一模型目录、断点续传、空间预检、校验、任务状态与日志 |
 | `EngineOptions.provider` | `talksage-asr::lib` | 传递 sherpa-onnx provider 参数 |
 | `create_engine_auto` | `talksage-asr::lib` | 按 GpuBackend 自动选 provider |
 | `aliyun::TokenManager` | `talksage-asr::aliyun::token` | HMAC-SHA1 POP 签名 + Token 缓存 |

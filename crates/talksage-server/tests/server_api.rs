@@ -78,6 +78,23 @@ async fn health_returns_ok_and_version() {
 }
 
 #[tokio::test]
+async fn config_and_asr_status_expose_routing_state() {
+    let (status, body) = get("/api/config").await;
+    assert_eq!(status, StatusCode::OK);
+    let config: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(config["asr"]["asr_mode"], "auto");
+    assert!(config["asr"].get("punct_enabled").is_some());
+    assert!(config["asr"].get("aliyun_access_key_id").is_some());
+
+    let (status, body) = get("/api/asr/gpu_status").await;
+    assert_eq!(status, StatusCode::OK);
+    let runtime: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(runtime.get("backend").is_some());
+    assert!(runtime.get("effective_route").is_some());
+    assert!(runtime.get("route_error").is_some());
+}
+
+#[tokio::test]
 async fn sessions_list_empty_on_fresh_db() {
     let (status, body) = get("/api/sessions").await;
     assert_eq!(status, StatusCode::OK);
@@ -323,12 +340,10 @@ async fn openai_models_lists_engines() {
     let Some(root) = models_root() else {
         return skip("未找到 models/ 目录（设 TALKSAGE_MODELS_DIR）");
     };
-    if root.join("sherpa-onnx-streaming-paraformer-zh").is_dir() {
-        assert!(body.contains("paraformer-zh"), "body={body}");
+    if root.join("sherpa-onnx-qwen3-asr-0.6b").is_dir() {
+        assert!(body.contains("qwen3-asr"), "body={body}");
     }
-    if root.join("sherpa-onnx-streaming-zipformer-en-2023-06-26").is_dir() {
-        assert!(body.contains("zipformer-en"), "body={body}");
-    }
+    assert!(!body.contains("whisper-large-v3-turbo-metal"), "尚未接入的 Metal 模型不能出现在可调用模型 API: {body}");
 }
 
 #[tokio::test]
@@ -420,13 +435,48 @@ async fn save_config_persists_asr_engine_choice() {
                 .method("POST")
                 .uri("/api/config")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"asr":{"engine_zh":"whisper-base"}}"#))
+                .body(Body::from(r#"{"asr":{"engine_zh":"qwen3-asr"}}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(state.config.snapshot().asr.engine_zh, "whisper-base");
+    assert_eq!(state.config.snapshot().asr.engine_zh, "qwen3-asr");
+}
+
+#[tokio::test]
+async fn save_config_persists_gpu_cloud_routing_fields() {
+    let state = test_state();
+    let router = build_router(state.clone(), &std::path::PathBuf::from("nonexistent-dist"));
+    let body = serde_json::json!({
+        "asr": {
+            "asr_mode": "cloud",
+            "backend": "cuda",
+            "punct_enabled": false,
+            "aliyun_access_key_id": "id",
+            "aliyun_access_key_secret": "secret",
+            "aliyun_app_key": "app"
+        }
+    });
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/config")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let asr = state.config.snapshot().asr;
+    assert_eq!(asr.asr_mode, "cloud");
+    assert_eq!(asr.backend, "cuda");
+    assert!(!asr.punct_enabled);
+    assert_eq!(asr.aliyun_access_key_id, "id");
+    assert_eq!(asr.aliyun_access_key_secret, "secret");
+    assert_eq!(asr.aliyun_app_key, "app");
 }
 
 /// 场景自定义里的引擎同样应持久化（pipeline 实际按场景引擎运行）。
@@ -437,7 +487,7 @@ async fn save_config_persists_scene_custom_engine() {
     let body = serde_json::json!({
         "scene": {
             "mode": "custom",
-            "custom": { "user_engine": "whisper-small", "client_engine": "zipformer-en" }
+            "custom": { "user_engine": "qwen3-asr", "client_engine": "qwen3-asr" }
         }
     });
     let resp = router
@@ -454,6 +504,6 @@ async fn save_config_persists_scene_custom_engine() {
     assert_eq!(resp.status(), StatusCode::OK);
     let snap = state.config.snapshot();
     assert_eq!(snap.scene.mode, talksage_config::SceneMode::Custom);
-    assert_eq!(snap.scene.custom.user_engine, "whisper-small");
-    assert_eq!(snap.scene.custom.client_engine, "zipformer-en");
+    assert_eq!(snap.scene.custom.user_engine, "qwen3-asr");
+    assert_eq!(snap.scene.custom.client_engine, "qwen3-asr");
 }

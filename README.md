@@ -56,29 +56,33 @@
 
 ### 1. Get the models
 
-**Option A — in-app (recommended)**: open **模型管理** in the left nav, click "Download" per engine (stop listening first; progress is shown and downloads run in the background).
+**Option A — in-app (recommended)**: open **模型管理** in the left nav and click "Download" (stop listening first). It performs free-space checks, resumes incomplete downloads, verifies model integrity, and stores release-build models in the writable user data directory rather than inside the app bundle.
+
+See [Model management architecture](docs/model-management.md) for model availability, storage resolution, download state, integrity checks, and logging.
 
 **Option B — command line** (batch / offline):
 
 ```bash
 # via an HTTP/HTTPS proxy if your network requires one:
 # export https_proxy=http://127.0.0.1:10808 http_proxy=http://127.0.0.1:10808
-python scripts/download_models.py all          # everything
-python scripts/download_models.py qwen3-asr    # a single engine
+python scripts/download_models.py all            # current product/common models
+python scripts/download_models.py qwen3-asr      # CUDA/CPU model
+python scripts/download_models.py whisper-metal # Apple Metal model (pre-download)
+python scripts/download_models.py legacy        # legacy test models only
 ```
 
 This downloads into `models/`:
 
 | Model | Purpose |
 |---|---|
-| `sherpa-onnx-streaming-paraformer-zh` | Chinese streaming ASR (fp32 included, auto-preferred) |
-| `sherpa-onnx-streaming-zipformer-en-2023-06-26` | English streaming ASR |
 | `sherpa-onnx-qwen3-asr-0.6b` | Qwen3-ASR 0.6B offline segment-level (int8, ~878 MB; distributed via official GitHub release, HF repo is gated) |
-| `sherpa-onnx-whisper-base` / `sherpa-onnx-whisper-small` | Offline segment-level ASR (multilingual, accurate for mixed zh/en) |
+| `whisper.cpp-large-v3-turbo-q5_0` | Apple Silicon Metal default candidate (~547 MiB; may be pre-downloaded before adapter activation) |
 | `silero-vad/silero_vad.onnx` | Voice activity detection |
 | `wespeaker/wespeaker_zh_cnceleb_resnet34.onnx` | Speaker embedding (voiceprint) |
 
-Models are selectable per stream in **Settings → Scene → Custom → my engine / client engine**: streaming (paraformer-zh / zipformer-en, real-time partials) or offline segment-level (whisper-base / whisper-small / Qwen3-ASR, result after each VAD segment).
+Paraformer, Zipformer, and sherpa ONNX Whisper have been removed from the product model catalog. Existing directories are not deleted automatically because they may contain test fixtures; use the explicit `legacy` script target only for old benchmarks.
+
+The default high-accuracy path is VAD + Qwen3-ASR for both Chinese and English. NVIDIA CUDA can run the local model; machines without an available inference backend use Aliyun realtime ASR and require all three Aliyun credentials. Apple Silicon has a capable GPU, but the sherpa-onnx macOS static library currently bundled by the project falls back to CPU when CoreML is requested, so it is not reported as GPU acceleration. A dedicated Metal adapter is the planned Apple GPU path. Legacy streaming Paraformer/Zipformer and explicit local CPU remain available for diagnostics.
 
 ### 2. Build
 

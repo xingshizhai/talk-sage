@@ -4326,6 +4326,7 @@ dependencies = [
  "bzip2",
  "futures-util",
  "hmac",
+ "libc",
  "libloading 0.8.9",
  "log",
  "reqwest 0.12.28",

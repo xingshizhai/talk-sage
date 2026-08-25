@@ -579,7 +579,7 @@
             <div class="diagnosis-title">CPU-only 推理限制了可用模型规模</div>
           </div>
           <div class="diagnosis-body">
-            sherpa-onnx 支持 GPU，但 TalkSage 目前走 CPU 路径。GPU 推理比 CPU 快 5–10 倍，让竞品<strong>能负担更大模型而不卡顿</strong>。当前在 CPU 上跑 WhisperSmall 的 RTF ≈ 0.8–1.2，勉强实时；large 系列在普通笔记本 CPU 上 RTF > 5，完全无法用于实时场景。Meetily 默认 Metal/CUDA，noScribe 默认 CUDA，Apple Silicon 上的 MLX Whisper RTF 可达 0.05 以下。
+            sherpa-onnx 的 GPU 能力取决于具体构建；TalkSage 当前 macOS 分发库会把 CoreML 请求回退 CPU。GPU 推理让竞品<strong>能负担更大模型而不卡顿</strong>。Meetily 默认 Metal/CUDA，noScribe 默认 CUDA；TalkSage 需要独立 Apple Metal 适配器，而不是仅设置 ONNX provider 字符串。
           </div>
         </div>
 
@@ -622,7 +622,7 @@
       <div class="roadmap-item">
         <span class="roadmap-when"><span class="pill pill-amber">中期</span></span>
         <div class="roadmap-desc">
-          <strong>在 Apple Silicon 上开启 Metal/CoreML 加速。</strong>sherpa-onnx 支持 CoreML backend，M 系芯片可将 WhisperSmall / Qwen3-ASR 加速 3–5×，RTF 降到 0.2 以下，届时可实时跑中型模型。
+          <strong>在 Apple Silicon 上接入经过实测的 Metal 加速。</strong>当前 sherpa-onnx macOS 分发库的 CoreML 请求会回退 CPU；应采用 whisper.cpp/Metal 等独立适配器，并以固定语料比较 RTF、首字延迟和中文 CER 后再确定默认模型。
         </div>
       </div>
       <div class="roadmap-item">

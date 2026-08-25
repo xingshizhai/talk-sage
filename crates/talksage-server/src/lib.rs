@@ -155,13 +155,34 @@ fn token_ok_v1(state: &ServerState, headers: &axum::http::HeaderMap) -> bool {
 
 // ── API handlers ──────────────────────────────────────────
 
-async fn gpu_status_handler() -> axum::Json<serde_json::Value> {
+async fn gpu_status_handler(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
     let gpu = talksage_asr::GpuBackend::detect();
-    axum::Json(serde_json::json!({
+    let cfg = state.config.snapshot();
+    let route = talksage_asr::resolve_asr_route(
+        &cfg.asr.asr_mode,
+        &cfg.asr.backend,
+        gpu,
+        talksage_asr::CloudCredentials {
+            access_key_id: &cfg.asr.aliyun_access_key_id,
+            access_key_secret: &cfg.asr.aliyun_access_key_secret,
+            app_key: &cfg.asr.aliyun_app_key,
+        },
+    );
+    Json(serde_json::json!({
         "backend": gpu.provider_str(),
         "display_name": gpu.display_name(),
+        "hardware_candidate": talksage_asr::GpuBackend::hardware_candidate(),
         "is_accelerated": gpu.is_accelerated(),
+        "effective_route": route.as_ref().ok().map(|r| r.display_name()),
+        "route_error": route.err().map(|e| e.to_string()),
     }))
+    .into_response()
 }
 
 async fn health() -> impl IntoResponse {
@@ -178,6 +199,11 @@ async fn get_config_api(State(state): State<ServerState>, headers: axum::http::H
             "engine_en": cfg.asr.engine_en,
             "engine_zh": cfg.asr.engine_zh,
             "backend": cfg.asr.backend,
+            "punct_enabled": cfg.asr.punct_enabled,
+            "asr_mode": cfg.asr.asr_mode,
+            "aliyun_access_key_id": cfg.asr.aliyun_access_key_id,
+            "aliyun_access_key_secret": cfg.asr.aliyun_access_key_secret,
+            "aliyun_app_key": cfg.asr.aliyun_app_key,
             "terminology": cfg.asr.terminology,
         },
         "audio": cfg.audio,
@@ -217,6 +243,7 @@ async fn asr_models_api(State(state): State<ServerState>, headers: axum::http::H
         serde_json::json!({
             "id": kind.display_name(), "label": p.label, "languages": p.languages,
             "streaming": p.streaming, "speed": p.speed, "description": p.description,
+            "selectable": p.selectable,
             "installed": root.as_ref().is_some_and(|r| kind.is_available(r)),
             "size_mb": root.as_ref().map(|r| talksage_asr::models::installed_size_mb(kind, r)).unwrap_or(0),
             "download_size_mb": talksage_asr::models::download_size_mb(kind),
@@ -230,6 +257,7 @@ async fn asr_models_api(State(state): State<ServerState>, headers: axum::http::H
         "streaming": true,
         "speed": "fast",
         "description": "CT-Transformer 中英文标点预测，用于流式引擎语义分句",
+        "selectable": false,
         "installed": root.as_ref().is_some_and(|r| talksage_asr::is_punct_model_installed(r)),
         "size_mb": 0,
         "download_size_mb": talksage_asr::punct_download_size_mb(),
@@ -267,6 +295,7 @@ async fn download_model_api(
         };
         let downloads = state.downloads.clone();
         let events = state.events.clone();
+        log::info!("服务端模型下载任务已提交: engine=punct root={}", root.display());
         tokio::task::spawn_blocking(move || {
             let emit_events = events.clone();
             let emit = move |stage: &str, percent: u32, message: &str| {
@@ -280,8 +309,9 @@ async fn download_model_api(
             emit("downloading", 0, "开始下载…");
             let result = talksage_asr::download_punct_model(&root, cancel_flag, None);
             match result {
-                Ok(()) => emit("done", 100, "安装完成"),
-                Err(e) => emit("error", 0, &e.to_string()),
+                Ok(()) => { log::info!("服务端模型下载任务完成: engine=punct"); emit("done", 100, "安装完成") },
+                Err(e) if e.downcast_ref::<talksage_asr::models::DownloadCancelled>().is_some() => { log::info!("服务端模型下载任务取消: engine=punct"); emit("cancelled", 0, "已取消") },
+                Err(e) => { log::error!("服务端模型下载任务失败: engine=punct error={e}"); emit("error", 0, &e.to_string()) },
             }
             if let Ok(mut dl) = downloads.lock() {
                 dl.remove("punct");
@@ -293,6 +323,9 @@ async fn download_model_api(
         Some(k) => k,
         None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("未知引擎: {engine}") }))).into_response(),
     };
+    if !kind.is_product_model() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("旧模型 `{engine}` 已从产品模型管理移除") }))).into_response();
+    }
     if state.running.lock().unwrap().is_some() {
         return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "请先停止监听再安装模型" }))).into_response();
     }
@@ -312,6 +345,7 @@ async fn download_model_api(
         flag
     };
     let downloads = state.downloads.clone();
+    log::info!("服务端模型下载任务已提交: engine={} root={}", engine_id, root.display());
     tokio::task::spawn_blocking(move || {
         let emit_events = events.clone();
         let emit_engine = engine_id.clone();
@@ -338,11 +372,12 @@ async fn download_model_api(
         };
         let result = talksage_asr::models::download_engine(kind, &root, Some(&progress), Some(cancel_flag.as_ref()));
         match result {
-            Ok(()) => emit("done", 100, "安装完成"),
+            Ok(()) => { log::info!("服务端模型下载任务完成: engine={engine_id}"); emit("done", 100, "安装完成") },
             Err(e) if e.downcast_ref::<talksage_asr::models::DownloadCancelled>().is_some() => {
+                log::info!("服务端模型下载任务取消: engine={engine_id}");
                 emit("cancelled", 0, "已取消");
             }
-            Err(e) => emit("error", 0, &e.to_string()),
+            Err(e) => { log::error!("服务端模型下载任务失败: engine={engine_id} error={e}"); emit("error", 0, &e.to_string()) },
         }
         // 下载结束（成功/失败/取消）移除注册
         if let Ok(mut dl) = downloads.lock() {
@@ -365,6 +400,7 @@ async fn cancel_model_download_api(
     match dl.get(&engine) {
         Some(flag) => {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            log::info!("服务端模型下载收到取消请求: engine={engine}");
             (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
         }
         None => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "该模型没有正在进行的下载" }))).into_response(),
@@ -394,6 +430,9 @@ async fn remove_model_api(
         Some(k) => k,
         None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("未知引擎: {engine}") }))).into_response(),
     };
+    if !kind.is_product_model() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("旧模型 `{engine}` 已从产品模型管理移除") }))).into_response();
+    }
     if state.running.lock().unwrap().is_some() {
         return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "请先停止监听再删除模型" }))).into_response();
     }
@@ -476,6 +515,21 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
         }
         if let Some(b) = asr.get("backend").and_then(|v| v.as_str()) {
             c.asr.backend = b.to_string();
+        }
+        if let Some(v) = asr.get("punct_enabled").and_then(|v| v.as_bool()) {
+            c.asr.punct_enabled = v;
+        }
+        if let Some(v) = asr.get("asr_mode").and_then(|v| v.as_str()) {
+            c.asr.asr_mode = v.to_string();
+        }
+        if let Some(v) = asr.get("aliyun_access_key_id").and_then(|v| v.as_str()) {
+            c.asr.aliyun_access_key_id = v.trim().to_string();
+        }
+        if let Some(v) = asr.get("aliyun_access_key_secret").and_then(|v| v.as_str()) {
+            c.asr.aliyun_access_key_secret = v.trim().to_string();
+        }
+        if let Some(v) = asr.get("aliyun_app_key").and_then(|v| v.as_str()) {
+            c.asr.aliyun_app_key = v.trim().to_string();
         }
         if let Some(t) = asr.get("terminology") {
             if let Some(v) = t.get("enabled").and_then(|v| v.as_bool()) { c.asr.terminology.enabled = v; }
@@ -1074,7 +1128,7 @@ async fn models_api(State(state): State<ServerState>, headers: axum::http::Heade
     let root = resolve_models_dir();
     let data: Vec<serde_json::Value> = EngineKind::ALL
         .iter()
-        .filter(|&&k| root.as_ref().is_some_and(|r| k.is_available(r)))
+        .filter(|&&k| k.profile().selectable && root.as_ref().is_some_and(|r| k.is_available(r)))
         .map(|k| serde_json::json!({ "id": k.display_name(), "object": "model", "owned_by": "talksage" }))
         .collect();
     Json(serde_json::json!({ "object": "list", "data": data })).into_response()

@@ -33,7 +33,7 @@ pub struct AppState {
     /// 当前监听（None = 未监听）。Arc 便于移入 spawn_blocking 闭包。
     running: Arc<Mutex<Option<RunningListen>>>,
     /// 进行中的模型下载（引擎 id → 取消标志）。下载开始注册、结束/取消移除。
-    downloads: Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
+    downloads: Arc<Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
 }
 
 /// 版本。
@@ -105,6 +105,7 @@ fn list_asr_models() -> Vec<serde_json::Value> {
                 "streaming": p.streaming,
                 "speed": p.speed,
                 "description": p.description,
+                "selectable": p.selectable,
                 "installed": root.as_ref().is_some_and(|r| kind.is_available(r)),
                 "size_mb": root.as_ref().map(|r| talksage_asr::models::installed_size_mb(kind, r)).unwrap_or(0),
                 "download_size_mb": talksage_asr::models::download_size_mb(kind),
@@ -119,6 +120,7 @@ fn list_asr_models() -> Vec<serde_json::Value> {
         "streaming": true,
         "speed": "fast",
         "description": "CT-Transformer 中英文标点预测，用于流式引擎语义分句",
+        "selectable": false,
         "installed": root.as_ref().is_some_and(|r| talksage_asr::is_punct_model_installed(r)),
         "size_mb": 0,
         "download_size_mb": talksage_asr::punct_download_size_mb(),
@@ -154,6 +156,8 @@ async fn download_model(
             flag
         };
         let app = app.clone();
+        let downloads = state.downloads.clone();
+        log::info!("桌面模型下载任务已提交: engine=punct root={}", root.display());
         tauri::async_runtime::spawn_blocking(move || {
             let emit_app = app.clone();
             let emit = move |stage: &str, percent: u32, message: &str| {
@@ -170,14 +174,20 @@ async fn download_model(
             emit("downloading", 0, "开始下载…");
             let result = talksage_asr::download_punct_model(&root, cancel_flag, None);
             match result {
-                Ok(()) => emit("done", 100, "安装完成"),
-                Err(e) => emit("error", 0, &e.to_string()),
+                Ok(()) => { log::info!("桌面模型下载任务完成: engine=punct"); emit("done", 100, "安装完成") },
+                Err(e) if e.downcast_ref::<talksage_asr::models::DownloadCancelled>().is_some() => { log::info!("桌面模型下载任务取消: engine=punct"); emit("cancelled", 0, "已取消") },
+                Err(e) => { log::error!("桌面模型下载任务失败: engine=punct error={e}"); emit("error", 0, &e.to_string()) },
             }
-            // 下载结束移除注册（state 无法进入 spawn_blocking，省略清理；下次重启自动清空）
+            if let Ok(mut registry) = downloads.lock() {
+                registry.remove("punct");
+            }
         });
         return Ok(());
     }
     let kind = EngineKind::from_name(&engine).ok_or_else(|| format!("未知引擎: {engine}"))?;
+    if !kind.is_product_model() {
+        return Err(format!("旧模型 `{engine}` 已从产品模型管理移除"));
+    }
     if state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?.is_some() {
         return Err("请先停止监听再安装模型".into());
     }
@@ -198,6 +208,7 @@ async fn download_model(
     let app = app.clone();
     // 外层（注册表清理）单独持有一份 engine_id
     let cleanup_engine = engine_id.clone();
+    log::info!("桌面模型下载任务已提交: engine={} root={}", engine_id, root.display());
     tauri::async_runtime::spawn_blocking(move || {
         let emit_app = app.clone();
         let emit_engine = engine_id.clone();
@@ -231,15 +242,18 @@ async fn download_model(
         let result = talksage_asr::models::download_engine(kind, &root, Some(&progress), Some(&cancel_flag));
         match result {
             Ok(()) => {
+                log::info!("桌面模型下载任务完成: engine={engine_id}");
                 emit("done", 100, "安装完成");
                 Ok(())
             }
             Err(e) => {
                 // 用户主动取消：发"已取消"而非"失败"
                 if e.downcast_ref::<talksage_asr::models::DownloadCancelled>().is_some() {
+                    log::info!("桌面模型下载任务取消: engine={engine_id}");
                     emit("cancelled", 0, "已取消");
                     Ok(())
                 } else {
+                    log::error!("桌面模型下载任务失败: engine={engine_id} error={e}");
                     emit("error", 0, &e.to_string());
                     Err(e.to_string())
                 }
@@ -263,6 +277,7 @@ fn cancel_model_download(engine: String, state: tauri::State<'_, AppState>) -> R
     match dl.get(&engine) {
         Some(flag) => {
             flag.store(true, Ordering::Relaxed);
+            log::info!("桌面模型下载收到取消请求: engine={engine}");
             Ok(())
         }
         None => Err("该模型没有正在进行的下载".into()),
@@ -280,6 +295,9 @@ fn remove_model(engine: String, state: tauri::State<'_, AppState>) -> Result<(),
         return talksage_asr::remove_punct_model(&root).map_err(|e| format!("删除失败: {e}"));
     }
     let kind = EngineKind::from_name(&engine).ok_or_else(|| format!("未知引擎: {engine}"))?;
+    if !kind.is_product_model() {
+        return Err(format!("旧模型 `{engine}` 已从产品模型管理移除"));
+    }
     if state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?.is_some() {
         return Err("请先停止监听再删除模型".into());
     }
@@ -356,6 +374,21 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
         }
         if let Some(b) = asr.get("backend").and_then(|v| v.as_str()) {
             c.asr.backend = b.to_string();
+        }
+        if let Some(v) = asr.get("punct_enabled").and_then(|v| v.as_bool()) {
+            c.asr.punct_enabled = v;
+        }
+        if let Some(v) = asr.get("asr_mode").and_then(|v| v.as_str()) {
+            c.asr.asr_mode = v.to_string();
+        }
+        if let Some(v) = asr.get("aliyun_access_key_id").and_then(|v| v.as_str()) {
+            c.asr.aliyun_access_key_id = v.trim().to_string();
+        }
+        if let Some(v) = asr.get("aliyun_access_key_secret").and_then(|v| v.as_str()) {
+            c.asr.aliyun_access_key_secret = v.trim().to_string();
+        }
+        if let Some(v) = asr.get("aliyun_app_key").and_then(|v| v.as_str()) {
+            c.asr.aliyun_app_key = v.trim().to_string();
         }
         if let Some(t) = asr.get("terminology") {
             if let Some(v) = t.get("enabled").and_then(|v| v.as_bool()) { c.asr.terminology.enabled = v; }
@@ -769,12 +802,26 @@ fn export_session_markdown(session_id: i64, state: tauri::State<'_, AppState>) -
 
 /// GPU 后端状态（加速后端探测）。
 #[tauri::command]
-fn get_gpu_status() -> serde_json::Value {
+fn get_gpu_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
     let gpu = talksage_asr::GpuBackend::detect();
+    let cfg = state.config.snapshot();
+    let route = talksage_asr::resolve_asr_route(
+        &cfg.asr.asr_mode,
+        &cfg.asr.backend,
+        gpu,
+        talksage_asr::CloudCredentials {
+            access_key_id: &cfg.asr.aliyun_access_key_id,
+            access_key_secret: &cfg.asr.aliyun_access_key_secret,
+            app_key: &cfg.asr.aliyun_app_key,
+        },
+    );
     serde_json::json!({
         "backend": gpu.provider_str(),
         "display_name": gpu.display_name(),
+        "hardware_candidate": talksage_asr::GpuBackend::hardware_candidate(),
         "is_accelerated": gpu.is_accelerated(),
+        "effective_route": route.as_ref().ok().map(|r| r.display_name()),
+        "route_error": route.err().map(|e| e.to_string()),
     })
 }
 
@@ -808,7 +855,7 @@ pub fn run() {
             sessions,
             service,
             running: Arc::new(Mutex::new(None)),
-            downloads: Mutex::new(std::collections::HashMap::new()),
+            downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
         .invoke_handler(tauri::generate_handler![
             get_version,

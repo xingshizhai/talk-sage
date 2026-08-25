@@ -42,7 +42,7 @@ CI 不应依赖物理麦克风。设备无关逻辑由合成/固定 wav 确定�
 - 设备指标包括录音时长漂移、RMS/峰值、削波比例和静音块比例。
 - 默认综合分为准确率 60%、实时率 25%、延迟 15%。只有通过全部硬门禁的模型才参与推荐。
 
-生产选型不能只看全局平均值。最终报告应按场景输出 P50/P95，中文主场景设置更高权重；若低延迟流式模型和高准确率离线模型各有优势，可采用“流式 partial + 段尾 revision”的双模型策略。
+生产选型不能只看全局平均值。最终报告应按场景输出 P50/P95，中文主场景设置更高权重。若未来的低延迟引擎和高准确率段级模型各有优势，可另行评估“快速预览 + 段尾修订”的双模型策略；当前生产链路只发布段级 final，不能把历史流式 partial 指标混入推荐分数。
 
 ## 使用
 
@@ -52,8 +52,8 @@ CI 不应依赖物理麦克风。设备无关逻辑由合成/固定 wav 确定�
 python3 scripts/evaluate.py prepare
 ./scripts/talksage.sh evaluate
 
-# 只比较指定模型
-python3 scripts/evaluate.py asr --engines paraformer-zh,whisper-base
+# 只比较当前产品本地模型
+python3 scripts/evaluate.py asr --engines qwen3-asr
 
 # 真实麦克风测试（macOS 需终端或 .app 已获麦克风权限）
 ./scripts/talksage.sh audio-test 10

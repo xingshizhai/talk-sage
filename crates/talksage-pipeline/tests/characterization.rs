@@ -142,6 +142,13 @@ fn zh_pipeline(root: &Path, wav: &Path, min_commit_ms: u64) -> LivePipelineConfi
             &talksage_plugins::PluginContext::new(),
         ),
         punct_enabled: false,
+        aliyun_access_key_id: String::new(),
+        aliyun_access_key_secret: String::new(),
+        aliyun_app_key: String::new(),
+        asr_route: talksage_asr::AsrRoute::Local {
+            backend: talksage_asr::GpuBackend::None,
+        },
+        tokio_handle: None,
     }
 }
 

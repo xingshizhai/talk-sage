@@ -24,6 +24,10 @@ pub mod aliyun;
 pub mod gpu;
 pub use gpu::GpuBackend;
 
+/// Hardware/cloud execution routing.
+pub mod routing;
+pub use routing::{resolve_asr_route, AsrRoute, CloudCredentials};
+
 /// 模型管理（下载 / 删除 / 磁盘占用；应用内「转写引擎」页使用）。
 pub mod models;
 
@@ -105,6 +109,8 @@ pub enum EngineKind {
     WhisperSmall,
     /// Qwen3-ASR 0.6B（离线，段级；中英等多语言，需模型仓库开放后下载）。
     Qwen3Asr,
+    /// whisper.cpp large-v3-turbo Q5_0（Apple Silicon Metal 路线）。
+    WhisperLargeV3TurboMetal,
     /// 阿里云实时语音识别（云端流式，需配置 AccessKey）。
     AliyunCloud,
 }
@@ -119,16 +125,17 @@ pub struct ModelProfile {
     /// `realtime` / `balanced` / `accurate`。
     pub speed: &'static str,
     pub description: &'static str,
+    /// 是否已经有可运行的引擎适配器；false 时只允许预下载模型。
+    pub selectable: bool,
 }
 
 impl EngineKind {
-    pub const ALL: [Self; 5] = [
-        Self::ParaformerZh,
-        Self::ZipformerEn,
-        Self::WhisperBase,
-        Self::WhisperSmall,
-        Self::Qwen3Asr,
-    ];
+    /// 产品模型目录。旧流式/旧 ONNX Whisper 仍可被解析用于测试，但不再暴露给用户。
+    pub const ALL: [Self; 2] = [Self::Qwen3Asr, Self::WhisperLargeV3TurboMetal];
+
+    pub fn is_product_model(self) -> bool {
+        Self::ALL.contains(&self)
+    }
 
     /// 从配置字符串解析（zipformer-en / paraformer-zh / whisper-base / whisper-small / qwen3-asr / …）。
     pub fn from_name(name: &str) -> Option<Self> {
@@ -138,6 +145,7 @@ impl EngineKind {
             "whisper" | "whisper-base" => Some(Self::WhisperBase),
             "whisper-small" => Some(Self::WhisperSmall),
             "qwen3-asr" | "qwen3" => Some(Self::Qwen3Asr),
+            "whisper-large-v3-turbo-metal" | "large-v3-turbo-metal" => Some(Self::WhisperLargeV3TurboMetal),
             "aliyun" | "aliyun-cloud" => Some(Self::AliyunCloud),
             _ => None,
         }
@@ -151,6 +159,7 @@ impl EngineKind {
             Self::WhisperBase => "whisper-base",
             Self::WhisperSmall => "whisper-small",
             Self::Qwen3Asr => "qwen3-asr",
+            Self::WhisperLargeV3TurboMetal => "whisper-large-v3-turbo-metal",
             Self::AliyunCloud => "aliyun-cloud",
         }
     }
@@ -168,18 +177,20 @@ impl EngineKind {
             Self::WhisperBase => "sherpa-onnx-whisper-base",
             Self::WhisperSmall => "sherpa-onnx-whisper-small",
             Self::Qwen3Asr => "sherpa-onnx-qwen3-asr-0.6b",
+            Self::WhisperLargeV3TurboMetal => "whisper.cpp-large-v3-turbo-q5_0",
             Self::AliyunCloud => "aliyun-cloud",
         }
     }
 
     pub fn profile(self) -> ModelProfile {
         match self {
-            Self::ParaformerZh => ModelProfile { kind: self, label: "Paraformer 中文", languages: "zh", streaming: true, speed: "realtime", description: "低延迟流式中文，推荐用于实时字幕" },
-            Self::ZipformerEn => ModelProfile { kind: self, label: "Zipformer 英文", languages: "en", streaming: true, speed: "realtime", description: "低延迟流式英文" },
-            Self::WhisperBase => ModelProfile { kind: self, label: "Whisper base", languages: "multilingual", streaming: false, speed: "balanced", description: "段结束后识别，多语言准确率与速度平衡" },
-            Self::WhisperSmall => ModelProfile { kind: self, label: "Whisper small", languages: "multilingual", streaming: false, speed: "accurate", description: "段结束后识别，准确率优先但延迟更高" },
-            Self::Qwen3Asr => ModelProfile { kind: self, label: "Qwen3-ASR 0.6B", languages: "multilingual", streaming: false, speed: "accurate", description: "段结束后识别；仅在模型完整安装后可选" },
-            Self::AliyunCloud => ModelProfile { kind: self, label: "阿里云实时语音", languages: "zh,en", streaming: true, speed: "realtime", description: "云端流式识别，需配置 AccessKey；无本地 GPU 时自动启用" },
+            Self::ParaformerZh => ModelProfile { kind: self, label: "Paraformer 中文（旧诊断模型）", languages: "zh", streaming: true, speed: "realtime", description: "仅保留给自动化测试，不再作为产品模型", selectable: false },
+            Self::ZipformerEn => ModelProfile { kind: self, label: "Zipformer 英文（旧诊断模型）", languages: "en", streaming: true, speed: "realtime", description: "仅保留给自动化测试，不再作为产品模型", selectable: false },
+            Self::WhisperBase => ModelProfile { kind: self, label: "Whisper base ONNX（旧模型）", languages: "multilingual", streaming: false, speed: "balanced", description: "旧 sherpa ONNX 模型，不再提供下载", selectable: false },
+            Self::WhisperSmall => ModelProfile { kind: self, label: "Whisper small ONNX（旧模型）", languages: "multilingual", streaming: false, speed: "accurate", description: "旧 sherpa ONNX 模型，不再提供下载", selectable: false },
+            Self::Qwen3Asr => ModelProfile { kind: self, label: "Qwen3-ASR 0.6B int8", languages: "multilingual", streaming: false, speed: "accurate", description: "CUDA/CPU 本地高精度模型；中文与专业术语优先", selectable: true },
+            Self::WhisperLargeV3TurboMetal => ModelProfile { kind: self, label: "Whisper large-v3-turbo Q5_0（Apple Metal）", languages: "multilingual", streaming: false, speed: "balanced", description: "M 系列推荐模型，约 547 MiB；Metal 引擎接入前可预下载但暂不可选择", selectable: false },
+            Self::AliyunCloud => ModelProfile { kind: self, label: "阿里云实时语音", languages: "zh,en", streaming: true, speed: "realtime", description: "云端流式识别，需配置 AccessKey；无本地 GPU 时自动启用", selectable: true },
         }
     }
 
@@ -190,6 +201,7 @@ impl EngineKind {
     pub fn is_available(self, models_root: &Path) -> bool {
         let dir = models_root.join(self.model_dir_name());
         let has = |name: &str| dir.join(name).is_file() && dir.join(name).metadata().map(|m| m.len() > 0).unwrap_or(false);
+        let has_large = |name: &str| dir.join(name).metadata().map(|m| m.len() >= 100 * 1024 * 1024).unwrap_or(false);
         let has_tokenizer_dir = || {
             dir.join("tokenizer").is_dir()
                 && dir.join("tokenizer").join("vocab.json").is_file()
@@ -206,9 +218,24 @@ impl EngineKind {
                 // 官方包为 int8 布局（encoder.int8.onnx / decoder.int8.onnx / tokenizer/ 目录）；
                 // 兼容早期约定的 fp32 布局（encoder.onnx / decoder.onnx / tokenizer.json）。
                 has("conv_frontend.onnx")
-                    && ((has("encoder.onnx") && has("decoder.onnx"))
-                        || (has("encoder.int8.onnx") && has("decoder.int8.onnx")))
+                    && ((has_large("encoder.onnx") && has_large("decoder.onnx"))
+                        || (has_large("encoder.int8.onnx") && has_large("decoder.int8.onnx")))
                     && (has("tokenizer.json") || has_tokenizer_dir())
+            }
+            Self::WhisperLargeV3TurboMetal => {
+                let model = dir.join("ggml-large-v3-turbo-q5_0.bin");
+                let size = model.metadata().ok().map(|m| m.len());
+                has("ggml-large-v3-turbo-q5_0.bin")
+                    && std::fs::read_to_string(dir.join("ggml-large-v3-turbo-q5_0.sha1"))
+                        .ok()
+                        .and_then(|value| {
+                            let mut fields = value.split_whitespace();
+                            Some((fields.next()?.to_string(), fields.next()?.parse::<u64>().ok()?))
+                        })
+                        .is_some_and(|(hash, verified_size)| {
+                            hash == "e050f7970618a659205450ad97eb95a18d69c9ee"
+                                && size == Some(verified_size)
+                        })
             }
             Self::AliyunCloud => true, // 云端引擎：无本地模型文件，始终可用
         }
@@ -258,6 +285,7 @@ impl SherpaStreamingEngine {
                     },
                     tokens: Some(model_dir.join("tokens.txt").to_string_lossy().into()),
                     num_threads,
+                    provider: Some(if options.provider.is_empty() { "cpu".into() } else { options.provider.clone() }),
                     ..Default::default()
                 }
             }
@@ -277,10 +305,11 @@ impl SherpaStreamingEngine {
                     },
                     tokens: Some(model_dir.join("tokens.txt").to_string_lossy().into()),
                     num_threads,
+                    provider: Some(if options.provider.is_empty() { "cpu".into() } else { options.provider.clone() }),
                     ..Default::default()
                 }
             }
-            EngineKind::WhisperBase | EngineKind::WhisperSmall | EngineKind::Qwen3Asr => {
+            EngineKind::WhisperBase | EngineKind::WhisperSmall | EngineKind::Qwen3Asr | EngineKind::WhisperLargeV3TurboMetal => {
                 anyhow::bail!("{} 是离线段级引擎，请用 OfflineSegmentEngine::new", kind.display_name())
             }
             EngineKind::AliyunCloud => {
@@ -483,6 +512,9 @@ impl OfflineSegmentEngine {
                     ..Default::default()
                 }
             }
+            EngineKind::WhisperLargeV3TurboMetal => {
+                anyhow::bail!("Apple Metal ASR 适配器尚未接入；模型可以预下载，但当前不能用于识别")
+            }
             _ => anyhow::bail!("{} 不是离线引擎", kind.display_name()),
         };
         let config = OfflineRecognizerConfig {
@@ -571,11 +603,13 @@ mod tests {
         assert_eq!(EngineKind::from_name("whisper-base"), Some(EngineKind::WhisperBase));
         assert_eq!(EngineKind::from_name("whisper-small"), Some(EngineKind::WhisperSmall));
         assert_eq!(EngineKind::from_name("qwen3-asr"), Some(EngineKind::Qwen3Asr));
+        assert_eq!(EngineKind::from_name("whisper-large-v3-turbo-metal"), Some(EngineKind::WhisperLargeV3TurboMetal));
         assert_eq!(EngineKind::from_name("unknown"), None);
         // 流式 vs 离线段级
         assert!(EngineKind::ParaformerZh.is_streaming());
         assert!(!EngineKind::WhisperBase.is_streaming());
         assert!(!EngineKind::Qwen3Asr.is_streaming());
+        assert!(!EngineKind::WhisperLargeV3TurboMetal.is_streaming());
     }
 
     #[test]
@@ -588,6 +622,10 @@ mod tests {
             assert!(ids.insert(kind.display_name()), "模型 id 重复");
             assert!(matches!(profile.speed, "realtime" | "balanced" | "accurate"));
         }
+        assert_eq!(EngineKind::ALL, [EngineKind::Qwen3Asr, EngineKind::WhisperLargeV3TurboMetal]);
+        assert!(EngineKind::Qwen3Asr.profile().selectable);
+        assert!(!EngineKind::WhisperLargeV3TurboMetal.profile().selectable);
+        assert!(!EngineKind::ParaformerZh.is_product_model());
     }
 
     #[test]
@@ -617,7 +655,6 @@ mod tests {
     /// 0 字节模型文件不得被判定为已安装（空 onnx 会让 sherpa-onnx native 崩溃）。
     #[test]
     fn empty_model_files_are_not_available() {
-        use std::path::PathBuf;
         let tmp = std::env::temp_dir().join(format!("talksage-asr-empty-{}", std::process::id()));
         let dir = tmp.join(EngineKind::Qwen3Asr.model_dir_name());
         std::fs::create_dir_all(&dir).unwrap();
@@ -628,9 +665,11 @@ mod tests {
         std::fs::create_dir_all(dir.join("tokenizer")).unwrap();
         std::fs::write(dir.join("tokenizer").join("vocab.json"), b"").unwrap();
         assert!(!EngineKind::Qwen3Asr.is_available(&tmp), "空文件不应判定为已安装");
-        // 写非空后判定为已安装
-        std::fs::write(dir.join("encoder.int8.onnx"), vec![1u8; 1024]).unwrap();
-        std::fs::write(dir.join("decoder.int8.onnx"), vec![1u8; 1024]).unwrap();
+        // 编码器/解码器必须达到最低合理大小；用稀疏文件避免测试实际写入 200MB。
+        for name in ["encoder.int8.onnx", "decoder.int8.onnx"] {
+            let file = std::fs::OpenOptions::new().write(true).open(dir.join(name)).unwrap();
+            file.set_len(100 * 1024 * 1024).unwrap();
+        }
         std::fs::write(dir.join("conv_frontend.onnx"), vec![1u8; 1024]).unwrap();
         std::fs::write(dir.join("tokenizer").join("vocab.json"), b"{}").unwrap();
         assert!(EngineKind::Qwen3Asr.is_available(&tmp));
@@ -769,6 +808,16 @@ mod pool_tests {
         let a = EngineOptions { hotwords: vec!["TalkSage".into()], hotword_score: 1.5, ..Default::default() };
         let b = EngineOptions { hotwords: vec!["WhisperLiveKit".into()], hotword_score: 1.5, ..Default::default() };
         assert_ne!(EnginePool::key(EngineKind::ZipformerEn, dir, &a), EnginePool::key(EngineKind::ZipformerEn, dir, &b));
+    }
+
+    #[test]
+    fn pool_key_isolated_by_execution_provider() {
+        let dir = Path::new("models/example");
+        let cpu = EngineOptions { provider: "cpu".into(), ..Default::default() };
+        let coreml = EngineOptions { provider: "coreml".into(), ..Default::default() };
+        let cuda = EngineOptions { provider: "cuda".into(), ..Default::default() };
+        assert_ne!(EnginePool::key(EngineKind::Qwen3Asr, dir, &cpu), EnginePool::key(EngineKind::Qwen3Asr, dir, &coreml));
+        assert_ne!(EnginePool::key(EngineKind::Qwen3Asr, dir, &coreml), EnginePool::key(EngineKind::Qwen3Asr, dir, &cuda));
     }
 
     #[test]

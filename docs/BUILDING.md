@@ -163,22 +163,29 @@ $env:SHERPA_ONNX_ARCHIVE_DIR = "$PWD\.tools\sherpa-onnx-archives"
 
 **方式 B：让构建自动下载**（需要能访问 GitHub Releases）
 
-### 3.3 下载 ASR 模型（运行期必需，约 340MB）
+### 3.3 下载运行模型
+
+推荐在应用左侧进入「模型管理」按需下载。应用会选择可写模型目录，执行磁盘空间预检、断点续传、完整性校验，并把下载进度与失败原因写入日志。目录解析和模型状态定义见 [模型管理架构](model-management.md)。
+
+批量构建或离线准备也可以使用命令行：
 
 ```powershell
 # 需要 Python 3（任意环境，脚本用标准库）
 python scripts\download_models.py all
 # 下载到 models/
-#   sherpa-onnx-streaming-paraformer-zh/   （中文 streaming paraformer，int8）
-#   sherpa-onnx-streaming-zipformer-en-2023-06-26/ （英文 streaming zipformer，int8）
-#   silero-vad/silero_vad.onnx             （VAD）
-#   wespeaker/wespeaker_zh_cnceleb_resnet34.onnx （声纹模型，说话人识别，26MB）
-# 下载实时声纹与会后分离模型：
-# python scripts\download_models.py wespeaker
-# python scripts\download_models.py diarization
+#   sherpa-onnx-qwen3-asr-0.6b/             （CUDA/CPU 段级 ASR，约 878 MB）
+#   whisper.cpp-large-v3-turbo-q5_0/       （Apple Metal 候选，约 547 MiB；适配器待启用）
+#   silero-vad/silero_vad.onnx              （VAD）
+#   wespeaker/                               （实时声纹）
+#   diarization/                             （会后分离）
+
+# 旧基准模型不会被 all 下载；仅在维护历史测试时显式执行：
+# python scripts\download_models.py legacy
 ```
 
 > 声纹模型用于「多人讲话者区分」：模型存在时即可在线聚类为「讲话者/客户1/客户2/…」；设置页注册主人声音是可选增强，用于把匹配身份标记为「我」。模型未下载时保持原双流标签。
+>
+> 标点恢复模型由应用模型管理单独下载（约 294 MB）。主源为 sherpa-onnx 官方 GitHub Release，公共 Hugging Face 仓库只作为回退；不再使用会返回 401 的旧 `vocab500k` 地址。
 
 ### 3.4 前端依赖
 

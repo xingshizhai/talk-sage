@@ -268,7 +268,7 @@ impl TalkSageService {
     pub fn resolve_models_dir() -> Option<PathBuf> {
         if let Ok(d) = std::env::var("TALKSAGE_MODELS_DIR") {
             let p = PathBuf::from(d);
-            if p.is_dir() {
+            if !p.as_os_str().is_empty() && (p.is_dir() || std::fs::create_dir_all(&p).is_ok()) {
                 return Some(p);
             }
         }
@@ -293,7 +293,10 @@ impl TalkSageService {
                 return Some(cand);
             }
         }
-        None
+        // 正式安装不能依赖可执行文件旁边存在可写的 models/。开发环境上面的
+        // 仓库目录仍优先；找不到时统一落到用户数据目录并自动创建。
+        let user_models = talksage_config::default_data_dir().join("models");
+        std::fs::create_dir_all(&user_models).ok().map(|_| user_models)
     }
 
     /// 场景开启双流时解析客户输入：非 Windows 的 Auto 返回 None，并打日志。
@@ -332,6 +335,27 @@ impl TalkSageService {
     ) -> Result<LivePipelineConfig> {
         let model_dir =Self::resolve_models_dir().ok_or_else(|| anyhow!("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）"))?;
         let snapshot = self.config.snapshot();
+        let gpu = talksage_asr::GpuBackend::detect();
+        let asr_route = talksage_asr::resolve_asr_route(
+            &snapshot.asr.asr_mode,
+            &snapshot.asr.backend,
+            gpu,
+            talksage_asr::CloudCredentials {
+                access_key_id: &snapshot.asr.aliyun_access_key_id,
+                access_key_secret: &snapshot.asr.aliyun_access_key_secret,
+                app_key: &snapshot.asr.aliyun_app_key,
+            },
+        )?;
+        let tokio_handle = tokio::runtime::Handle::try_current().ok();
+        if asr_route == talksage_asr::AsrRoute::AliyunCloud && tokio_handle.is_none() {
+            return Err(anyhow!("云端 ASR 需要 Tokio runtime，当前启动入口不支持云端模式"));
+        }
+        log::info!(
+            "ASR 路由已确定: route={} detected_gpu={:?} configured_backend={}",
+            asr_route.display_name(),
+            gpu,
+            snapshot.asr.backend,
+        );
         let terminology = snapshot.asr.terminology.clone();
         let engine_options = talksage_asr::EngineOptions {
             hotwords: terminology.normalized_terms(),
@@ -363,7 +387,9 @@ impl TalkSageService {
         if !vad_model.is_file() {
             return Err(anyhow!("缺少 VAD 模型: {}", vad_model.display()));
         }
-        if !user_engine.is_available(&model_dir) {
+        if asr_route != talksage_asr::AsrRoute::AliyunCloud
+            && !user_engine.is_available(&model_dir)
+        {
             return Err(anyhow!("用户 ASR 模型未安装或文件不完整: {}", user_model.display()));
         }
 
@@ -383,7 +409,9 @@ impl TalkSageService {
         let client_engine = client_engine_kind;
         let client_model = model_dir.join(client_engine.model_dir_name());
         let client = Self::resolve_client_input(scene.client_enabled, &req.client).and_then(|input| {
-            if !client_engine.is_available(&model_dir) {
+            if asr_route != talksage_asr::AsrRoute::AliyunCloud
+                && !client_engine.is_available(&model_dir)
+            {
                 log::warn!("客户 ASR 模型未安装或文件不完整: {}；关闭客户流", client_model.display());
                 return None;
             }
@@ -510,8 +538,8 @@ impl TalkSageService {
             aliyun_access_key_id: snapshot.asr.aliyun_access_key_id.clone(),
             aliyun_access_key_secret: snapshot.asr.aliyun_access_key_secret.clone(),
             aliyun_app_key: snapshot.asr.aliyun_app_key.clone(),
-            asr_mode: snapshot.asr.asr_mode.clone(),
-            tokio_handle: tokio::runtime::Handle::try_current().ok(),
+            asr_route,
+            tokio_handle,
         })
     }
 

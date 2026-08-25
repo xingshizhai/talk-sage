@@ -87,7 +87,9 @@ pub fn transcribe_file(
         aliyun_access_key_id: String::new(),
         aliyun_access_key_secret: String::new(),
         aliyun_app_key: String::new(),
-        asr_mode: "local".into(),
+        asr_route: talksage_asr::AsrRoute::Local {
+            backend: talksage_asr::GpuBackend::None,
+        },
         tokio_handle: None,
     };
 
