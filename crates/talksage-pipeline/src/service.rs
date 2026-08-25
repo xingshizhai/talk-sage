@@ -1123,8 +1123,8 @@ mod tests {
         assert!(TalkSageService::build_llm(&cfg).is_none());
     }
 
-    /// 非自定义场景：用户流引擎跟随全局 [asr].user_engine（「转写引擎」页的选择
-    /// 必须真正生效）；自定义场景：用场景参数。
+    /// 非自定义场景：引擎由 engine_for_language(scene.language) 决定（中文 → engine_zh，
+    /// 其他 → engine_en）；自定义场景：用 scene.user_engine / scene.client_engine。
     #[test]
     fn engine_resolution_uses_engine_for_language() {
         use talksage_config::{AsrConfig, SceneMode};

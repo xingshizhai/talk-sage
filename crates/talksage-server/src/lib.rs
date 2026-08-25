@@ -394,10 +394,10 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
         }
     }
     if let Some(asr) = updates.get("asr") {
-        if let Some(e) = asr.get("engine_en").and_then(|v| v.as_str()) {
+        if let Some(e) = asr.get("engine_en").or_else(|| asr.get("client_engine")).and_then(|v| v.as_str()) {
             c.asr.engine_en = e.to_string();
         }
-        if let Some(e) = asr.get("engine_zh").and_then(|v| v.as_str()) {
+        if let Some(e) = asr.get("engine_zh").or_else(|| asr.get("user_engine")).and_then(|v| v.as_str()) {
             c.asr.engine_zh = e.to_string();
         }
         if let Some(b) = asr.get("backend").and_then(|v| v.as_str()) {

@@ -1,4 +1,4 @@
-﻿// 设置面板：按 Tab 归类。保存写入 talksage.toml。
+// 设置面板：按 Tab 归类。保存写入 talksage.toml。
 // 模型安装/删除在独立的「模型管理」页，不占用本页。
 
 import { useEffect, useState } from "react";
@@ -43,13 +43,24 @@ export default function SettingsSection({
     const m = (config?.scene?.mode ?? "conversation") as string;
     return (m === "translation" ? "bilingual" : m) as SceneMode;
   });
-  // 模板场景的语言选择（非自定义模式）
-  const [sceneLanguage, setSceneLanguage] = useState<"zh" | "en">(
-    (config?.scene?.custom?.language as "zh" | "en") ?? "zh"
-  );
-  const [sceneClientLanguage, setSceneClientLanguage] = useState<"zh" | "en">(
-    (config?.scene?.custom?.client_language as "zh" | "en") ?? "en"
-  );
+  // 模板场景的语言选择（非自定义模式）。
+  // 从 custom.language 读取：handleSave 在非自定义模式时将 sceneLanguage 写入 custom，
+  // 因此重新打开设置时能正确恢复上次选择的语言。
+  const [sceneLanguage, setSceneLanguage] = useState<"zh" | "en">(() => {
+    const mode = (config?.scene?.mode ?? "conversation") as string;
+    // 只有非自定义场景才从 custom.language 还原语言选择；自定义场景语言在 sceneCustom 里管理。
+    if (mode !== "custom") {
+      return (config?.scene?.custom?.language as "zh" | "en") ?? "zh";
+    }
+    return "zh";
+  });
+  const [sceneClientLanguage, setSceneClientLanguage] = useState<"zh" | "en">(() => {
+    const mode = (config?.scene?.mode ?? "conversation") as string;
+    if (mode !== "custom") {
+      return (config?.scene?.custom?.client_language as "zh" | "en") ?? "en";
+    }
+    return "en";
+  });
   const [sceneCustom, setSceneCustom] = useState<SceneParams>(() => ({
     vad_preset: config?.scene?.custom?.vad_preset ?? "standard",
     vad_threshold: config?.scene?.custom?.vad_threshold ?? null,
