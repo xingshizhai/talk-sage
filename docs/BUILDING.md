@@ -308,7 +308,7 @@ npx tauri build
 | `CARGO_HOME` | cargo 缓存/配置目录（隔离构建用） | `~/.cargo` |
 | `SHERPA_ONNX_ARCHIVE_DIR` | sherpa-onnx 预编译库目录 | 自动下载 |
 | `TALKSAGE_MODELS_DIR` | ASR/VAD 模型根目录 | 相对可执行文件探测 |
-| `TALKSAGE_DATA_DIR` | 数据目录（sessions.db 等） | `~/.talksage` |
+| `TALKSAGE_DATA_DIR` | 数据目录（sessions.db 等），外部已设则优先 | 脚本运行：项目内 `config/`；直接运行程序：`~/.talksage` |
 | `TALKSAGE_SERVER_TOKEN` | headless 服务鉴权 token | 空（不鉴权） |
 | `TALKSAGE_SERVER_PORT` / `HOST` | 覆盖服务端口/绑定 | 8080 / 127.0.0.1 |
 | `TALKSAGE_WEB_DIST` | SPA 静态目录（serve 用） | `web/dist` |

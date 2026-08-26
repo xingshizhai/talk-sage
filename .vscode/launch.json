@@ -10,7 +10,8 @@
       "cwd": "${workspaceFolder}",
       "environment": [
         { "name": "CARGO_HOME", "value": "${workspaceFolder}/.cargo-home" },
-        { "name": "SHERPA_ONNX_ARCHIVE_DIR", "value": "${workspaceFolder}/.tools/sherpa-onnx-archives" }
+        { "name": "SHERPA_ONNX_ARCHIVE_DIR", "value": "${workspaceFolder}/.tools/sherpa-onnx-archives" },
+        { "name": "TALKSAGE_DATA_DIR", "value": "${workspaceFolder}/config" }
       ]
     },
     {
@@ -23,7 +24,7 @@
       "environment": [
         { "name": "CARGO_HOME", "value": "${workspaceFolder}/.cargo-home" },
         { "name": "SHERPA_ONNX_ARCHIVE_DIR", "value": "${workspaceFolder}/.tools/sherpa-onnx-archives" },
-        { "name": "TALKSAGE_DATA_DIR", "value": "${workspaceFolder}/.tools/data" }
+        { "name": "TALKSAGE_DATA_DIR", "value": "${workspaceFolder}/config" }
       ]
     }
   ],
