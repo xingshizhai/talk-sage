@@ -26,7 +26,6 @@ export default function SideNav({
   paused,
   onToggleListen,
   onTogglePause,
-  onOpenDebug,
   onNavigate,
   noiseLevel,
   onNoiseLevel,
@@ -42,7 +41,6 @@ export default function SideNav({
   paused: boolean;
   onToggleListen: () => void;
   onTogglePause: () => void;
-  onOpenDebug: () => void;
   onNavigate: (key: string) => void;
   noiseLevel: number;
   onNoiseLevel: (level: number) => void;
@@ -224,14 +222,8 @@ export default function SideNav({
           )}
         </div>
         <div style={{ fontSize: 9, textAlign: "center", color: "var(--muted)", fontFamily: "monospace" }}>
-          ⌘/Ctrl+Shift+L 开始/停止 · Space 暂停
+          ⌘/Ctrl+Shift+L 开始/停止 · Space 暂停 · ⌘/Ctrl+Shift+D 调试
         </div>
-        <button
-          onClick={onOpenDebug}
-          style={{ padding: "8px 0", borderRadius: 9, cursor: "pointer", background: "var(--surface-2)", color: "var(--text)", border: "1px solid var(--border)" }}
-        >
-          调试
-        </button>
       </div>
 
       {/* 版本号（左侧底部） */}

@@ -530,6 +530,9 @@ export default function App() {
       if (ev.code === "KeyL" && ev.shiftKey && (ev.metaKey || ev.ctrlKey)) {
         ev.preventDefault();
         void handleListen();
+      } else if (ev.code === "KeyD" && ev.shiftKey && (ev.metaKey || ev.ctrlKey)) {
+        ev.preventDefault();
+        setShowDebug(v => !v);
       } else if (ev.code === "Space" && listening && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
         ev.preventDefault();
         void handlePause();
@@ -574,7 +577,7 @@ export default function App() {
         paused={paused}
         onToggleListen={handleListen}
         onTogglePause={handlePause}
-        onOpenDebug={() => setShowDebug(true)}
+
         onNavigate={handleNavigate}
         noiseLevel={noiseLevel}
         onNoiseLevel={setNoiseLevel}
