@@ -80,6 +80,12 @@ enum Command {
         #[arg(long, default_value = "导入")]
         speaker: String,
     },
+    /// 列出最近的会话记录。
+    Sessions {
+        /// 最多显示几条（默认 20）
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
     /// 会话分析：转储某会话的原始段信息（时间戳/时长/文本），并检测疑似重复段。
     /// 用于排查"识别内容重复"等转写质量问题。
     Session {
@@ -88,6 +94,14 @@ enum Command {
         /// 只检测重复段（不打印全部转写）
         #[arg(long)]
         dup_only: bool,
+    },
+    /// 导出会话为 Markdown 文件（含转写、要点、术语等）。
+    Export {
+        /// 会话 id（省略则导出最近一条）
+        id: Option<i64>,
+        /// 输出路径（默认：当前目录 session-<id>.md）
+        #[arg(short, long)]
+        output: Option<String>,
     },
     /// 静音裁剪：用 silero VAD 去掉无声音的部分，输出紧凑音频（测试素材）。
     Trim {
@@ -170,7 +184,9 @@ fn main() -> ExitCode {
             noise_level,
         } => cmd_listen(&input, seconds, &engine, client.as_deref(), kb.as_deref(), save, no_record, noise_level),
         Command::Import { path, engine, speaker } => cmd_import(&path, &engine, &speaker),
+        Command::Sessions { limit } => cmd_sessions(limit),
         Command::Session { id, dup_only } => cmd_session(id, dup_only),
+        Command::Export { id, output } => cmd_export(id, output.as_deref()),
         Command::Trim {
             path,
             output,
@@ -1027,4 +1043,99 @@ fn count_wav(dir: &std::path::Path) -> usize {
 
 fn resolve_models_dir() -> Option<std::path::PathBuf> {
     TalkSageService::resolve_models_dir()
+}
+
+fn open_store() -> Option<talksage_session::SessionStore> {
+    let db = talksage_config::default_data_dir().join("sessions.db");
+    match talksage_session::SessionStore::open(&db.to_string_lossy()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("打开会话库失败: {e}（数据库: {}）", db.display());
+            None
+        }
+    }
+}
+
+fn cmd_sessions(limit: u32) -> ExitCode {
+    let Some(store) = open_store() else { return ExitCode::FAILURE };
+    let list = match store.list_sessions(limit) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("列出会话失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if list.is_empty() {
+        println!("（无会话记录）");
+        return ExitCode::SUCCESS;
+    }
+    println!("{:>5}  {:<20}  {:>8}  {}", "ID", "开始时间", "时长(s)", "摘要");
+    println!("{}", "-".repeat(60));
+    for r in &list {
+        let started = chrono_fmt(r.started_at);
+        let duration = r.ended_at.map(|e| (e - r.started_at).max(0)).unwrap_or(0);
+        let quality = r.quality.as_deref().unwrap_or("-");
+        println!("{:>5}  {:<20}  {:>8}  segs={} quality={}", r.id, started, duration, r.segment_count, quality);
+    }
+    ExitCode::SUCCESS
+}
+
+fn cmd_export(id: Option<i64>, output: Option<&str>) -> ExitCode {
+    let Some(store) = open_store() else { return ExitCode::FAILURE };
+    let session_id = match id {
+        Some(i) => i,
+        None => match store.list_sessions(1) {
+            Ok(list) if !list.is_empty() => list[0].id,
+            _ => {
+                eprintln!("无会话记录");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let detail = match store.get_session(session_id) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("读取会话 #{session_id} 失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let md = talksage_session::export_markdown(&detail);
+    let path = output
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("session-{session_id}.md")));
+    match std::fs::write(&path, &md) {
+        Ok(()) => {
+            println!("已导出会话 #{session_id}（{} 段）→ {}", detail.segments.len(), path.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("写入 {} 失败: {e}", path.display());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn chrono_fmt(unix_secs: i64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+    let Some(t) = UNIX_EPOCH.checked_add(Duration::from_secs(unix_secs as u64)) else {
+        return unix_secs.to_string();
+    };
+    let secs_today = unix_secs % 86400;
+    let h = secs_today / 3600;
+    let m = (secs_today % 3600) / 60;
+    let s = secs_today % 60;
+    let days = unix_secs / 86400;
+    let epoch_days = 719_162i64; // 1970-01-01 距离公历0001-01-01的天数
+    let z = days + epoch_days;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    let _ = t;
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02}")
 }
