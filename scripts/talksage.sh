@@ -26,8 +26,9 @@ cd "$ROOT"
 # 项目目录会导致已安装的 cargo/rustc 消失。仅把依赖构建产物留在仓库内。
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 export SHERPA_ONNX_ARCHIVE_DIR="$ROOT/.tools/sherpa-onnx-archives"
-# TALKSAGE_DATA_DIR: 外部已设则沿用；否则默认使用项目内 .dev-data（方便调试）
-export TALKSAGE_DATA_DIR="${TALKSAGE_DATA_DIR:-$ROOT/.dev-data}"
+# TALKSAGE_DATA_DIR: 外部已设则沿用（配置 + 数据目录）；未设时用程序默认
+# 的 ~/.talksage。开发期如需项目内隔离，显式 export TALKSAGE_DATA_DIR 后再运行。
+export TALKSAGE_DATA_DIR="${TALKSAGE_DATA_DIR:-$HOME/.talksage}"
 DATA_DIR="$TALKSAGE_DATA_DIR"
 export TALKSAGE_MODELS_DIR="$ROOT/models"
 

@@ -81,7 +81,8 @@ fn list_plugin_status(state: tauri::State<'_, AppState>) -> Vec<talksage_plugins
 }
 
 /// 把配置解析后的真实录音目录加入 asset 协议只读范围。
-/// 开发脚本会把数据放在仓库 `.tools/data`，它不属于 Tauri `$DATA_DIR`。
+/// 录音目录来自配置 data_dir（默认 ~/.talksage，或 TALKSAGE_DATA_DIR），
+/// 它可能不属于 Tauri 的 `$DATA_DIR`（例如用户自定义目录）。
 fn allow_recording_assets(app: &tauri::AppHandle, config: &ConfigManager) -> Result<(), String> {
     let dir = config.snapshot().recording.resolve_dir(config.data_dir());
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建录音目录失败 {}: {e}", dir.display()))?;

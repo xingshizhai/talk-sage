@@ -22,8 +22,8 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
 环境变量自动设置（本脚本进程内）:
   CARGO_HOME=$PWD\.cargo-home  SHERPA_ONNX_ARCHIVE_DIR=$PWD\.tools\sherpa-onnx-archives
   TALKSAGE_MODELS_DIR=$PWD\models
-  TALKSAGE_DATA_DIR: 外部已设则沿用；未设则默认 $PWD\.dev-data（调试数据与生产隔离）
-    首次使用：cp config\talksage.example.toml .dev-data\talksage.toml 然后填入 API Key
+  TALKSAGE_DATA_DIR: 外部已设则沿用（配置 + 数据目录）；未设则用默认 ~/.talksage
+    首次使用：.\scripts\talksage.ps1 dev 会自动从 config\talksage.example.toml 初始化配置文件
 代理: 设置 $env:https_proxy / $env:http_proxy 后运行本脚本即可。
 #>
 
@@ -45,9 +45,11 @@ Set-Location $Root
 $env:HTTP_PROXY = ""; $env:HTTPS_PROXY = ""; $env:http_proxy = ""; $env:https_proxy = ""
 $env:CARGO_HOME = Join-Path $Root ".cargo-home"
 $env:SHERPA_ONNX_ARCHIVE_DIR = Join-Path $Root ".tools\sherpa-onnx-archives"
-# TALKSAGE_DATA_DIR: 外部已设则沿用；否则默认使用项目内 .dev-data（方便调试）
+# TALKSAGE_DATA_DIR: 外部已设则沿用（含配置文件目录）；未设时使用程序默认
+# 的 ~/.talksage（配置文件与数据都在那里）。开发期如需项目内隔离，显式设置
+# $env:TALKSAGE_DATA_DIR 后再运行本脚本。
 if (-not $env:TALKSAGE_DATA_DIR) {
-    $env:TALKSAGE_DATA_DIR = Join-Path $Root ".dev-data"
+    Write-Host "提示: 未设置 TALKSAGE_DATA_DIR，将使用默认配置目录 ~/.talksage" -ForegroundColor DarkGray
 }
 $env:TALKSAGE_MODELS_DIR = Join-Path $Root "models"
 $CargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
@@ -58,14 +60,15 @@ $ReleaseExe = Join-Path $Root "target\release\talksage-app.exe"
 
 function Write-Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 
-# 确保开发数据目录存在，首次自动从模板初始化配置文件
+# 确保配置目录存在，首次自动从模板初始化配置文件。
+# 配置目录 = TALKSAGE_DATA_DIR（外部已设）或 ~/.talksage（程序默认）。
 function Ensure-DevData {
-    $devData = $env:TALKSAGE_DATA_DIR
+    $devData = if ($env:TALKSAGE_DATA_DIR) { $env:TALKSAGE_DATA_DIR } else { Join-Path $env:USERPROFILE ".talksage" }
     $config  = Join-Path $devData "talksage.toml"
     $template = Join-Path $Root "config/talksage.example.toml"
     if (-not (Test-Path $devData)) {
         New-Item -ItemType Directory -Force $devData | Out-Null
-        Write-Host "已创建开发数据目录: $devData" -ForegroundColor Green
+        Write-Host "已创建配置目录: $devData" -ForegroundColor Green
     }
     if (-not (Test-Path $config)) {
         if (Test-Path $template) {
@@ -150,12 +153,11 @@ function Cmd-Build {
     Pop-Location
     if ($code2 -ne 0) { Write-Host "前端构建失败" -ForegroundColor Red; return 1 }
     Write-Host "`n编译完成: target\debug\talksage.exe"
-    $devData = Join-Path $Root ".dev-data"
-    if (-not (Test-Path (Join-Path $devData "talksage.toml"))) {
-        Write-Host "提示: 尚未配置开发数据目录，运行以下命令初始化:" -ForegroundColor Yellow
-        Write-Host "  New-Item -ItemType Directory -Force .dev-data | Out-Null" -ForegroundColor Yellow
-        Write-Host "  Copy-Item config\talksage.example.toml .dev-data\talksage.toml" -ForegroundColor Yellow
-        Write-Host "  然后在 .dev-data\talksage.toml 中填入 API Key 等配置" -ForegroundColor Yellow
+    $cfgDir = if ($env:TALKSAGE_DATA_DIR) { $env:TALKSAGE_DATA_DIR } else { Join-Path $env:USERPROFILE ".talksage" }
+    if (-not (Test-Path (Join-Path $cfgDir "talksage.toml"))) {
+        Write-Host "提示: 尚未初始化配置文件，运行 .\scripts\talksage.ps1 dev 会自动从模板创建:" -ForegroundColor Yellow
+        Write-Host "  $cfgDir\talksage.toml" -ForegroundColor Yellow
+        Write-Host "  或设置环境变量 TALKSAGE_DATA_DIR 指向自定义配置目录后重跑" -ForegroundColor Yellow
     }
 }
 
@@ -280,7 +282,8 @@ function Cmd-Package {
 }
 
 function Cmd-Logs {
-    $logDir = Join-Path $env:TALKSAGE_DATA_DIR "logs"
+    $dataDir = if ($env:TALKSAGE_DATA_DIR) { $env:TALKSAGE_DATA_DIR } else { Join-Path $env:USERPROFILE ".talksage" }
+    $logDir = Join-Path $dataDir "logs"
     if (-not (Test-Path $logDir)) { Write-Host "无日志目录: $logDir"; return }
     $log = Get-ChildItem $logDir -Filter "talksage.log.*" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $log) { Write-Host "无日志文件"; return }

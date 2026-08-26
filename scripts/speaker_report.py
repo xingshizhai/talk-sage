@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import os
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -17,9 +18,19 @@ PATTERN = re.compile(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="汇总声纹判定原因与相似度")
-    parser.add_argument("paths", nargs="*", help="日志路径或 glob；默认 .tools/data/logs/talksage.log.*")
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        help="日志路径或 glob；默认 <TALKSAGE_DATA_DIR|~/.talksage>/logs/talksage.log.*",
+    )
     args = parser.parse_args()
-    patterns = args.paths or [".tools/data/logs/talksage.log.*"]
+    if args.paths:
+        patterns = args.paths
+    else:
+        data_dir = os.environ.get("TALKSAGE_DATA_DIR") or os.path.join(
+            os.path.expanduser("~"), ".talksage"
+        )
+        patterns = [os.path.join(data_dir, "logs", "talksage.log.*")]
     files = sorted({Path(p) for pattern in patterns for p in glob.glob(pattern)})
     decisions: Counter[str] = Counter()
     labels: Counter[str] = Counter()
