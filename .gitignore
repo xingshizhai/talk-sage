@@ -1,3 +1,7 @@
+# 本机环境覆盖（每台开发机各自维护，不入库）
+scripts/talksage.local.ps1
+scripts/talksage.local.sh
+
 # Python (legacy v1 — 已删除，保留条目防止残留)
 .venv/
 __pycache__/

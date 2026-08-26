@@ -70,6 +70,11 @@ if (Test-Path $CargoBin) { $env:Path = "$CargoBin;" + $env:Path }
 $CliExe = Join-Path $Root "target\debug\talksage.exe"
 $ReleaseExe = Join-Path $Root "target\release\talksage-app.exe"
 
+# 本机环境覆盖（不入库）：复制 scripts\talksage.local.example.ps1 为 talksage.local.ps1
+# 并按需修改路径，用于 Vulkan SDK / LLVM 安装到非默认位置的情况。
+$LocalEnv = Join-Path $PSScriptRoot "talksage.local.ps1"
+if (Test-Path $LocalEnv) { . $LocalEnv }
+
 function Write-Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 
 # 确保配置目录存在，首次自动从模板初始化配置文件。
