@@ -839,7 +839,16 @@ export default function App() {
                 : `${lines.length} 段 · ${mode === "timeline" ? "时间线" : mode === "focus" ? "专注" : "密集"}`}
               lines={importing || importDone ? importLines : lines}
             />
-            {!importing && !importDone && <KeyPointsCard points={points} />}
+            {!importing && !importDone && (
+              <KeyPointsCard
+                points={points}
+                pluginLabel={
+                  config?.plugins?.["key_point_extractor"]?.enabled === false
+                    ? "已禁用"
+                    : "本地规则"
+                }
+              />
+            )}
           </>
         )}
 

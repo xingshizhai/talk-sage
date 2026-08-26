@@ -11,7 +11,7 @@ const KIND_COLOR: Record<string, { fg: string; bg: string }> = {
   其他: { fg: "var(--muted)", bg: "var(--surface-2)" },
 };
 
-export default function KeyPointsCard({ points }: { points: readonly KeyPoint[] }) {
+export default function KeyPointsCard({ points, pluginLabel }: { points: readonly KeyPoint[]; pluginLabel?: string }) {
   return (
     <section
       style={{
@@ -29,6 +29,11 @@ export default function KeyPointsCard({ points }: { points: readonly KeyPoint[] 
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
         <span style={{ width: 6, height: 6, borderRadius: 2, background: "var(--live)" }} />
         <b style={{ fontSize: 13 }}>要点聚合</b>
+        {pluginLabel && (
+          <span style={{ fontSize: 10, color: "var(--muted)", padding: "1px 6px", borderRadius: 4, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+            {pluginLabel}
+          </span>
+        )}
         <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>{points.length}</span>
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--pad)", display: "flex", flexDirection: "column", gap: 9 }}>
