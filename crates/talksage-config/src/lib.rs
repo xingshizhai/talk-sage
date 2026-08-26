@@ -153,7 +153,7 @@ impl Default for SceneParams {
 /// 刻意不依赖插件层（依赖方向是「pipeline 实现、plugins 定义」），所以两处
 /// 各存一份；一致性由 talksage-pipeline 的 `scene_allowlist` 测试锁住。
 fn all_analysis_plugins() -> Vec<String> {
-    ["term_explainer", "translator", "brief_retriever", "key_point_extractor"]
+    ["term_explainer", "translator", "brief_retriever", "key_point_extractor", "key_point_llm"]
         .iter()
         .map(|s| s.to_string())
         .collect()
@@ -196,7 +196,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             language: "zh".into(),
             client_language: "zh".into(),
             translation_mode: TranslationMode::Off,
-            plugin_allowlist: ["term_explainer", "brief_retriever", "key_point_extractor"].iter().map(|s| s.to_string()).collect(),
+            plugin_allowlist: ["term_explainer", "brief_retriever", "key_point_extractor", "key_point_llm"].iter().map(|s| s.to_string()).collect(),
             speaker_mode: SpeakerMode::Channel,
             noise_auto_detect: true,
         },
@@ -1409,7 +1409,7 @@ min_segment_ms = 600
         assert_eq!(p.language, "zh");
         assert_eq!(
             p.plugin_allowlist,
-            vec!["term_explainer", "brief_retriever", "key_point_extractor"]
+            vec!["term_explainer", "brief_retriever", "key_point_extractor", "key_point_llm"]
         );
         assert_eq!(p.speaker_mode, SpeakerMode::Channel);
         assert_eq!(p.translation_mode, TranslationMode::Off);
@@ -1517,7 +1517,7 @@ knob = 42
     #[test]
     fn dictation_scene_allows_no_analysis_plugins() {
         let allow = scene_params(SceneMode::Dictation).plugin_allowlist;
-        for id in ["term_explainer", "translator", "brief_retriever", "key_point_extractor"] {
+        for id in ["term_explainer", "translator", "brief_retriever", "key_point_extractor", "key_point_llm"] {
             assert!(!allow.contains(&id.to_string()), "听写模式不应允许 {id}");
         }
     }
@@ -1525,7 +1525,7 @@ knob = 42
     #[test]
     fn meeting_scene_allows_all_analysis_plugins() {
         let allow = scene_params(SceneMode::Meeting).plugin_allowlist;
-        for id in ["term_explainer", "translator", "brief_retriever", "key_point_extractor"] {
+        for id in ["term_explainer", "translator", "brief_retriever", "key_point_extractor", "key_point_llm"] {
             assert!(allow.contains(&id.to_string()), "会议模式应允许 {id}");
         }
     }
@@ -1533,7 +1533,7 @@ knob = 42
     #[test]
     fn bilingual_scene_allows_all_analysis_plugins() {
         let allow = scene_params(SceneMode::Bilingual).plugin_allowlist;
-        for id in ["term_explainer", "translator", "brief_retriever", "key_point_extractor"] {
+        for id in ["term_explainer", "translator", "brief_retriever", "key_point_extractor", "key_point_llm"] {
             assert!(allow.contains(&id.to_string()), "双语模式应允许 {id}");
         }
     }

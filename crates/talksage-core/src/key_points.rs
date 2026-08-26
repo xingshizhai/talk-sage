@@ -92,8 +92,20 @@ pub fn extract_key_points(text: &str) -> Vec<ExtractedKeyPoint> {
         let Some(category) = classify_sentence(&sentence) else {
             continue;
         };
-        let min_len = if category == KeyPointCategory::Action { 6 } else { 8 };
+        // 长度门槛：滤掉口语碎片（"12 13不是"、"就是大家下午"）。
+        // 强信号类别（决策/要求/技术/显式问句）关键词本身足够可信，门槛低；
+        // 行动项与句中疑问词需要更多实义字符才可信。
+        let min_len = match category {
+            KeyPointCategory::Question => 6,
+            KeyPointCategory::Decision | KeyPointCategory::Requirement | KeyPointCategory::Technical => 6,
+            KeyPointCategory::Action => 8,
+            _ => 12,
+        };
         if sentence.chars().count() < min_len {
+            continue;
+        }
+        // 纯数字/极短碎片（如 "17个17个"、"第17个"）没有独立价值，滤掉。
+        if category == KeyPointCategory::Action && looks_like_fragment(&sentence) {
             continue;
         }
         if !seen.insert(sentence.clone()) {
@@ -114,6 +126,17 @@ pub fn extract_key_points(text: &str) -> Vec<ExtractedKeyPoint> {
         }
     }
     out
+}
+
+/// 口语碎片启发：大量数字/编号或缺少实义动词，作为行动项不可信。
+fn looks_like_fragment(s: &str) -> bool {
+    let digits = s.chars().filter(|c| c.is_ascii_digit()).count();
+    let total = s.chars().count();
+    let digit_ratio = if total > 0 { digits as f32 / total as f32 } else { 0.0 };
+    // "17个17个"、"第17个17个" 这类编号/计数碎片
+    digit_ratio > 0.25
+        // 纯应答/寒暄（"嗯对好的"、"OK行好的"）不带动作内容
+        || contains_any(s, &["嗯", "哦", "啊", "好的", "对的", "行吧", "知道了"])
 }
 
 fn split_for_kp(text: &str) -> Vec<String> {
@@ -145,7 +168,11 @@ fn classify_sentence(sentence: &str) -> Option<KeyPointCategory> {
     if is_technical(sentence) {
         return Some(KeyPointCategory::Technical);
     }
-    if has_zh_actor(sentence) && contains_any(sentence, &["交付", "提交", "发送", "安排", "跟进", "确认", "做", "完成", "给"])
+    // 兜底：含人称 + 动作词才算行动项，且要够长（"就是大家下午"这类
+    // 口语碎片虽然含"大家"，但没有具体动作，不应判为要点）。
+    if sentence.chars().count() >= 12
+        && has_zh_actor(sentence)
+        && contains_any(sentence, &["交付", "提交", "发送", "安排", "跟进", "确认", "完成", "发给", "寄"])
     {
         return Some(KeyPointCategory::Action);
     }
@@ -153,16 +180,26 @@ fn classify_sentence(sentence: &str) -> Option<KeyPointCategory> {
 }
 
 fn is_question(s: &str) -> bool {
-    s.contains('?')
-        || s.contains('？')
-        || contains_any(s, &["吗", "呢", "怎么", "什么", "多少", "能不能", "要不要", "是否"])
-        || has_any_en_word(
-            s,
-            &[
-                "what", "how", "why", "when", "where", "who", "which", "should", "could", "would", "can",
-                "do", "does", "is", "are",
-            ],
-        )
+    // 显式问号：任何长度都算
+    if s.contains('?') || s.contains('？') {
+        return true;
+    }
+    // 句末疑问词（"吗/呢/么"）是完整疑问句的强信号，短句也可信；
+    // 句中疑问词（怎么/什么/多少…）需要句子够长才值得记录。
+    let ends_with_particle = s.ends_with('吗') || s.ends_with('呢') || s.ends_with('么');
+    let long_enough = s.chars().count() >= 10;
+    if ends_with_particle {
+        return s.chars().count() >= 6;
+    }
+    long_enough
+        && (contains_any(s, &["怎么", "什么", "多少", "能不能", "要不要", "是否"])
+            || has_any_en_word(
+                s,
+                &[
+                    "what", "how", "why", "when", "where", "who", "which", "should", "could", "would",
+                    "can", "do", "does", "is", "are",
+                ],
+            ))
 }
 
 fn is_decision(s: &str) -> bool {
@@ -195,8 +232,8 @@ fn is_action(s: &str) -> bool {
     contains_any(
         s,
         &[
-            "提交", "发送", "发给", "安排", "跟进", "汇总", "整理", "确认", "通知", "联系", "更新", "上线",
-            "交付", "截止", "之前", "之后", "明天", "下周", "本周", "月底", "月初", "下午", "上午",
+            "提交", "发送", "发给", "安排", "跟进", "汇总", "整理", "通知", "联系", "更新", "上线",
+            "交付", "截止", "明天", "下周", "本周", "月底", "月初",
         ],
     ) || s.contains('约')
         || has_any_en_word(

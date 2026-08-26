@@ -26,6 +26,8 @@ struct State {
     pending: Vec<DomainEvent>,
     /// 上次触发 LLM 的时间（用于 tail 超时触发）。
     last_flush: Instant,
+    /// 已输出要点的归一化指纹（跨批去重：同一要点在多个批次重复出现时只发一次）。
+    seen: std::collections::HashSet<String>,
 }
 
 impl State {
@@ -34,6 +36,27 @@ impl State {
             buffer: Vec::new(),
             pending: Vec::new(),
             last_flush: Instant::now(),
+            seen: std::collections::HashSet::new(),
+        }
+    }
+
+    /// 内容归一化：小写、去空白与常见标点，用于同义要点去重。
+    fn fingerprint(content: &str) -> String {
+        content
+            .chars()
+            .filter(|c| !c.is_whitespace() && !matches!(c, '，' | '。' | '、' | '；' | '：' | ',' | '.' | '?' | '？' | '!' | '！' | '"' | '“' | '”' | ' '))
+            .flat_map(|c| c.to_lowercase())
+            .collect()
+    }
+
+    fn is_duplicate(&self, content: &str) -> bool {
+        self.seen.contains(&Self::fingerprint(content))
+    }
+
+    fn remember(&mut self, content: &str) {
+        let fp = Self::fingerprint(content);
+        if fp.chars().count() >= 6 {
+            self.seen.insert(fp);
         }
     }
 }
@@ -112,18 +135,22 @@ impl SegmentObserver for KeyPointLlmObserver {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
-            let events: Vec<DomainEvent> = points
-                .into_iter()
-                .enumerate()
-                .map(|(i, (category, content))| DomainEvent::KeyPoint {
+            let mut g = self.state.lock().unwrap();
+            let mut events: Vec<DomainEvent> = Vec::new();
+            for (i, (category, content)) in points.into_iter().enumerate() {
+                if g.is_duplicate(&content) {
+                    log::debug!("key_point_llm: 跳过重复要点: {content}");
+                    continue;
+                }
+                g.remember(&content);
+                events.push(DomainEvent::KeyPoint {
                     result_id: format!("kp-llm-{ts_ms}-{i}"),
                     status: ResultStatus::Final,
                     category,
                     content,
                     ts_ms,
-                })
-                .collect();
-            let mut g = self.state.lock().unwrap();
+                });
+            }
             g.pending.extend(events);
         }
 
@@ -168,8 +195,10 @@ impl Plugin for KeyPointLlmPlugin {
 // ── Prompt & Parser ─────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT: &str = "\
-你是专业的会议记录助理。从会议转写片段中识别重要要点。\
-要点必须是实质性内容，忽略废话、客套和日常寒暄。\
+你是专业的会议记录助理。从会议转写片段中提炼会议核心要点。\
+要点必须是实质性内容：决策、要求、行动项、待解决问题、技术方案等。\
+忽略废话、客套、寒暄、确认性应答（嗯/对/好的）、以及不完整的口语碎片。\
+相同或相近内容合并为一条。\
 只返回 JSON 数组，不加任何其他文字或 Markdown 格式。";
 
 fn build_prompt(texts: &[String]) -> String {
@@ -181,10 +210,15 @@ fn build_prompt(texts: &[String]) -> String {
         .join("\n");
 
     format!(
-        "以下是会议转写片段：\n{numbered}\n\n\
-请提取其中的关键要点，返回 JSON 数组，每个元素包含：\n\
+        "以下是会议转写片段（可能含口语噪音，请先理解上下文再提炼）：\n{numbered}\n\n\
+请提炼其中的核心要点，返回 JSON 数组，每个元素包含：\n\
 - category: \"requirement\"（要求/需求）| \"decision\"（决策）| \"action\"（行动项）| \"question\"（待解答问题）| \"technical\"（技术方案）| \"other\"（其他重要事项）\n\
-- content: 要点精炼表述，≤40字，不含引号\n\n\
+- content: 一句话概括要点，陈述完整、主语明确、不含口语语气词，≤40字\n\n\
+要求：\n\
+1. 只保留**会议核心**：决策、明确的要求、具体的行动项、未决问题、关键技术结论；\n\
+2. 多条片段讲同一件事时合并成一条；\n\
+3. 跳过寒暄、确认应答、语气词、不完整的半句话；\n\
+4. 宁可少而精，不要多而碎。\n\n\
 示例：[{{\"category\":\"action\",\"content\":\"下周前完成 API 文档更新\"}}]\n\
 若无实质性要点返回空数组 []"
     )
@@ -263,5 +297,24 @@ mod tests {
         assert!(matches!(parse_category("question"), KeyPointCategory::Question));
         assert!(matches!(parse_category("technical"), KeyPointCategory::Technical));
         assert!(matches!(parse_category("foo"), KeyPointCategory::Other));
+    }
+
+    #[test]
+    fn state_dedupes_identical_points_across_batches() {
+        let mut state = State::new();
+        assert!(!state.is_duplicate("下周前完成 API 文档更新"));
+        state.remember("下周前完成 API 文档更新");
+        // 同义但标点/大小写不同的表述应视为重复
+        assert!(state.is_duplicate("下周前完成 api 文档更新。"));
+        // 不同要点不误伤
+        assert!(!state.is_duplicate("预算不超过 20 万"));
+    }
+
+    #[test]
+    fn state_ignores_too_short_fingerprints() {
+        let mut state = State::new();
+        state.remember("好");
+        // 极短指纹不进入去重集合，避免误伤常见短句
+        assert!(!state.is_duplicate("好"));
     }
 }

@@ -1185,9 +1185,12 @@ mod tests {
         match svc.build_live_config(&StartListen::desktop()) {
             Ok(cfg) => assert!(cfg.engine_pool.is_some()),
             Err(e) => {
+                // 无模型/无 GPU 环境下会因模型缺失或阿里云路由探测失败而提前返回；
+                // 这类环境性错误不算 bug，断言只要不 panic 即可。
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("models") || msg.contains("VAD") || msg.contains("ASR"),
+                    msg.contains("models") || msg.contains("VAD") || msg.contains("ASR")
+                        || msg.contains("GPU") || msg.contains("阿里云"),
                     "unexpected error: {msg}"
                 );
             }
