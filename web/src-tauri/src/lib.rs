@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use talksage_audio::AudioHub;
 use talksage_config::ConfigManager;
 use talksage_core::{DomainEvent, StatusStage};
-use talksage_pipeline::{AudioInput, RunningListen, StartListen, TalkSageService};
+use talksage_pipeline::{AudioInput, ClientCapture, RunningListen, StartListen, TalkSageService};
 use talksage_asr::{EngineKind, EnginePool};
 use talksage_session::SessionStore;
 
@@ -542,9 +542,10 @@ async fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) 
     let service = state.service.clone();
     let running = state.running.clone();
     let cfg = state.config.snapshot();
-    let user_input = match cfg.audio.audio_source.as_str() {
-        "loopback" => AudioInput::Loopback,
-        _ => AudioInput::Mic(None),
+    let (user_input, client) = match cfg.audio.audio_source.as_str() {
+        // 回环模式：user 流采集扬声器输出，client 流关闭（否则两路都开回环会冲突）
+        "loopback" => (AudioInput::Loopback, ClientCapture::Off),
+        _ => (AudioInput::Mic(None), ClientCapture::Auto),
     };
     tauri::async_runtime::spawn_blocking(move || {
         // 检查 + start + 写入整体持锁，语义与同步版本一致；但这是在阻塞线程池
@@ -553,7 +554,7 @@ async fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) 
         if guard.is_some() {
             return Err("已在监听中".into());
         }
-        let req = StartListen { user_input, ..StartListen::desktop() };
+        let req = StartListen { user_input, client, ..StartListen::desktop() };
         let started = service
             .start(
                 req,
