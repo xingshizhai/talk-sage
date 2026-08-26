@@ -196,12 +196,21 @@ impl crate::SegmentEngine for AliyunEngine {
                 match sess.rx.try_recv() {
                     Ok(AliyunEvent::Final(t)) => { final_text = t; break; }
                     Ok(AliyunEvent::Partial(t)) => { final_text = t; }
-                    Ok(AliyunEvent::Error(e)) => { log::warn!("finish 时收到错误: {e}"); break; }
+                    Ok(AliyunEvent::Error(e)) => {
+                        // IDLE_TIMEOUT 在无语音段时属正常结束，不需要警告
+                        if !e.contains("IDLE_TIMEOUT") {
+                            log::warn!("finish 时收到错误: {e}");
+                        }
+                        break;
+                    }
                     Ok(AliyunEvent::Ready) => {}
                     Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
                 }
             }
         }
+        // 段结束后总是重置 session，下段建立新连接，避免复用已关闭的后台 task
+        self.session = None;
+        self.current_partial.clear();
         final_text
     }
 

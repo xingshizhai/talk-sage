@@ -22,7 +22,7 @@ pub use wav::{part_path_of, read_wav, recover_orphan_recordings, WavRecorder};
 pub const TARGET_SAMPLE_RATE: u32 = 16000;
 
 /// 采集 → 处理循环的有界队列容量（帧）。满载记录 overrun 并丢帧，不阻塞系统音频回调。
-pub const CAPTURE_QUEUE_CAP: usize = 32;
+pub const CAPTURE_QUEUE_CAP: usize = 512;
 
 /// 采集发送端：`try_push` 永不阻塞。
 #[derive(Clone)]
