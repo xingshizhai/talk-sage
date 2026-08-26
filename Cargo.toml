@@ -23,6 +23,11 @@ edition = "2021"
 license = "GPL-3.0-only"
 repository = ""
 
+# Windows whisper.cpp Vulkan：fork whisper-rs-sys，让 whisper.cpp 以静态 CRT（/MT）
+# 编译，与 sherpa-onnx 官方静态库一致，避免 MSVC 运行时双重链接（LNK2005）。
+[patch.crates-io]
+whisper-rs-sys = { path = "vendor/whisper-rs-sys" }
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

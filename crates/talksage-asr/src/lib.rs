@@ -22,7 +22,6 @@ pub mod aliyun;
 
 /// GPU 后端检测（CUDA / CoreML / CPU）。
 pub mod gpu;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu")))]
 mod metal;
 pub use gpu::GpuBackend;
