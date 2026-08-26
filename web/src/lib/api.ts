@@ -436,6 +436,15 @@ export interface AppApi {
   readLogs(lines?: number): Promise<string>;
   /** 订阅领域事件流，返回取消函数。 */
   onEvent(handler: (ev: DomainEvent) => void): () => void;
+  /** 打开系统文件对话框，选择一个 WAV 录音文件；用户取消时返回 null。 */
+  pickAudioFile(): Promise<string | null>;
+  /** 导入本地录音文件：全量转写并落库，返回创建的 session_id。
+   *  转写期间通过 onImportEvent 推送进度；可调用 cancelFileImport 中止。 */
+  startFileImport(path: string): Promise<number>;
+  /** 取消正在进行的文件导入。 */
+  cancelFileImport(): Promise<void>;
+  /** 订阅文件导入事件流（独立频道，不影响实时转写），返回取消函数。 */
+  onImportEvent(handler: (ev: DomainEvent) => void): () => void;
   /** 传输载体标识（调试用）。 */
   readonly transport: "ipc" | "http";
 }

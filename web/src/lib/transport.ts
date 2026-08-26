@@ -172,6 +172,33 @@ export const ipcApi: AppApi = {
       unlisten?.();
     };
   },
+
+  async pickAudioFile(): Promise<string | null> {
+    return invoke<string | null>("pick_audio_file");
+  },
+
+  async startFileImport(path: string): Promise<number> {
+    return invoke<number>("start_file_import", { path });
+  },
+
+  async cancelFileImport(): Promise<void> {
+    await invoke("cancel_file_import");
+  },
+
+  onImportEvent(handler: (ev: DomainEvent) => void): () => void {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    listen<DomainEvent>("talksage://import-event", (e) => handler(e.payload))
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch((err) => console.error("failed to listen import events:", err));
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  },
 };
 
 /** headless 服务适配器（浏览器访问，M4）。 */
@@ -348,6 +375,22 @@ export const httpApi: AppApi = {
     };
     ws.onerror = () => console.error("ws error");
     return () => ws.close();
+  },
+
+  async pickAudioFile(): Promise<string | null> {
+    throw new Error("headless 模式不支持本地文件对话框");
+  },
+
+  async startFileImport(_path: string): Promise<number> {
+    throw new Error("headless 模式不支持文件导入");
+  },
+
+  async cancelFileImport(): Promise<void> {
+    // headless 无文件导入
+  },
+
+  onImportEvent(_handler: (ev: DomainEvent) => void): () => void {
+    return () => {};
   },
 };
 

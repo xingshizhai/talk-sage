@@ -24,6 +24,7 @@ export default function SideNav({
   healthRows,
   listening,
   paused,
+  importing,
   onToggleListen,
   onTogglePause,
   onNavigate,
@@ -39,6 +40,7 @@ export default function SideNav({
   healthRows: HealthRow[];
   listening: boolean;
   paused: boolean;
+  importing?: boolean;
   onToggleListen: () => void;
   onTogglePause: () => void;
   onNavigate: (key: string) => void;
@@ -187,19 +189,21 @@ export default function SideNav({
         <div style={{ display: "flex", gap: 6 }}>
           <button
             onClick={onToggleListen}
-            title="开始/停止（⌘/Ctrl+Shift+L）"
+            disabled={importing && !listening}
+            title={importing && !listening ? "文件导入中，无法同时监听" : "开始/停止（⌘/Ctrl+Shift+L）"}
             style={{
               flex: 1,
               padding: "9px 0",
               borderRadius: 9,
               border: "none",
               fontWeight: 600,
-              cursor: "pointer",
+              cursor: importing && !listening ? "not-allowed" : "pointer",
               background: listening ? "var(--danger)" : "var(--live)",
               color: "#fff",
+              opacity: importing && !listening ? 0.45 : 1,
             }}
           >
-            {listening ? "⏹ 停止" : "▶ 开始监听"}
+            {listening ? "⏹ 停止" : importing ? "⏳ 导入中..." : "▶ 开始监听"}
           </button>
           {listening && (
             <button

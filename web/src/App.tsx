@@ -88,6 +88,13 @@ export default function App() {
   const [showDebug, setShowDebug] = useState(false);
   // 关闭窗口确认（监听中点击 X → 弹窗确认；避免误关丢掉未收尾的会话）
   const [confirmClose, setConfirmClose] = useState(false);
+  // 文件导入状态
+  const [importing, setImporting] = useState(false);
+  const [importFile, setImportFile] = useState<string | null>(null);
+  const [importLines, setImportLines] = useState<TimelineLine[]>([]);
+  const [importDone, setImportDone] = useState(false);
+  const [importSessionId, setImportSessionId] = useState<number | null>(null);
+  const importAccRef = useRef(new TranscriptAccumulator());
   const [noiseLevel, setNoiseLevel] = useState(0); // 0..100（UI 百分比）
   const prevNoiseRef = useRef(-1);
   // onCloseRequested 只注册一次，用 ref 取最新监听状态，避免闭包过期
@@ -261,6 +268,32 @@ export default function App() {
     };
   }, []);
 
+  // 文件导入事件：独立频道，与实时转写不干扰
+  useEffect(() => {
+    const off = api.onImportEvent((ev: DomainEvent) => {
+      if (ev.type === "segment") {
+        const acc = importAccRef.current;
+        acc.push(ev);
+        setImportLines(
+          acc.getLines().map((l) => {
+            const st = speakerStyle(l.speakerLabel);
+            return {
+              key: l.key,
+              time: fmtTime(l.tsMs),
+              speaker: l.speakerLabel,
+              speakerColor: st.color,
+              engine: st.engine,
+              text: l.text,
+              isPartial: l.isPartial,
+              translation: undefined,
+            };
+          }),
+        );
+      }
+    });
+    return () => off();
+  }, []);
+
   const currentSceneLabel = config ? SCENE_LABELS[config.scene.mode] : "加载中…";
 
   const asrBackendLabel = (() => {
@@ -281,7 +314,7 @@ export default function App() {
   ];
 
   const navItems: NavItem[] = [
-    { key: "transcript", label: "实时转写", dot: "var(--live)", badge: String(lines.length), active: navPage === "transcript" },
+    { key: "transcript", label: "转写", dot: importing ? "var(--brief)" : listening ? "var(--live)" : "var(--muted)", badge: importing ? String(importLines.length) : String(lines.length), active: navPage === "transcript" },
     { key: "history", label: "历史会话", dot: "var(--term)", badge: String(sessions.length), active: navPage === "history" },
     { key: "models", label: "模型管理", dot: "var(--client)", badge: "", active: navPage === "models" },
     { key: "settings", label: "设置", dot: "var(--brief)", badge: "", active: navPage === "settings" },
@@ -491,6 +524,48 @@ export default function App() {
     }
   }, [listening, paused]);
 
+  /** 打开文件选择器，选中后开始文件导入转写。 */
+  const handleFileImport = useCallback(async () => {
+    if (listening || importing) return;
+    const path = await api.pickAudioFile();
+    if (!path) return;
+    const filename = path.replace(/\\/g, "/").split("/").pop() ?? path;
+    importAccRef.current = new TranscriptAccumulator();
+    setImportLines([]);
+    setImportFile(filename);
+    setImportDone(false);
+    setImportSessionId(null);
+    setImporting(true);
+    setNavPage("transcript");
+    try {
+      const sid = await api.startFileImport(path);
+      setImportSessionId(sid);
+      setImportDone(true);
+    } catch (e) {
+      const msg = String(e);
+      if (!msg.includes("已取消")) {
+        window.alert(`导入失败：${msg}`);
+      }
+      setImportFile(null);
+    } finally {
+      setImporting(false);
+    }
+  }, [listening, importing]);
+
+  /** 取消正在进行的文件导入。 */
+  const handleCancelImport = useCallback(async () => {
+    await api.cancelFileImport().catch(() => {});
+  }, []);
+
+  /** 重置文件导入区域，回到空白状态。 */
+  const handleResetImport = useCallback(() => {
+    setImportFile(null);
+    setImportLines([]);
+    setImportDone(false);
+    setImportSessionId(null);
+    importAccRef.current = new TranscriptAccumulator();
+  }, []);
+
   /** 确认关闭：先优雅停止监听（会话落库、录音收尾），再退出应用。 */
   const handleConfirmClose = useCallback(async () => {
     setConfirmClose(false);
@@ -575,6 +650,7 @@ export default function App() {
         healthRows={healthRows}
         listening={listening}
         paused={paused}
+        importing={importing}
         onToggleListen={handleListen}
         onTogglePause={handlePause}
 
@@ -703,16 +779,60 @@ export default function App() {
               </div>
             )}
 
+            {/* 文件导入：进度条 / 完成操作栏 */}
+            {(importing || importDone) && importFile && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 14px", background: "var(--surface-2)", borderRadius: 9, border: "1px solid var(--border)", fontSize: 13, flexWrap: "wrap" }}>
+                {importing
+                  ? <span style={{ color: "var(--brief)", fontWeight: 600 }}>● 转写中</span>
+                  : <span style={{ color: "var(--live)", fontWeight: 600 }}>✓ 转写完成</span>
+                }
+                <span style={{ color: "var(--muted)" }}>{importFile}</span>
+                <span style={{ color: "var(--muted)", fontSize: 11 }}>{importLines.length} 段</span>
+                <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                  {importing && (
+                    <button onClick={handleCancelImport} style={{ padding: "4px 12px", borderRadius: 7, cursor: "pointer", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)" }}>
+                      取消
+                    </button>
+                  )}
+                  {importDone && importSessionId != null && (
+                    <>
+                      <button
+                        onClick={() => { setNavPage("history"); void refreshHistory(); }}
+                        style={{ padding: "4px 12px", borderRadius: 7, cursor: "pointer", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)" }}
+                      >
+                        查看历史
+                      </button>
+                      <button onClick={handleResetImport} style={{ padding: "4px 12px", borderRadius: 7, cursor: "pointer", border: "none", background: "var(--live)", color: "#fff", fontWeight: 600 }}>
+                        新导入
+                      </button>
+                    </>
+                  )}
+                </span>
+              </div>
+            )}
+
+            {/* 空闲状态：输入源选择器 */}
+            {!listening && !importing && !importDone && (
+              <div style={{ display: "flex", gap: 10, padding: "10px 0" }}>
+                <button
+                  onClick={handleFileImport}
+                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 18px", borderRadius: 9, cursor: "pointer", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)", fontSize: 13 }}
+                >
+                  📂 导入录音文件
+                </button>
+                <span style={{ alignSelf: "center", fontSize: 11, color: "var(--muted)" }}>或使用左侧"开始监听"进行实时转写 · 支持 WAV 格式</span>
+              </div>
+            )}
+
             <TranscriptCard
               mode={mode}
-              setMode={(m) => {
-                setMode(m);
-                saveTranscriptMode(m);
-              }}
-              meta={`${lines.length} 段 · ${mode === "timeline" ? "时间线" : mode === "focus" ? "专注" : "密集"}`}
-              lines={lines}
+              setMode={(m) => { setMode(m); saveTranscriptMode(m); }}
+              meta={importing || importDone
+                ? `${importLines.length} 段 · 文件导入`
+                : `${lines.length} 段 · ${mode === "timeline" ? "时间线" : mode === "focus" ? "专注" : "密集"}`}
+              lines={importing || importDone ? importLines : lines}
             />
-            <KeyPointsCard points={points} />
+            {!importing && !importDone && <KeyPointsCard points={points} />}
           </>
         )}
 

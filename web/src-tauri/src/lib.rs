@@ -34,6 +34,8 @@ pub struct AppState {
     running: Arc<Mutex<Option<RunningListen>>>,
     /// 进行中的模型下载（引擎 id → 取消标志）。下载开始注册、结束/取消移除。
     downloads: Arc<Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
+    /// 文件导入取消标志（None = 未在导入中）。
+    import_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
 }
 
 /// 版本。
@@ -852,6 +854,105 @@ fn get_gpu_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
     })
 }
 
+/// 打开系统文件对话框，让用户选择一个 WAV 录音文件。返回绝对路径，用户取消时返回 null。
+#[tauri::command]
+fn pick_audio_file() -> Option<String> {
+    rfd::FileDialog::new()
+        .add_filter("WAV 录音", &["wav"])
+        .set_title("选择录音文件")
+        .pick_file()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// 导入本地录音文件：全量转写 + 落库，转写期间逐段向前端推送 `talksage://import-event`。
+/// 异步命令：在阻塞线程池运行，不冻结 UI；文件转写完毕（或取消）后返回。
+#[tauri::command]
+async fn start_file_import(
+    path: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<i64, String> {
+    // 实时监听中禁止同时导入
+    {
+        let g = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+        if g.is_some() {
+            return Err("实时监听中，请先停止再导入文件".into());
+        }
+    }
+    // 已有导入任务在跑
+    {
+        let g = state.import_cancel.lock().map_err(|_| "导入锁失败".to_string())?;
+        if g.is_some() {
+            return Err("已有文件在导入中".into());
+        }
+    }
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut g = state.import_cancel.lock().map_err(|_| "导入锁失败".to_string())?;
+        *g = Some(cancel.clone());
+    }
+
+    let service = state.service.clone();
+    let import_cancel = state.import_cancel.clone();
+    let cfg = state.config.snapshot();
+    let engine_kind = EngineKind::from_name(&cfg.asr.engine_zh).unwrap_or(EngineKind::ParaformerZh);
+    let path_buf = PathBuf::from(&path);
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let done = Arc::new(AtomicBool::new(false));
+        let done2 = done.clone();
+        let app2 = app.clone();
+
+        let running = service
+            .start(
+                talksage_pipeline::StartListen::import_file(path_buf, engine_kind, "说话人".into()),
+                Arc::new(move |ev: DomainEvent| {
+                    if matches!(&ev, DomainEvent::Status { stage: StatusStage::Idle, .. }) {
+                        done2.store(true, Ordering::SeqCst);
+                    }
+                    let _ = app2.emit("talksage://import-event", &ev);
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let deadline = Instant::now() + Duration::from_secs(7200); // 最长 2 小时
+        while !done.load(Ordering::SeqCst)
+            && !cancel.load(Ordering::SeqCst)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        let cancelled = cancel.load(Ordering::SeqCst);
+        let sid = service.finish(running).map_err(|e| e.to_string())?;
+
+        if cancelled {
+            Err("已取消".to_string())
+        } else {
+            sid.ok_or_else(|| "导入完成但未创建会话（落库未启用）".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 无论成功还是取消，都清除 cancel 标志
+    let mut g = state.import_cancel.lock().unwrap_or_else(|e| e.into_inner());
+    *g = None;
+
+    result
+}
+
+/// 取消正在进行的文件导入。
+#[tauri::command]
+fn cancel_file_import(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let g = state.import_cancel.lock().map_err(|_| "导入锁失败".to_string())?;
+    if let Some(flag) = g.as_ref() {
+        flag.store(true, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
 /// 整理会中已落库要点（历史详情；无 LLM 时返回错误，前端提示）。
 #[tauri::command]
 fn generate_highlights(session_id: i64, state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
@@ -898,6 +999,7 @@ pub fn run() {
             service,
             running: Arc::new(Mutex::new(None)),
             downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            import_cancel: Arc::new(Mutex::new(None)),
         })
         .invoke_handler(tauri::generate_handler![
             get_version,
@@ -929,7 +1031,10 @@ pub fn run() {
             export_session_markdown,
             generate_highlights,
             read_logs,
-            get_gpu_status
+            get_gpu_status,
+            pick_audio_file,
+            start_file_import,
+            cancel_file_import
         ])
         .setup(move |app| {
             if let Err(e) = std::fs::create_dir_all(&data_dir) {
