@@ -39,6 +39,7 @@ export interface AppConfig {
    */
   plugins: Record<string, { enabled?: boolean; [key: string]: unknown }>;
   audio: {
+    audio_source: "mic" | "loopback";
     input_gain_db: number;
     vad: { preset: "standard" | "sensitive" | "strict"; threshold: number | null };
     denoise: { enabled: boolean; gate_threshold: number; highpass: boolean };

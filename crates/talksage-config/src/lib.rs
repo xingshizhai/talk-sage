@@ -596,6 +596,9 @@ impl Default for AsrConfig {
 pub struct AudioConfig {
     pub mic_device: Option<i32>,
     pub loopback_device: Option<i32>,
+    /// 采集源："mic"（麦克风，默认）| "loopback"（系统音频，用于视频会议识别对方）。
+    #[serde(default = "AudioConfig::default_audio_source")]
+    pub audio_source: String,
     /// 麦克风输入增益（dB，0..24）；声道选择后、录音和 ASR 前应用。
     pub input_gain_db: f32,
     pub ducking: DuckingConfig,
@@ -608,11 +611,16 @@ pub struct AudioConfig {
     pub min_segment_ms: Option<u64>,
 }
 
+impl AudioConfig {
+    fn default_audio_source() -> String { "mic".into() }
+}
+
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             mic_device: None,
             loopback_device: None,
+            audio_source: Self::default_audio_source(),
             input_gain_db: 12.0,
             ducking: DuckingConfig::default(),
             vad: VadConfig::default(),
@@ -1092,6 +1100,7 @@ fn merge_config(default: Config, user: Config) -> Config {
         audio: AudioConfig {
             mic_device: user.audio.mic_device.or(default.audio.mic_device),
             loopback_device: user.audio.loopback_device.or(default.audio.loopback_device),
+            audio_source: take_or(user.audio.audio_source, default.audio.audio_source),
             input_gain_db: user.audio.input_gain_db.clamp(0.0, 24.0),
             ducking: DuckingConfig {
                 enabled: user.audio.ducking.enabled,

@@ -118,6 +118,7 @@ export default function SettingsSection({
   const [terminologyCorrections, setTerminologyCorrections] = useState(
     Object.entries(config?.asr?.terminology?.corrections ?? {}).map(([wrong, right]) => `${wrong} => ${right}`).join("\n")
   );
+  const [audioSource, setAudioSource] = useState<"mic" | "loopback">(config?.audio?.audio_source ?? "mic");
   const [vadPreset, setVadPreset] = useState<string>(config?.audio?.vad?.preset ?? "standard");
   const [denoiseEnabled, setDenoiseEnabled] = useState(config?.audio?.denoise?.enabled ?? false);
   const [highpass, setHighpass] = useState(config?.audio?.denoise?.highpass ?? true);
@@ -373,6 +374,7 @@ export default function SettingsSection({
           },
         },
         audio: {
+          audio_source: audioSource,
           input_gain_db: inputGainDb,
           vad: { preset: vadPreset },
           denoise: {
@@ -887,6 +889,34 @@ export default function SettingsSection({
       {/* ── 音频处理 ── */}
       {tab === "audio" && (
         <div>
+          <h3 style={groupTitle}>采集来源</h3>
+          <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+            {([
+              { value: "mic",      icon: "🎙", label: "麦克风", desc: "采集本地麦克风，适合单人讲话、面对面会议" },
+              { value: "loopback", icon: "🔊", label: "系统音频", desc: "采集扬声器输出，视频会议时识别对方讲话" },
+            ] as const).map(({ value, icon, label, desc }) => (
+              <button
+                key={value}
+                onClick={() => setAudioSource(value)}
+                title={desc}
+                style={{
+                  flex: 1, padding: "10px 8px", borderRadius: 9, cursor: "pointer", textAlign: "left",
+                  border: audioSource === value ? "2px solid var(--live)" : "1px solid var(--border)",
+                  background: audioSource === value ? "color-mix(in srgb, var(--live) 10%, var(--surface-2))" : "var(--surface-2)",
+                  color: "var(--text)",
+                }}
+              >
+                <div style={{ fontSize: 18, marginBottom: 3 }}>{icon} {label}</div>
+                <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.4 }}>{desc}</div>
+              </button>
+            ))}
+          </div>
+          {audioSource === "loopback" && (
+            <div style={{ fontSize: 12, color: "var(--brief)", marginBottom: 6, padding: "6px 10px", background: "color-mix(in srgb, var(--brief) 8%, var(--surface-2))", borderRadius: 7 }}>
+              💡 系统音频模式仅支持 Windows，且只采集扬声器输出（对方的声音）。自己的发言不会被采集，适合只需记录对方内容的场景。
+            </div>
+          )}
+
           <h3 style={groupTitle}>识别灵敏度（VAD）</h3>
           <select
             value={vadPreset}
