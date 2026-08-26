@@ -146,6 +146,14 @@ export const ipcApi: AppApi = {
     return invoke("export_session_markdown", { sessionId });
   },
 
+  async exportSessionText(sessionId: number): Promise<{ path: string; content: string }> {
+    return invoke("export_session_text", { sessionId });
+  },
+
+  async exportSessionAudio(sessionId: number): Promise<string> {
+    return invoke("export_session_audio", { sessionId });
+  },
+
   async generateHighlights(sessionId: number): Promise<string[]> {
     return invoke("generate_highlights", { sessionId });
   },
@@ -364,6 +372,37 @@ export const httpApi: AppApi = {
     const r = await fetch(`/api/session/${sessionId}/export`, { headers });
     if (!r.ok) throw new Error(`导出失败: HTTP ${r.status}`);
     return { path: "", content: await r.text() };
+  },
+
+  async exportSessionText(sessionId: number): Promise<{ path: string; content: string }> {
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers["X-Talksage-Token"] = token;
+    const r = await fetch(`/api/session/${sessionId}/export-text`, { headers });
+    if (!r.ok) throw new Error(`导出失败: HTTP ${r.status}`);
+    return { path: "", content: await r.text() };
+  },
+
+  async exportSessionAudio(sessionId: number): Promise<string> {
+    // headless：触发浏览器下载（attachment 响应），返回提示文本
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers["X-Talksage-Token"] = token;
+    const r = await fetch(`/api/session/${sessionId}/export-audio`, { headers });
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      throw new Error(body ? body : `导出失败: HTTP ${r.status}`);
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `session-${sessionId}.wav`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return "";
   },
 
   async generateHighlights(sessionId: number): Promise<string[]> {

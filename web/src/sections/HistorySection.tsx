@@ -1,6 +1,6 @@
 // 历史面板：会话列表 + 全文搜索 + 详情查看（含质量/统计/录音回放）+ 纪要生成 + 删除。
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { NotesTemplate, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "../lib/api";
 import { recordingUrl } from "../lib/transport";
 import { punctuateAndSplit } from "../lib/transcript";
@@ -69,6 +69,8 @@ export default function HistorySection({
   onGenerateNotes,
   onGenerateTrio,
   onExportMarkdown,
+  onExportText,
+  onExportAudio,
   onGenerateHighlights,
   onDeleteSession,
   onDeleteSessions,
@@ -85,6 +87,8 @@ export default function HistorySection({
   onGenerateNotes: (templateId: string) => void;
   onGenerateTrio: (meetingName: string, meetingDescription: string) => void;
   onExportMarkdown: (id: number) => Promise<string>;
+  onExportText: (id: number) => Promise<string>;
+  onExportAudio: (id: number) => Promise<string>;
   onGenerateHighlights: (id: number) => Promise<string[]>;
   onDeleteSession: (id: number) => void;
   onDeleteSessions: (ids: number[]) => void;
@@ -102,9 +106,35 @@ export default function HistorySection({
   // 三段式智能纪要：会议名称/说明（可选）
   const [meetingName, setMeetingName] = useState("");
   const [meetingDescription, setMeetingDescription] = useState("");
-  // 导出状态消息（Markdown 已保存路径 / 下载提示）
+  // 导出状态消息（已保存路径 / 下载提示）
   const [exportMsg, setExportMsg] = useState("");
-  const [exporting, setExporting] = useState(false);
+  const [exporting, setExporting] = useState<"markdown" | "text" | "audio" | null>(null);
+
+  /** 导出会话内容：markdown / text / audio。桌面端返回落盘路径，浏览器模式触发下载。 */
+  const runExport = useCallback(
+    async (kind: "markdown" | "text" | "audio") => {
+      if (!detail || exporting) return;
+      setExporting(kind);
+      setExportMsg("");
+      try {
+        if (kind === "markdown") {
+          const path = await onExportMarkdown(detail.id);
+          setExportMsg(path ? `已导出：${path}` : "已开始下载（浏览器模式）");
+        } else if (kind === "text") {
+          const path = await onExportText(detail.id);
+          setExportMsg(path ? `已导出：${path}` : "已开始下载（浏览器模式）");
+        } else {
+          const path = await onExportAudio(detail.id);
+          setExportMsg(path ? `已导出录音：${path}` : "已开始下载（浏览器模式）");
+        }
+      } catch (e) {
+        setExportMsg(`导出失败：${e}`);
+      } finally {
+        setExporting(null);
+      }
+    },
+    [detail, exporting, onExportMarkdown, onExportText, onExportAudio],
+  );
   // LLM 整理后的核心要点（历史详情）
   const [aiHighlights, setAiHighlights] = useState<string[]>([]);
   const [hlBusy, setHlBusy] = useState(false);
@@ -516,18 +546,25 @@ export default function HistorySection({
 
           <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <button
-              onClick={async () => {
-                setExporting(true);
-                setExportMsg("");
-                const path = await onExportMarkdown(detail.id);
-                setExporting(false);
-                if (path) setExportMsg(`已导出：${path}`);
-                else if (detail.id) setExportMsg("已开始下载（浏览器模式）");
-              }}
-              disabled={exporting}
+              onClick={() => void runExport("markdown")}
+              disabled={exporting !== null}
               style={{ fontSize: 12 }}
             >
-              {exporting ? "导出中…" : "导出 Markdown"}
+              {exporting === "markdown" ? "导出中…" : "导出 Markdown"}
+            </button>
+            <button
+              onClick={() => void runExport("text")}
+              disabled={exporting !== null}
+              style={{ fontSize: 12 }}
+            >
+              {exporting === "text" ? "导出中…" : "导出文本"}
+            </button>
+            <button
+              onClick={() => void runExport("audio")}
+              disabled={exporting !== null}
+              style={{ fontSize: 12 }}
+            >
+              {exporting === "audio" ? "导出中…" : "导出录音"}
             </button>
             <button
               onClick={() => confirmDelete(detail.id)}

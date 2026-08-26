@@ -431,6 +431,10 @@ export interface AppApi {
   generateTrioNotes(sessionId: number, meetingName?: string, meetingDescription?: string): Promise<TrioSummary>;
   /** 导出会话为 Markdown 单文件（转写 + 纪要 + 指标 + 质量；path 为桌面端落盘路径，headless 为空）。 */
   exportSessionMarkdown(sessionId: number): Promise<{ path: string; content: string }>;
+  /** 导出会话为纯文本转写（无 Markdown 标记；path 为桌面端落盘路径，headless 为空）。 */
+  exportSessionText(sessionId: number): Promise<{ path: string; content: string }>;
+  /** 导出会话完整录音（桌面端复制到 exports/ 返回落盘路径；headless 触发浏览器下载）。 */
+  exportSessionAudio(sessionId: number): Promise<string>;
   /** 整理会中要点（历史详情；需配置 LLM）。 */
   generateHighlights(sessionId: number): Promise<string[]>;
   /** 验证 LLM 连接（设置页「检查」按钮）：用表单当前值（可未保存）发最小请求。 */

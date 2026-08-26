@@ -818,6 +818,40 @@ fn export_session_markdown(session_id: i64, state: tauri::State<'_, AppState>) -
     Ok(serde_json::json!({ "path": path.display().to_string(), "content": content }))
 }
 
+/// 导出会话为纯文本转写（无 Markdown 标记），写入
+/// `<data_dir>/exports/session-{id}.txt` 并返回内容。
+#[tauri::command]
+fn export_session_text(session_id: i64, state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
+    let content = talksage_session::export_transcript_text(&detail);
+    let dir = state.config.data_dir().join("exports");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建导出目录失败: {e}"))?;
+    let path = dir.join(format!("session-{session_id}.txt"));
+    std::fs::write(&path, &content).map_err(|e| format!("写入导出文件失败: {e}"))?;
+    Ok(serde_json::json!({ "path": path.display().to_string(), "content": content }))
+}
+
+/// 导出会话完整录音（master 双声道，单流时复用分轨），复制到
+/// `<data_dir>/exports/session-{id}.wav` 并返回路径。无录音时返回可读错误。
+#[tauri::command]
+fn export_session_audio(session_id: i64, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
+    let master = detail
+        .meta
+        .as_ref()
+        .and_then(|m| m.master_recording.clone())
+        .ok_or_else(|| "该会话没有完整录音（可能未开启录音，或录音文件缺失）".to_string())?;
+    let src = std::path::PathBuf::from(&master);
+    if !src.is_file() {
+        return Err(format!("录音文件不存在: {}", src.display()));
+    }
+    let dir = state.config.data_dir().join("exports");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建导出目录失败: {e}"))?;
+    let dst = dir.join(format!("session-{session_id}.wav"));
+    std::fs::copy(&src, &dst).map_err(|e| format!("复制录音失败: {e}"))?;
+    Ok(dst.display().to_string())
+}
+
 /// GPU 后端状态（加速后端探测）。
 #[tauri::command]
 fn get_gpu_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
@@ -1100,6 +1134,8 @@ pub fn run() {
             generate_notes,
             generate_trio_notes,
             export_session_markdown,
+            export_session_text,
+            export_session_audio,
             generate_highlights,
             test_llm,
             read_logs,

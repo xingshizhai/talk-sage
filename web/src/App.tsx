@@ -482,6 +482,42 @@ export default function App() {
     [],
   );
 
+  /** 导出会话为纯文本转写（无 Markdown 标记）。 */
+  const handleExportText = useCallback(
+    async (id: number): Promise<string> => {
+      try {
+        const { path, content } = await api.exportSessionText(id);
+        const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `session-${id}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+        return path;
+      } catch (e) {
+        console.error("导出失败:", e);
+        alert(`导出失败: ${e}`);
+        return "";
+      }
+    },
+    [],
+  );
+
+  /** 导出会话完整录音（桌面端复制到 exports/ 并返回路径；浏览器模式直接下载）。 */
+  const handleExportAudio = useCallback(
+    async (id: number): Promise<string> => {
+      try {
+        return await api.exportSessionAudio(id);
+      } catch (e) {
+        console.error("导出录音失败:", e);
+        alert(`导出录音失败: ${e}`);
+        return "";
+      }
+    },
+    [],
+  );
+
   /** 新监听会话必须从空白的实时上下文开始；暂停/继续不调用此方法。 */
   const resetLiveSession = useCallback(() => {
     accumulatorRef.current.reset();
@@ -874,6 +910,8 @@ export default function App() {
                 onGenerateNotes={handleGenerateNotes}
                 onGenerateTrio={handleGenerateTrio}
                 onExportMarkdown={handleExportMarkdown}
+                onExportText={handleExportText}
+                onExportAudio={handleExportAudio}
                 onGenerateHighlights={async (id) => api.generateHighlights(id)}
                 onDeleteSession={handleDeleteSession}
                 onDeleteSessions={handleDeleteSessions}

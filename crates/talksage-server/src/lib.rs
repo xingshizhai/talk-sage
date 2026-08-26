@@ -96,6 +96,8 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/session/{id}/notes", axum::routing::post(generate_notes_api))
         .route("/session/{id}/trio-notes", axum::routing::post(generate_trio_notes_api))
         .route("/session/{id}/export", get(export_session_api))
+        .route("/session/{id}/export-text", get(export_session_text_api))
+        .route("/session/{id}/export-audio", get(export_session_audio_api))
         .route("/session/{id}/highlights", axum::routing::post(generate_highlights_api))
         .route("/llm/test", axum::routing::post(test_llm_api))
         .route("/logs", get(read_logs_api))
@@ -850,6 +852,56 @@ async fn export_session_api(State(state): State<ServerState>, headers: axum::htt
         md,
     )
         .into_response()
+}
+
+/// 导出纯文本转写（无 Markdown 标记）。
+async fn export_session_text_api(State(state): State<ServerState>, headers: axum::http::HeaderMap, AxumPath(id): AxumPath<i64>) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let Ok(detail) = state.sessions.get_session(id) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "会话不存在" }))).into_response();
+    };
+    let text = talksage_session::export_transcript_text(&detail);
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/plain; charset=utf-8"))],
+        text,
+    )
+        .into_response()
+}
+
+/// 导出完整录音（master wav）为文件下载。
+async fn export_session_audio_api(State(state): State<ServerState>, headers: axum::http::HeaderMap, AxumPath(id): AxumPath<i64>) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let Ok(detail) = state.sessions.get_session(id) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "会话不存在" }))).into_response();
+    };
+    let Some(master) = detail.meta.as_ref().and_then(|m| m.master_recording.clone()) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "该会话没有完整录音（可能未开启录音，或录音文件缺失）" }))).into_response();
+    };
+    let src = std::path::PathBuf::from(&master);
+    if !src.is_file() {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": format!("录音文件不存在: {}", src.display()) }))).into_response();
+    }
+    let filename = format!("session-{id}.wav");
+    match tokio::fs::read(&src).await {
+        Ok(bytes) => {
+            let mut resp = axum::response::Response::new(axum::body::Body::from(bytes));
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("audio/wav"),
+            );
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_DISPOSITION,
+                axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")).unwrap(),
+            );
+            resp.into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("读取录音失败: {e}") }))).into_response(),
+    }
 }
 
 /// 整理会中已落库要点（历史详情；无 LLM 配置时 400）。

@@ -248,6 +248,27 @@ pub fn export_markdown(detail: &SessionDetail) -> String {
     md
 }
 
+/// 纯文本转写导出（无 Markdown 标记）：`[说话人] 文本` 逐行，附带开始时间。
+/// 用于粘贴进邮件/文档/笔记，或作为语音标注素材。
+pub fn export_transcript_text(detail: &SessionDetail) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("会话 #{}{}\n", detail.id, fmt_unix_line(detail.started_at)));
+    out.push_str(&format!("（{} 段）\n\n", detail.segments.len()));
+    let origin_ms = detail.started_at.max(0) as u64 * 1000;
+    for s in &detail.segments {
+        let offset_secs = s.ts_ms.saturating_sub(origin_ms) / 1000;
+        let mm = offset_secs / 60;
+        let ss = offset_secs % 60;
+        out.push_str(&format!("[{:02}:{:02}] [{}] {}\n", mm, ss, s.speaker_label, s.text));
+    }
+    out
+}
+
+/// Unix 秒 → "YYYY-MM-DD HH:MM"（与 [`fmt_unix`] 相同的 civil date 算法，前缀不同）。
+fn fmt_unix_line(secs: i64) -> String {
+    format!("（开始于 {}）", fmt_unix(secs))
+}
+
 /// Unix 秒 → "YYYY-MM-DD HH:MM"（UTC；无 chrono 依赖，Hinnant civil date 算法）。
 fn fmt_unix(secs: i64) -> String {
     let days = secs.div_euclid(86400);
@@ -1175,6 +1196,23 @@ mod tests {
         assert!(md.contains("We need NPI samples by Friday."));
         assert!(md.contains("[我]"));
         assert!(md.contains("我们确认可以安排。"));
+    }
+
+    #[test]
+    fn export_transcript_text_plain_lines_with_timestamps() {
+        let s = store();
+        let id = s.start_session(0).unwrap();
+        s.add_segment(id, &seg(0, "我", "大家好")).unwrap();
+        s.add_segment(id, &seg(1, "客户", "请介绍方案")).unwrap();
+        s.end_session(id, 1000).unwrap();
+        let detail = s.get_session(id).unwrap();
+
+        let text = export_transcript_text(&detail);
+        assert!(text.contains("[00:0"), "应有相对时间戳 mm:ss: {text}");
+        assert!(text.contains("[我] 大家好"), "应含说话人与文本: {text}");
+        assert!(text.contains("[客户] 请介绍方案"), "应含第二段: {text}");
+        assert!(!text.contains("**"), "纯文本不应含 Markdown 标记: {text}");
+        assert!(!text.contains("##"), "纯文本不应含标题标记: {text}");
     }
 
     #[test]
