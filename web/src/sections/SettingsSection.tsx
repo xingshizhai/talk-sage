@@ -13,15 +13,14 @@ const VOICE_ENROLL_SECONDS = 16;
 const VOICE_ENROLL_TEXT =
   "你好，我正在为拓思者录制声音标识。今天阳光明亮，我会清楚、自然、连续地读完这段文字。会议结束后，请帮我整理重点、时间和下一步行动。";
 
-type SettingsTab = "scene" | "asr" | "audio" | "terminology" | "plugins" | "recording" | "quality" | "voice" | "llm" | "webhooks";
+type SettingsTab = "scene" | "asr" | "audio" | "terminology" | "plugins" | "quality" | "voice" | "llm" | "webhooks";
 
 const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "scene", label: "场景模式", desc: "听写 / 会话 / 双语 / 会议 / 课堂 / 自定义" },
   { key: "asr", label: "ASR 转写", desc: "引擎 / 输入增益" },
-  { key: "audio", label: "音频处理", desc: "灵敏度 / 断句 / 降噪" },
+  { key: "audio", label: "音频与录音", desc: "采集 / 灵敏度 / 断句 / 降噪 / 录音" },
   { key: "terminology", label: "术语纠错", desc: "热词与误识别替换" },
   { key: "plugins", label: "插件分析", desc: "术语 / 翻译 / 简报 / 知识库" },
-  { key: "recording", label: "会议录音", desc: "录音开关与目录" },
   { key: "quality", label: "噪音检测", desc: "会话质量阈值" },
   { key: "voice", label: "声音标识", desc: "注册主人声音，识别说话人" },
   { key: "llm", label: "LLM", desc: "默认模型与密钥" },
@@ -1021,6 +1020,20 @@ export default function SettingsSection({
             ms（0 = 不限制）
           </label>
           <div style={hint}>噪音会话中偶发的「哒/咔」等短段会污染转写与历史；设为 400~800ms 可在不丢正常语句的前提下滤掉它们（下次监听生效）。</div>
+
+          <h3 style={{ ...groupTitle, marginTop: 10 }}>录音保存</h3>
+          <label style={labelBlock}>
+            <input type="checkbox" checked={recEnabled} onChange={(e) => setRecEnabled(e.target.checked)} /> 监听时保存录音（用户流 + 客户流）
+          </label>
+          <input
+            value={recDir}
+            onChange={(e) => setRecDir(e.target.value)}
+            placeholder="录音目录（留空 = 数据目录/recordings）"
+            style={{ ...inputStyle, width: "100%" }}
+          />
+          <div style={hint}>
+            保存的录音用于历史回放与测试闭环：<code style={{ color: "var(--term)" }}>talksage trim &lt;录音.wav&gt;</code> 去掉静音后，再回放验证转写。
+          </div>
         </div>
       )}
 
@@ -1081,25 +1094,6 @@ export default function SettingsSection({
             style={{ ...inputStyle, width: "100%" }}
           />
           <div style={hint}>知识库命中后，客户发言的相关简报显示在右侧「知识库命中」卡片。</div>
-        </div>
-      )}
-
-      {/* ── 会议录音 ── */}
-      {tab === "recording" && (
-        <div>
-          <h3 style={groupTitle}>会议录音</h3>
-          <label style={labelBlock}>
-            <input type="checkbox" checked={recEnabled} onChange={(e) => setRecEnabled(e.target.checked)} /> 监听时保存录音（用户流 + 客户流）
-          </label>
-          <input
-            value={recDir}
-            onChange={(e) => setRecDir(e.target.value)}
-            placeholder="录音目录（留空 = 数据目录/recordings）"
-            style={{ ...inputStyle, width: "100%" }}
-          />
-          <div style={hint}>
-            录音用于测试闭环：<code style={{ color: "var(--term)" }}>talksage trim &lt;录音.wav&gt;</code> 去掉静音后，再回放验证转写。
-          </div>
         </div>
       )}
 
