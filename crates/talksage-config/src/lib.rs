@@ -1241,6 +1241,29 @@ fn apply_env_overrides(cfg: &mut Config) {
             cfg.llm.default = v.trim().to_string();
         }
     }
+    // 敏感字段：模板建议用环境变量覆盖（不写入 talksage.toml）
+    if let Ok(v) = env::var("TALKSAGE_LLM_API_KEY") {
+        if !v.trim().is_empty() {
+            if let Some(p) = cfg.llm.providers.get_mut(&cfg.llm.default) {
+                p.api_key = v.trim().to_string();
+            }
+        }
+    }
+    if let Ok(v) = env::var("ALIYUN_ACCESS_ID") {
+        if !v.trim().is_empty() {
+            cfg.asr.aliyun_access_key_id = v.trim().to_string();
+        }
+    }
+    if let Ok(v) = env::var("ALIYUN_ACCESS_SECRET") {
+        if !v.trim().is_empty() {
+            cfg.asr.aliyun_access_key_secret = v.trim().to_string();
+        }
+    }
+    if let Ok(v) = env::var("ALIYUN_APP_ID") {
+        if !v.trim().is_empty() {
+            cfg.asr.aliyun_app_key = v.trim().to_string();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1314,6 +1337,31 @@ min_segment_ms = 600
         assert_eq!(mgr.snapshot().server.port, 7070);
         unsafe {
             std::env::remove_var("TALKSAGE_SERVER_PORT");
+        }
+    }
+
+    /// 模板建议的敏感字段环境变量（TALKSAGE_LLM_API_KEY / ALIYUN_*）必须真正生效。
+    #[test]
+    fn env_overrides_sensitive_fields() {
+        let _env = env_lock();
+        unsafe {
+            std::env::set_var("TALKSAGE_LLM_API_KEY", "sk-env-test");
+            std::env::set_var("ALIYUN_ACCESS_ID", "akid-env");
+            std::env::set_var("ALIYUN_ACCESS_SECRET", "aksec-env");
+            std::env::set_var("ALIYUN_APP_ID", "appkey-env");
+        }
+        let mgr = ConfigManager::load(None, None).unwrap();
+        let snap = mgr.snapshot();
+        // 默认 provider 是 deepseek
+        assert_eq!(snap.llm.providers["deepseek"].api_key, "sk-env-test");
+        assert_eq!(snap.asr.aliyun_access_key_id, "akid-env");
+        assert_eq!(snap.asr.aliyun_access_key_secret, "aksec-env");
+        assert_eq!(snap.asr.aliyun_app_key, "appkey-env");
+        unsafe {
+            std::env::remove_var("TALKSAGE_LLM_API_KEY");
+            std::env::remove_var("ALIYUN_ACCESS_ID");
+            std::env::remove_var("ALIYUN_ACCESS_SECRET");
+            std::env::remove_var("ALIYUN_APP_ID");
         }
     }
 

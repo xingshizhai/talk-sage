@@ -4502,6 +4502,7 @@ dependencies = [
 name = "talksage-config"
 version = "0.1.2"
 dependencies = [
+ "log",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

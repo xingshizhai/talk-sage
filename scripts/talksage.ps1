@@ -73,7 +73,7 @@ function Ensure-DevData {
             Write-Host "已从模板初始化配置文件: $config" -ForegroundColor Green
             Write-Host "提示: 编辑该文件填写 API Key 等配置（LLM 要点聚合 / 术语解释需要）" -ForegroundColor Yellow
         } else {
-            Write-Host "警告: 未找到配置模板 talksage.example.toml，将使用内置默认值运行" -ForegroundColor Yellow
+            Write-Host "警告: 未找到配置模板 config\talksage.example.toml，将使用内置默认值运行" -ForegroundColor Yellow
         }
     }
 }
