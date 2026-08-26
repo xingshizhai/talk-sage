@@ -227,4 +227,5 @@ models/            runtime models (gitignored, ~1.2 GB, multi-engine optional)
 
 ## License
 
-MIT
+[GNU General Public License v3.0](LICENSE)
+

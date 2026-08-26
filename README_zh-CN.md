@@ -221,4 +221,5 @@ models/            运行期模型（gitignore，约 1.2GB，多引擎可选）
 
 ## 许可证
 
-MIT
+[GNU 通用公共许可证第 3 版（GPLv3）](LICENSE)
+
