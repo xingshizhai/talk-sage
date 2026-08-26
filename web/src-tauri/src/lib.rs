@@ -212,7 +212,7 @@ async fn download_model(
     // 外层（注册表清理）单独持有一份 engine_id
     let cleanup_engine = engine_id.clone();
     log::info!("桌面模型下载任务已提交: engine={} root={}", engine_id, root.display());
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let emit_app = app.clone();
         let emit_engine = engine_id.clone();
         let emit = move |stage: &str, percent: u32, message: &str| {
@@ -264,13 +264,12 @@ async fn download_model(
         }
     })
     .await
-    .map_err(|e| e.to_string())?
-    .map(|_| {
-        // 无论成功/失败/取消，下载结束都要从注册表移除
-        if let Ok(mut dl) = state.downloads.lock() {
-            dl.remove(&cleanup_engine);
-        }
-    })
+    .map_err(|e| e.to_string())?;
+    // 无论成功/失败/取消，下载结束都要从注册表移除
+    if let Ok(mut dl) = state.downloads.lock() {
+        dl.remove(&cleanup_engine);
+    }
+    result
 }
 
 /// 取消正在进行的模型下载（置位取消标志；下载线程会尽快停止并清理临时文件）。

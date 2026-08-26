@@ -10,6 +10,7 @@ export default function ModelsSection({ listening }: { listening: boolean }) {
   const [asrModels, setAsrModels] = useState<AsrModelInfo[]>([]);
   const [modelProgress, setModelProgress] = useState<Record<string, DomainEvent & { type: "model_progress" }>>({});
   const [modelBusy, setModelBusy] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState<string | null>(null);
   const [message, setMessage] = useState("");
 
   useEffect(() => {
@@ -24,6 +25,7 @@ export default function ModelsSection({ listening }: { listening: boolean }) {
       if (ev.type !== "model_progress") return;
       setModelProgress((prev) => ({ ...prev, [ev.engine]: ev }));
       if (ev.stage === "done" || ev.stage === "error" || ev.stage === "cancelled") {
+        setCancelling((cur) => (cur === ev.engine ? null : cur));
         api.listAsrModels().then(setAsrModels).catch(() => {});
       }
     });
@@ -59,11 +61,13 @@ export default function ModelsSection({ listening }: { listening: boolean }) {
   }
 
   async function handleCancelDownload(id: string) {
+    setCancelling(id);
     setMessage("");
     try {
       await api.cancelModelDownload(id);
       setMessage(`已请求取消: ${id}`);
     } catch (e) {
+      setCancelling(null);
       setMessage(`取消失败: ${e}`);
     }
   }
@@ -105,8 +109,8 @@ export default function ModelsSection({ listening }: { listening: boolean }) {
                 {prog && prog.stage === "done" && <div style={{ color: "var(--live)", marginTop: 2 }}>安装完成</div>}
               </div>
               {active && (prog?.stage === "downloading" || prog?.stage === "extracting") ? (
-                <button onClick={() => void handleCancelDownload(m.id)} style={{ fontSize: 12, padding: "4px 10px", cursor: "pointer" }}>
-                  取消
+                <button onClick={() => void handleCancelDownload(m.id)} disabled={cancelling === m.id} style={{ fontSize: 12, padding: "4px 10px", cursor: cancelling === m.id ? "default" : "pointer" }}>
+                  {cancelling === m.id ? "取消中…" : "取消"}
                 </button>
               ) : m.installed ? (
                 <button onClick={() => void handleRemoveModel(m.id)} disabled={busy || !!active} style={{ fontSize: 12, padding: "4px 10px", cursor: "pointer" }}>

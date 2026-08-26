@@ -35,6 +35,7 @@ config/recordings/
 config/voiceprints/
 config/tmp/
 config/models/
+config/window.json
 
 # Misc
 dist/

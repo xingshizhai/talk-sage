@@ -466,7 +466,18 @@ fn unpack_tar_bz2_strip_top(
                 std::fs::create_dir_all(parent)?;
             }
             let mut out = std::fs::File::create(&dest)?;
-            std::io::copy(&mut entry, &mut out)?;
+            // 分块拷贝：`std::io::copy` 内部阻塞且无法中途检查取消标志。
+            let mut buf = [0u8; 262144];
+            loop {
+                if cancelled(cancel) {
+                    return Err(anyhow::Error::new(DownloadCancelled));
+                }
+                let n = entry.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                out.write_all(&buf[..n])?;
+            }
         }
     }
     Ok(())
@@ -520,15 +531,25 @@ fn download_file_checked(
         existing,
         url
     );
-    let mut request = ureq::get(url);
+    // 短读超时：网络卡住时 `read()` 最多阻塞 2s 就醒来，让取消标志能及时生效；
+    // 正常下载时数据持续到达，read 立即返回，不触发超时。
+    // 注意：不能设整体超时（ureq 的 `.timeout()` 会覆盖 timeout_read，见 stream.rs
+    // "deadline 优先"逻辑），停滞保护改由读取循环里的"无进展超时"承担。
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(30))
+        .timeout_read(std::time::Duration::from_secs(2))
+        .build();
+    let mut request = agent.get(url);
     if existing > 0 {
         request = request.set("Range", &format!("bytes={existing}-"));
     }
-    let resp = request
-        // `proxy-from-env`：读取 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY（与 Python 下载脚本一致）
-        .timeout(std::time::Duration::from_secs(900))
-        .call()
-        .map_err(|e| anyhow::anyhow!("下载失败 {url}: {e}"))?;
+    let resp = request.call().map_err(|e| {
+        // 连接/响应头阶段也可能卡住：用户已点取消则报"已取消"
+        if cancelled(cancel) {
+            return anyhow::Error::new(DownloadCancelled);
+        }
+        anyhow::anyhow!("下载失败 {url}: {e}")
+    })?;
     let partial_response = resp.status() == 206 && existing > 0;
     let content_len: u64 = resp
         .header("Content-Length")
@@ -550,6 +571,10 @@ fn download_file_checked(
     }
     let mut last_logged_percent = if total > 0 { ((received * 100 / total) / 10) * 10 } else { 0 };
     let mut next_log_bytes = received.saturating_add(64 * MIB);
+    // 停滞保护：超过该时长没有任何新字节到达则放弃（替代 ureq 整体超时，
+    // 因为整体超时会覆盖 timeout_read，导致取消无法唤醒）。
+    let stall_limit = std::time::Duration::from_secs(300);
+    let mut last_data_at = std::time::Instant::now();
     loop {
         if cancelled(cancel) {
             drop(out);
@@ -557,27 +582,53 @@ fn download_file_checked(
             log::info!("模型文件下载已取消: file={} received_mb={:.1}", target.display(), received as f64 / MIB as f64);
             return Err(anyhow::Error::new(DownloadCancelled));
         }
-        let n = reader.read(&mut buf).map_err(|e| anyhow::anyhow!("读取下载流失败: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        out.write_all(&buf[..n])?;
-        received += n as u64;
-        if let Some(cb) = progress {
-            cb(received, total);
-        }
-        if total > 0 {
-            let percent = received.saturating_mul(100) / total;
-            if percent >= last_logged_percent.saturating_add(10) || received == total {
-                last_logged_percent = (percent / 10) * 10;
-                log::info!(
-                    "模型文件下载进度: file={} percent={} received_mb={:.1} total_mb={:.1}",
-                    target.display(), percent.min(100), received as f64 / MIB as f64, total as f64 / MIB as f64
-                );
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                out.write_all(&buf[..n])?;
+                received += n as u64;
+                last_data_at = std::time::Instant::now();
+                if let Some(cb) = progress {
+                    cb(received, total);
+                }
+                if total > 0 {
+                    let percent = received.saturating_mul(100) / total;
+                    if percent >= last_logged_percent.saturating_add(10) || received == total {
+                        last_logged_percent = (percent / 10) * 10;
+                        log::info!(
+                            "模型文件下载进度: file={} percent={} received_mb={:.1} total_mb={:.1}",
+                            target.display(), percent.min(100), received as f64 / MIB as f64, total as f64 / MIB as f64
+                        );
+                    }
+                } else if received >= next_log_bytes {
+                    log::info!("模型文件下载进度: file={} received_mb={:.1} total=unknown", target.display(), received as f64 / MIB as f64);
+                    next_log_bytes = received.saturating_add(64 * MIB);
+                }
             }
-        } else if received >= next_log_bytes {
-            log::info!("模型文件下载进度: file={} received_mb={:.1} total=unknown", target.display(), received as f64 / MIB as f64);
-            next_log_bytes = received.saturating_add(64 * MIB);
+            // 读超时（网络停滞/卡住）：醒来检查取消标志，未取消则继续读
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                if cancelled(cancel) {
+                    drop(out);
+                    let _ = std::fs::remove_file(&part);
+                    log::info!("模型文件下载已取消(读超时): file={} received_mb={:.1}", target.display(), received as f64 / MIB as f64);
+                    return Err(anyhow::Error::new(DownloadCancelled));
+                }
+                if last_data_at.elapsed() > stall_limit {
+                    drop(out);
+                    let _ = std::fs::remove_file(&part);
+                    anyhow::bail!(
+                        "下载停滞超过 {:.0}s 无数据（网络中断？），已清理临时文件: file={} received_mb={:.1}",
+                        stall_limit.as_secs() as f64,
+                        target.display(),
+                        received as f64 / MIB as f64
+                    );
+                }
+                continue;
+            }
+            Err(e) => return Err(anyhow::anyhow!("读取下载流失败: {e}")),
         }
     }
     out.flush()?;
@@ -777,6 +828,91 @@ mod tests {
             }
         }
         let _ = result;
+    }
+
+    /// 下载**中途**取消：服务器发送部分数据后停顿（模拟网络卡住），
+    /// 此时 read() 阻塞在 socket 上——必须靠读超时醒来检查取消标志，
+    /// 而不是一直等整体 900s 超时。回归：此前 read 无短超时，取消永远不生效。
+    #[test]
+    fn cancel_mid_download_wakes_up_on_read_timeout() {
+        use std::net::TcpListener;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let _env_guard = NETWORK_ENV_LOCK.lock().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // 服务器：发响应头 + 前 1 MiB 数据，然后挂起连接（不再发数据 = 网络卡住）
+        thread::spawn(move || {
+            if let Ok(mut s) = listener.accept().map(|(s, _)| s) {
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000000\r\n\r\n");
+                let payload = vec![0x5Au8; 65536];
+                for _ in 0..16 {
+                    if s.write_all(&payload).is_err() {
+                        break;
+                    }
+                }
+                // 之后不再发送数据，连接保持打开（阻塞 read 的场景）
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        });
+
+        let saved_http = std::env::var_os("HTTP_PROXY");
+        let saved_https = std::env::var_os("HTTPS_PROXY");
+        let saved_http_l = std::env::var_os("http_proxy");
+        let saved_https_l = std::env::var_os("https_proxy");
+        std::env::remove_var("HTTP_PROXY");
+        std::env::remove_var("HTTPS_PROXY");
+        std::env::remove_var("http_proxy");
+        std::env::remove_var("https_proxy");
+
+        let (tx, rx) = mpsc::channel();
+        let result = (|| {
+            let tmp = std::env::temp_dir().join(format!("talksage-cancel-mid-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let target = tmp.join("big.bin");
+            let cancel = std::sync::Arc::new(AtomicBool::new(false));
+            let cancel_clone = cancel.clone();
+            let target_clone = target.clone();
+            let url = format!("http://{addr}/big.bin");
+            let dl = thread::spawn(move || {
+                download_file(&url, &target_clone, None, Some(cancel_clone.as_ref()))
+            });
+            // 等下载线程把前 1 MiB 读掉、进入卡住状态，再置位取消
+            thread::sleep(Duration::from_millis(500));
+            let start = Instant::now();
+            cancel.store(true, Ordering::Relaxed);
+            let result = dl.join().expect("下载线程不应 panic");
+            let elapsed = start.elapsed();
+            let err = result.expect_err("取消标志已置位，应返回错误");
+            assert!(
+                err.downcast_ref::<DownloadCancelled>().is_some(),
+                "应返回 DownloadCancelled，实际: {err}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(30),
+                "取消应在读超时窗口内生效，实际耗时 {elapsed:?}"
+            );
+            assert!(!target.with_extension("part").exists(), ".part 应被清理");
+            assert!(!target.exists(), "目标文件不应残留");
+            let _ = std::fs::remove_dir_all(&tmp);
+            tx.send(()).unwrap();
+        })();
+
+        // 等服务器线程退出（否则 stdout 挂起）——服务器 60s 后自然退出；
+        // 测试主体完成后用 rx 同步，确保断言先于服务器清理。
+        let _ = result;
+        let _ = rx.recv_timeout(Duration::from_secs(35));
+
+        // 恢复代理环境变量
+        for (k, v) in [("HTTP_PROXY", saved_http), ("HTTPS_PROXY", saved_https), ("http_proxy", saved_http_l), ("https_proxy", saved_https_l)] {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
     }
 
     #[test]
