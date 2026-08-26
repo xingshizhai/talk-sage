@@ -486,10 +486,15 @@ impl StreamWorker {
                 false,
             )
         } else {
-            // Metal 是独立 whisper.cpp adapter，不依赖 sherpa provider。离线 bench
-            // 可能构造 CPU route，但实际引擎仍必须如实记录/隔离为 Metal。
+            // whisper.cpp GPU 是独立 adapter，不依赖 sherpa provider。离线 bench
+            // 可能构造 CPU route，但实际引擎仍必须如实记录/隔离为对应 GPU 后端。
             let provider = if cfg.engine_kind == talksage_asr::EngineKind::WhisperLargeV3TurboMetal {
-                "metal"
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { "metal" }
+                #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+                { "vulkan" }
+                #[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64"))))]
+                { "cpu" }
             } else {
                 asr_route.provider().expect("local route has provider")
             };

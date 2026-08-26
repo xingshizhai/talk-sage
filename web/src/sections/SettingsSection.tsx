@@ -909,12 +909,15 @@ export default function SettingsSection({
                 <option value="auto">自动检测</option>
                 <option value="cpu">CPU（诊断/离线）</option>
                 <option value="cuda">NVIDIA CUDA</option>
+                {import.meta.env.TAURI_ENV_PLATFORM === "windows" && (
+                  <option value="vulkan">Vulkan GPU（AMD/Intel/NVIDIA）</option>
+                )}
                 <option value="metal">Apple Metal（Apple Silicon）</option>
               </select>
             </label>
           )}
           <div style={hint}>
-            自动模式：NVIDIA 使用 CUDA + Qwen3-ASR；Apple Silicon 使用 Metal + Whisper large-v3-turbo。Intel GPU 后端尚未支持。
+            自动模式：Windows 检测到 Vulkan 用 whisper.cpp GPU（Whisper large-v3-turbo），检测到 NVIDIA CUDA 用 Qwen3-ASR；Apple Silicon 用 Metal + Whisper large-v3-turbo。
           </div>
 
           {(asrMode === "auto" || asrMode === "cloud") && (

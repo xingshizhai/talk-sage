@@ -11,6 +11,19 @@ libloading = "0.8"
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 whisper-rs = { version = "0.16", features = ["metal", "log_backend"] }
 
+[features]
+# Windows whisper.cpp Vulkan GPU 后端（同 Dictata）。编译需 VULKAN_SDK 环境变量；
+# 未启用该 feature 时，Vulkan 检测与路由自动跳过，回退 CUDA/CPU。
+# 由 workspace 根按平台开启（见根 Cargo.toml 的 talksage-asr 依赖行）。
+vulkan-gpu = [
+    "dep:whisper-rs",
+    "whisper-rs/vulkan",
+]
+
+# whisper-rs 在 Windows x64 下作为 vulkan-gpu feature 的可选依赖引入
+[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
+whisper-rs = { version = "0.16", features = ["log_backend"], optional = true }
+
 [dependencies]
 talksage-core = { path = "../talksage-core" }
 anyhow = { workspace = true }

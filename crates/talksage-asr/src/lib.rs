@@ -23,6 +23,7 @@ pub mod aliyun;
 /// GPU 后端检测（CUDA / CoreML / CPU）。
 pub mod gpu;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu")))]
 mod metal;
 pub use gpu::GpuBackend;
 
@@ -191,7 +192,7 @@ impl EngineKind {
             Self::WhisperBase => ModelProfile { kind: self, label: "Whisper base ONNX（旧模型）", languages: "multilingual", streaming: false, speed: "balanced", description: "旧 sherpa ONNX 模型，不再提供下载", selectable: false },
             Self::WhisperSmall => ModelProfile { kind: self, label: "Whisper small ONNX（旧模型）", languages: "multilingual", streaming: false, speed: "accurate", description: "旧 sherpa ONNX 模型，不再提供下载", selectable: false },
             Self::Qwen3Asr => ModelProfile { kind: self, label: "Qwen3-ASR 0.6B int8", languages: "multilingual", streaming: false, speed: "accurate", description: "CUDA/CPU 本地高精度模型；中文与专业术语优先", selectable: true },
-            Self::WhisperLargeV3TurboMetal => ModelProfile { kind: self, label: "Whisper large-v3-turbo Q5_0（Apple Metal）", languages: "multilingual", streaming: false, speed: "balanced", description: "Apple Silicon 本地 GPU 段级识别，约 547 MiB", selectable: cfg!(all(target_os = "macos", target_arch = "aarch64")) },
+            Self::WhisperLargeV3TurboMetal => ModelProfile { kind: self, label: "Whisper large-v3-turbo Q5_0（whisper.cpp GPU）", languages: "multilingual", streaming: false, speed: "balanced", description: "whisper.cpp GPU 段级识别（macOS Metal / Windows Vulkan），约 547 MiB；中文/中英混说鲁棒性好", selectable: cfg!(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"))) },
             Self::AliyunCloud => ModelProfile { kind: self, label: "阿里云实时语音", languages: "zh,en", streaming: true, speed: "realtime", description: "云端流式识别，需配置 AccessKey；无本地 GPU 时自动启用", selectable: true },
         }
     }
@@ -565,13 +566,24 @@ pub fn create_engine(kind: EngineKind, model_dir: &Path, num_threads: i32) -> an
 
 pub fn create_engine_with_options(kind: EngineKind, model_dir: &Path, num_threads: i32, options: &EngineOptions) -> anyhow::Result<Box<dyn SegmentEngine>> {
     if kind == EngineKind::WhisperLargeV3TurboMetal {
+        // whisper.cpp GPU 适配器：macOS → Metal，Windows → Vulkan。
+        // 两个平台都由 whisper-rs 按编译 feature 选择后端（use_gpu(true)）。
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
             return Ok(Box::new(metal::WhisperMetalEngine::new(model_dir, num_threads, options)?));
         }
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"))]
         {
-            anyhow::bail!("Whisper Metal 仅支持 Apple Silicon macOS");
+            return Ok(Box::new(metal::WhisperMetalEngine::new(model_dir, num_threads, options)?));
+        }
+        #[cfg(not(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"),
+        )))]
+        {
+            anyhow::bail!(
+                "whisper.cpp GPU 引擎不可用：macOS 需 Apple Silicon；Windows 需以 vulkan-gpu feature 构建（需 VULKAN_SDK）"
+            );
         }
     }
     if kind.is_streaming() {

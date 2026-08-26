@@ -84,14 +84,18 @@ fn resolve_local_backend(preference: &str, detected: GpuBackend) -> anyhow::Resu
         "cpu" => GpuBackend::None,
         "cuda" if detected == GpuBackend::Cuda => GpuBackend::Cuda,
         "coreml" | "metal" if detected == GpuBackend::Metal => GpuBackend::Metal,
+        "vulkan" | "directml" if detected == GpuBackend::Vulkan => GpuBackend::Vulkan,
         "cuda" => anyhow::bail!("已强制选择 CUDA，但当前机器未检测到 NVIDIA CUDA"),
         "coreml" | "metal" => {
             anyhow::bail!("已强制选择 CoreML/Metal，但当前 ASR 运行时未提供可用的 Apple GPU 后端")
         }
-        "intel" | "openvino" | "directml" => {
-            anyhow::bail!("Intel GPU 后端尚未实现；请使用 auto、cpu、cuda 或 coreml")
+        "vulkan" | "directml" => {
+            anyhow::bail!("已强制选择 Vulkan，但当前机器未检测到可用的 Vulkan GPU（需显卡驱动自带 Vulkan 运行时）")
         }
-        other => anyhow::bail!("未知 ASR backend `{other}`，可选值：auto、cpu、cuda、coreml"),
+        "intel" | "openvino" => {
+            anyhow::bail!("Intel GPU 后端尚未实现；请使用 auto、cpu、cuda、vulkan 或 coreml")
+        }
+        other => anyhow::bail!("未知 ASR backend `{other}`，可选值：auto、cpu、cuda、vulkan、coreml"),
     };
     Ok(AsrRoute::Local { backend })
 }
@@ -121,6 +125,20 @@ mod tests {
             resolve_asr_route("auto", "auto", GpuBackend::Metal, CLOUD).unwrap(),
             AsrRoute::Local { backend: GpuBackend::Metal }
         );
+        assert_eq!(
+            resolve_asr_route("auto", "auto", GpuBackend::Vulkan, CLOUD).unwrap(),
+            AsrRoute::Local { backend: GpuBackend::Vulkan }
+        );
+    }
+
+    #[test]
+    fn explicit_local_vulkan_accepted_when_detected() {
+        assert_eq!(
+            resolve_asr_route("local", "vulkan", GpuBackend::Vulkan, EMPTY).unwrap(),
+            AsrRoute::Local { backend: GpuBackend::Vulkan }
+        );
+        // 强制 vulkan 但机器没有 → 报可读错误
+        assert!(resolve_asr_route("local", "vulkan", GpuBackend::None, EMPTY).is_err());
     }
 
     #[test]

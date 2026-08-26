@@ -1,4 +1,10 @@
-//! Apple Silicon whisper.cpp/Metal 段级 ASR 适配器。
+//! whisper.cpp GPU 段级 ASR 适配器。
+//!
+//! 同一份 Rust 代码由 whisper-rs 按编译 feature 选择后端：
+//! - macOS（Apple Silicon）：Metal（`metal` feature）；
+//! - Windows x64：Vulkan（`vulkan` feature，AMD/Intel/NVIDIA 通吃，同 Dictata）。
+//!
+//! 引擎逻辑与后端无关：`use_gpu(true)` 由 whisper-rs 内部路由到已编译的后端。
 
 use std::path::Path;
 use std::sync::Once;
@@ -10,6 +16,12 @@ use crate::{EngineKind, EngineOptions, SegmentEngine};
 
 const MODEL_FILE: &str = "ggml-large-v3-turbo-q5_0.bin";
 static INSTALL_LOG_HOOKS: Once = Once::new();
+
+/// 后端名（日志/诊断用）。
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const BACKEND: &str = "metal";
+#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"))]
+const BACKEND: &str = "vulkan";
 
 pub struct WhisperMetalEngine {
     _context: WhisperContext,
@@ -23,23 +35,23 @@ impl WhisperMetalEngine {
     pub fn new(model_dir: &Path, num_threads: i32, options: &EngineOptions) -> anyhow::Result<Self> {
         INSTALL_LOG_HOOKS.call_once(whisper_rs::install_logging_hooks);
         let model = model_dir.join(MODEL_FILE);
-        let size = model.metadata().map_err(|error| anyhow::anyhow!("Whisper Metal 模型不可读 {}: {error}", model.display()))?.len();
+        let size = model.metadata().map_err(|error| anyhow::anyhow!("whisper.cpp GPU 模型不可读 {}: {error}", model.display()))?.len();
         if size < 500 * 1024 * 1024 {
-            anyhow::bail!("Whisper Metal 模型不完整: {} ({:.1} MiB)", model.display(), size as f64 / 1024.0 / 1024.0);
+            anyhow::bail!("whisper.cpp GPU 模型不完整: {} ({:.1} MiB)", model.display(), size as f64 / 1024.0 / 1024.0);
         }
 
         let mut context_params = WhisperContextParameters::default();
         context_params.use_gpu(true).gpu_device(0).flash_attn(true);
         log::info!(
-            "Whisper Metal 模型加载开始: model={} size_mib={:.1} whisper_cpp={} gpu_device=0 flash_attn=true",
-            model.display(), size as f64 / 1024.0 / 1024.0, whisper_rs::WHISPER_CPP_VERSION
+            "whisper.cpp GPU 模型加载开始: model={} size_mib={:.1} whisper_cpp={} backend={} gpu_device=0 flash_attn=true",
+            model.display(), size as f64 / 1024.0 / 1024.0, whisper_rs::WHISPER_CPP_VERSION, BACKEND
         );
         let started = Instant::now();
         let context = WhisperContext::new_with_params(&model, context_params)
-            .map_err(|error| anyhow::anyhow!("加载 whisper.cpp Metal 模型失败: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("加载 whisper.cpp {BACKEND} 模型失败: {error}"))?;
         let state = context.create_state()
-            .map_err(|error| anyhow::anyhow!("创建 whisper.cpp Metal state 失败: {error}"))?;
-        log::info!("Whisper Metal 模型加载完成: elapsed_ms={} backend=metal", started.elapsed().as_millis());
+            .map_err(|error| anyhow::anyhow!("创建 whisper.cpp {BACKEND} state 失败: {error}"))?;
+        log::info!("whisper.cpp GPU 模型加载完成: elapsed_ms={} backend={BACKEND}", started.elapsed().as_millis());
 
         Ok(Self {
             _context: context,
@@ -73,12 +85,12 @@ impl WhisperMetalEngine {
 
         let started = Instant::now();
         self.state.full(params, samples)
-            .map_err(|error| anyhow::anyhow!("Whisper Metal 推理失败: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("whisper.cpp {BACKEND} 推理失败: {error}"))?;
         let text = self.state.as_iter().map(|segment| segment.to_string()).collect::<String>();
         let elapsed = started.elapsed().as_secs_f64();
         let audio_seconds = samples.len() as f64 / 16_000.0;
         log::info!(
-            "Whisper Metal 段级推理完成: audio_ms={:.0} inference_ms={:.0} rtf={:.3} chars={}",
+            "whisper.cpp GPU 段级推理完成: audio_ms={:.0} inference_ms={:.0} rtf={:.3} chars={} backend={BACKEND}",
             audio_seconds * 1000.0, elapsed * 1000.0,
             if audio_seconds > 0.0 { elapsed / audio_seconds } else { 0.0 },
             text.chars().count()
@@ -96,7 +108,7 @@ impl SegmentEngine for WhisperMetalEngine {
     fn finish(&mut self) -> String {
         let samples = std::mem::take(&mut self.buffer);
         self.transcribe(&samples).unwrap_or_else(|error| {
-            log::error!("Whisper Metal 段级推理失败: {error:#}");
+            log::error!("whisper.cpp GPU 段级推理失败: {error:#}");
             String::new()
         })
     }

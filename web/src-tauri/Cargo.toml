@@ -22,7 +22,6 @@ sherpa-onnx = "1.13"
 log = "0.4"
 talksage-core = { path = "../../crates/talksage-core" }
 talksage-config = { path = "../../crates/talksage-config" }
-talksage-asr = { path = "../../crates/talksage-asr" }
 talksage-audio = { path = "../../crates/talksage-audio" }
 talksage-pipeline = { path = "../../crates/talksage-pipeline" }
 talksage-llm = { path = "../../crates/talksage-llm" }
@@ -31,3 +30,12 @@ talksage-plugins = { path = "../../crates/talksage-plugins" }
 talksage-session = { path = "../../crates/talksage-session" }
 talksage-notes = { path = "../../crates/talksage-notes" }
 talksage-logging = { path = "../../crates/talksage-logging" }
+
+# Windows x64：启用 whisper.cpp Vulkan GPU 后端（同 Dictata，AMD/Intel/NVIDIA 通吃）。
+# 构建前置：VULKAN_SDK 环境变量 + LLVM/libclang（LIBCLANG_PATH，bindgen 用）。
+# macOS 走 whisper-rs Metal；其他平台无 GPU whisper 引擎（talksage-asr 无 feature）。
+[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
+talksage-asr = { path = "../../crates/talksage-asr", features = ["vulkan-gpu"] }
+
+[target.'cfg(not(all(windows, target_arch = "x86_64")))'.dependencies]
+talksage-asr = { path = "../../crates/talksage-asr" }

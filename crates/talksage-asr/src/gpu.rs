@@ -10,10 +10,12 @@
 /// 可用的硬件加速后端。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuBackend {
-    /// NVIDIA CUDA GPU（Windows/Linux）。
+    /// NVIDIA CUDA GPU（Windows/Linux，sherpa-onnx CUDA EP）。
     Cuda,
     /// Apple Silicon Metal（whisper.cpp adapter）。
     Metal,
+    /// Windows Vulkan GPU（whisper.cpp adapter；AMD/Intel/NVIDIA 通吃，同 Dictata）。
+    Vulkan,
     /// 无受支持的 GPU，使用 CPU 推理。
     None,
 }
@@ -28,7 +30,25 @@ impl GpuBackend {
             #[cfg(not(target_arch = "aarch64"))]
             { Self::None }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        {
+            // whisper.cpp Vulkan 优先：AMD/Intel/NVIDIA 通吃，只要系统有
+            // Vulkan runtime（显卡驱动自带 loader）。注意：只有本 crate 以
+            // `vulkan-gpu` feature 编译（whisper-rs vulkan）时才认为可用——
+            // 否则运行时检测通过但引擎加载会失败。
+            #[cfg(feature = "vulkan-gpu")]
+            {
+                if Self::vulkan_available() {
+                    return Self::Vulkan;
+                }
+            }
+            if Self::cuda_available() {
+                Self::Cuda
+            } else {
+                Self::None
+            }
+        }
+        #[cfg(all(not(target_os = "macos"), not(all(target_os = "windows", target_arch = "x86_64"))))]
         {
             if Self::cuda_available() {
                 Self::Cuda
@@ -43,6 +63,7 @@ impl GpuBackend {
         match self {
             Self::Cuda => "cuda",
             Self::Metal => "metal",
+            Self::Vulkan => "vulkan",
             Self::None => "cpu",
         }
     }
@@ -57,6 +78,7 @@ impl GpuBackend {
         match self {
             Self::Cuda => "NVIDIA CUDA",
             Self::Metal => "Apple Metal (whisper.cpp)",
+            Self::Vulkan => "Vulkan GPU (whisper.cpp)",
             Self::None => "CPU",
         }
     }
@@ -87,9 +109,17 @@ impl GpuBackend {
             match Self::detect() {
                 Self::Cuda => "已检测到可供 ASR 使用的 NVIDIA CUDA runtime",
                 Self::Metal => "已检测到可供 ASR 使用的 Apple Metal runtime",
+                Self::Vulkan => "已检测到可供 ASR 使用的 Vulkan GPU（whisper.cpp）",
                 Self::None => "未检测到当前 ASR 运行时支持的 GPU 后端",
             }
         }
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"))]
+    fn vulkan_available() -> bool {
+        // Vulkan loader 由显卡驱动提供（vulkan-1.dll），不依赖 Vulkan SDK。
+        // 注意：这是"运行时可用"检测；构建 whisper.cpp Vulkan 仍需 VULKAN_SDK。
+        unsafe { libloading::Library::new("vulkan-1.dll").is_ok() }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -109,13 +139,14 @@ mod tests {
     #[test]
     fn detect_returns_a_valid_variant() {
         let b = GpuBackend::detect();
-        assert!(matches!(b, GpuBackend::Cuda | GpuBackend::Metal | GpuBackend::None));
+        assert!(matches!(b, GpuBackend::Cuda | GpuBackend::Metal | GpuBackend::Vulkan | GpuBackend::None));
     }
 
     #[test]
     fn provider_str_matches_backend() {
         assert_eq!(GpuBackend::Cuda.provider_str(), "cuda");
         assert_eq!(GpuBackend::Metal.provider_str(), "metal");
+        assert_eq!(GpuBackend::Vulkan.provider_str(), "vulkan");
         assert_eq!(GpuBackend::None.provider_str(), "cpu");
     }
 
@@ -123,6 +154,7 @@ mod tests {
     fn is_accelerated_only_for_gpu_backends() {
         assert!(GpuBackend::Cuda.is_accelerated());
         assert!(GpuBackend::Metal.is_accelerated());
+        assert!(GpuBackend::Vulkan.is_accelerated());
         assert!(!GpuBackend::None.is_accelerated());
     }
 
@@ -130,6 +162,7 @@ mod tests {
     fn display_name_is_human_readable() {
         assert!(!GpuBackend::Cuda.display_name().is_empty());
         assert!(!GpuBackend::Metal.display_name().is_empty());
+        assert!(!GpuBackend::Vulkan.display_name().is_empty());
         assert!(!GpuBackend::None.display_name().is_empty());
     }
 

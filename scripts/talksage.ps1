@@ -125,6 +125,13 @@ function Cmd-Env {
     } else {
         Write-Host "  [MISS] sherpa 静态库（构建时自动下载或运行 deps）" -ForegroundColor Yellow
     }
+    # Windows whisper.cpp Vulkan GPU 构建依赖（Vulkan SDK + LLVM/libclang）
+    if ($env:OS -eq "Windows_NT" -and $env:PROCESSOR_ARCHITECTURE -eq "AMD64") {
+        if ($env:VULKAN_SDK) { Write-Host "  [OK]   VULKAN_SDK=$env:VULKAN_SDK" -ForegroundColor Green }
+        else { Write-Host "  [MISS] VULKAN_SDK（whisper.cpp Vulkan GPU 需要；安装 https://vulkan.lunarg.com 并设环境变量）" -ForegroundColor Yellow }
+        if ($env:LIBCLANG_PATH -or (Get-Command clang -ErrorAction SilentlyContinue)) { Write-Host "  [OK]   libclang（bindgen）" -ForegroundColor Green }
+        else { Write-Host "  [MISS] libclang（whisper-rs bindgen 需要；装 LLVM 并设 LIBCLANG_PATH，或设 WHISPER_DONT_GENERATE_BINDINGS=1）" -ForegroundColor Yellow }
+    }
     if (-not $ok) { Write-Host "`n提示: 运行 .\scripts\talksage.ps1 deps 下载缺失依赖" -ForegroundColor Yellow }
 }
 

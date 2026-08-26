@@ -37,6 +37,7 @@ config/tmp/
 config/models/
 config/window.json
 config/session-*.md
+config/exports/
 
 # Misc
 dist/

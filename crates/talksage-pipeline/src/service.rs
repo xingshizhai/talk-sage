@@ -410,10 +410,16 @@ impl TalkSageService {
                 (e, e)
             }
         };
-        if asr_route == (talksage_asr::AsrRoute::Local { backend: talksage_asr::GpuBackend::Metal }) {
+        // whisper.cpp GPU 路由：Metal（macOS）或 Vulkan（Windows）→ 用
+        // Whisper large-v3-turbo Q5_0（中文/中英混说鲁棒性好，GPU 实时）。
+        let gpu_backend = match asr_route {
+            talksage_asr::AsrRoute::Local { backend } => backend,
+            talksage_asr::AsrRoute::AliyunCloud => talksage_asr::GpuBackend::None,
+        };
+        if matches!(gpu_backend, talksage_asr::GpuBackend::Metal | talksage_asr::GpuBackend::Vulkan) {
             user_engine_kind = EngineKind::WhisperLargeV3TurboMetal;
             client_engine_kind = EngineKind::WhisperLargeV3TurboMetal;
-            log::info!("Apple Metal 路由已选择，用户流与客户流使用 Whisper large-v3-turbo Q5_0");
+            log::info!("whisper.cpp GPU 路由已选择（{}），用户流与客户流使用 Whisper large-v3-turbo Q5_0", gpu_backend.display_name());
         }
         let user_engine = req.user_engine.unwrap_or(user_engine_kind);
         let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
