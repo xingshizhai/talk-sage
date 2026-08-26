@@ -894,7 +894,6 @@ async fn start_file_import(
     }
 
     let service = state.service.clone();
-    let import_cancel = state.import_cancel.clone();
     let cfg = state.config.snapshot();
     let engine_kind = EngineKind::from_name(&cfg.asr.engine_zh).unwrap_or(EngineKind::ParaformerZh);
     let path_buf = PathBuf::from(&path);
