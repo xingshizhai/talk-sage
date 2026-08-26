@@ -176,7 +176,7 @@ impl PluginExecutor {
         }
         let mut all_joined = true;
         for worker in self.workers.drain(..) {
-            if !super::join_with_timeout(worker, join_timeout) {
+            if !super::join_owned_with_timeout(worker, join_timeout) {
                 all_joined = false;
                 log::warn!("插件 worker 停止超时，后台调用完成后将丢弃结果");
             }

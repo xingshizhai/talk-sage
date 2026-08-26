@@ -55,6 +55,11 @@ impl SessionRuntime {
         self.pipeline.stop_with_timeout(timeout)
     }
 
+    /// 继续等待管道线程退出（`stop_with_timeout` 超时后调用）。
+    pub fn join_remaining(&mut self, timeout: Duration) -> bool {
+        self.pipeline.join_remaining(timeout)
+    }
+
     pub fn set_noise_level(&self, level: f32) {
         self.pipeline.set_noise_level(level);
     }

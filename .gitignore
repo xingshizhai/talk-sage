@@ -36,6 +36,7 @@ config/voiceprints/
 config/tmp/
 config/models/
 config/window.json
+config/session-*.md
 
 # Misc
 dist/

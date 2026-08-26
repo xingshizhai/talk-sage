@@ -49,18 +49,24 @@ pub const STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// 插件 `run`（含 LLM）结果超过此时长则丢弃，避免停止后迟到事件。
 pub const PLUGIN_RUN_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 旁路 `join`：`std::thread::JoinHandle` 无超时，用 channel 包一层。
-fn join_with_timeout(handle: std::thread::JoinHandle<()>, timeout: Duration) -> bool {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = handle.join();
-        let _ = tx.send(());
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(()) => true,
-        Err(mpsc::RecvTimeoutError::Timeout) => false,
-        Err(mpsc::RecvTimeoutError::Disconnected) => true,
+/// 旁路 `join`：`std::thread::JoinHandle` 无超时，用轮询 `is_finished` 实现。
+/// 可重入：超时返回 `false` 后句柄仍在，可再次调用继续等待（收尾数据完整性
+/// 需要；见 [`LivePipeline::join_remaining`]）。
+fn join_with_timeout(handle: &mut std::thread::JoinHandle<()>, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while !handle.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
+    true
+}
+
+/// 按值 join（不重入）：用于不再需要句柄的收尾场景（如插件 worker 池 drain）。
+pub(crate) fn join_owned_with_timeout(handle: std::thread::JoinHandle<()>, timeout: Duration) -> bool {
+    let mut handle = handle;
+    join_with_timeout(&mut handle, timeout)
 }
 
 /// 运行期可调参数（监听中可实时修改，无需重启；跨线程共享）。
@@ -250,18 +256,37 @@ impl LivePipeline {
         let _ = self.stop_with_timeout(STOP_JOIN_TIMEOUT);
     }
 
-    /// 停止管道并在时限内 join。超时返回 `false`（不卡死调用方）。
+    /// 停止管道并在时限内 join。超时返回 `false`（不卡死调用方）；
+    /// 句柄**保留**，可再调 [`Self::join_remaining`] 继续等待。
     pub fn stop_with_timeout(&mut self, timeout: Duration) -> bool {
         self.cancel.store(true, Ordering::Relaxed);
         if let Some(tx) = self.tx_stop.take() {
             let _ = tx.send(());
         }
-        match self.handle.take() {
+        match self.handle.as_mut() {
             Some(h) => {
                 if join_with_timeout(h, timeout) {
+                    self.handle = None;
                     true
                 } else {
                     log::warn!("管道停止超时 ({timeout:?})，后台线程仍在收尾");
+                    false
+                }
+            }
+            None => true,
+        }
+    }
+
+    /// 继续等待管道线程退出（`stop_with_timeout` 超时后调用）。
+    /// 收尾数据（录音 flush、会话统计）在管道线程内完成，必须在
+    /// `finish()` 读取统计之前就绪，否则历史回放会缺主录音/元数据。
+    pub fn join_remaining(&mut self, timeout: Duration) -> bool {
+        match self.handle.as_mut() {
+            Some(h) => {
+                if join_with_timeout(h, timeout) {
+                    self.handle = None;
+                    true
+                } else {
                     false
                 }
             }
@@ -1375,14 +1400,16 @@ mod stop_timeout_tests {
 
     #[test]
     fn join_with_timeout_returns_true_when_thread_exits() {
-        let h = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(20)));
-        assert!(join_with_timeout(h, Duration::from_millis(500)));
+        let mut h = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(20)));
+        assert!(join_with_timeout(&mut h, Duration::from_millis(500)));
     }
 
     #[test]
     fn join_with_timeout_returns_false_when_exceeded() {
-        let h = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(400)));
-        assert!(!join_with_timeout(h, Duration::from_millis(50)));
+        let mut h = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(400)));
+        assert!(!join_with_timeout(&mut h, Duration::from_millis(50)));
+        // 句柄保留，可继续等待（收尾数据完整性）
+        assert!(join_with_timeout(&mut h, Duration::from_millis(1000)));
     }
 
 }

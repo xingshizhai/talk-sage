@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use talksage_asr::{EngineKind, EnginePool};
@@ -662,7 +662,16 @@ impl TalkSageService {
     ///
     /// 具体做什么由注册表决定，这里只负责「停 → 落库 → 收尾」这三步的次序。
     pub fn finish(&self, mut running: RunningListen) -> Result<Option<i64>> {
-        running.runtime.stop();
+        // 停止管道并等它完全收尾：会话统计（含录音路径）由管道线程在退出前
+        // 发出，`build_master_recording` / `session_quality` 依赖这些统计。
+        // 若 5s 内没停完（如 38MB×2 录音 flush 较慢），继续等——统计没就绪
+        // 会导致历史回放缺主录音、meta 为空。
+        if !running.runtime.stop_with_timeout(crate::STOP_JOIN_TIMEOUT) {
+            log::info!("管道线程未在 {}s 内退出，继续等待录音收尾与会话统计…", crate::STOP_JOIN_TIMEOUT.as_secs());
+            if !running.runtime.join_remaining(Duration::from_secs(30)) {
+                log::warn!("管道线程 30s 后仍未退出，将跳过统计收尾（录音可能不完整）");
+            }
+        }
         if let Some(writer) = &mut running.session_writer {
             writer.finish()?;
         }
