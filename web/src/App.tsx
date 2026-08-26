@@ -667,9 +667,6 @@ export default function App() {
         {/* 页头 */}
         <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
           <h1 style={{ fontSize: 18, margin: 0 }}>会议辅助</h1>
-          <span style={{ fontSize: 11, color: "var(--muted)" }}>
-            v{version} · {api.transport}
-          </span>
           <button
             type="button"
             onClick={() => setNavPage("settings")}
