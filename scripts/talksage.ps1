@@ -53,6 +53,8 @@ $env:SHERPA_ONNX_ARCHIVE_DIR = Join-Path $Root ".tools\sherpa-onnx-archives"
 if (-not $env:TALKSAGE_DATA_DIR) {
     $env:TALKSAGE_DATA_DIR = Join-Path $Root "config"
     Write-Host "提示: 未检测到外部 TALKSAGE_DATA_DIR，脚本使用项目内配置目录 config\" -ForegroundColor DarkGray
+} else {
+    Write-Host "提示: 沿用外部 TALKSAGE_DATA_DIR=$env:TALKSAGE_DATA_DIR（如需项目内 config\，先清除该环境变量）" -ForegroundColor DarkGray
 }
 $env:TALKSAGE_MODELS_DIR = Join-Path $Root "models"
 $CargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
