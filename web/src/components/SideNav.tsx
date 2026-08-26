@@ -25,6 +25,8 @@ export default function SideNav({
   listening,
   paused,
   importing,
+  audioSource = "mic",
+  onToggleAudioSource,
   onToggleListen,
   onTogglePause,
   onNavigate,
@@ -41,6 +43,8 @@ export default function SideNav({
   listening: boolean;
   paused: boolean;
   importing?: boolean;
+  audioSource?: "mic" | "loopback";
+  onToggleAudioSource?: () => void;
   onToggleListen: () => void;
   onTogglePause: () => void;
   onNavigate: (key: string) => void;
@@ -225,6 +229,21 @@ export default function SideNav({
             </button>
           )}
         </div>
+        {/* 采集来源指示 + 快速切换 */}
+        {!listening && !importing && (
+          <button
+            onClick={onToggleAudioSource}
+            title="点击切换采集来源"
+            style={{
+              background: "none", border: "1px solid var(--border)", borderRadius: 7,
+              padding: "4px 8px", cursor: "pointer", color: "var(--muted)",
+              fontSize: 11, display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+            }}
+          >
+            {audioSource === "loopback" ? "🔊 系统音频" : "🎙 麦克风"}
+            <span style={{ fontSize: 9, opacity: 0.7 }}>点击切换</span>
+          </button>
+        )}
         <div style={{ fontSize: 9, textAlign: "center", color: "var(--muted)", fontFamily: "monospace" }}>
           ⌘/Ctrl+Shift+L 开始/停止 · Space 暂停 · ⌘/Ctrl+Shift+D 调试
         </div>

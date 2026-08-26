@@ -60,6 +60,7 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
   const [version, setVersion] = useState<string>("—");
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [audioSource, setAudioSource] = useState<"mic" | "loopback">("mic");
   const [gpuStatus, setGpuStatus] = useState<AsrRuntimeStatus | null>(null);
   const [listening, setListening] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -105,7 +106,7 @@ export default function App() {
 
   useEffect(() => {
     api.getVersion().then(setVersion).catch(console.error);
-    api.getConfig().then(setConfig).catch(console.error);
+    api.getConfig().then((cfg) => { setConfig(cfg); setAudioSource(cfg.audio?.audio_source ?? "mic"); }).catch(console.error);
     api.getAsrRuntimeStatus().then(setGpuStatus).catch((error) => console.error("读取 ASR 运行状态失败:", error));
     // Windows 桌面：最小化 → 隐藏到系统托盘（托盘点击恢复；macOS 遵循系统惯例最小化到 Dock，不做此处理）
     const isTauri = !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
@@ -330,9 +331,16 @@ export default function App() {
 
   const handleSaveConfig = useCallback(async (updates: Record<string, unknown>) => {
     await api.saveConfig(updates);
-    // 设置保存后刷新主配置，让页头的当前场景等运行信息立即同步。
-    setConfig(await api.getConfig());
+    const newCfg = await api.getConfig();
+    setConfig(newCfg);
+    setAudioSource(newCfg.audio?.audio_source ?? "mic");
   }, []);
+
+  const handleToggleAudioSource = useCallback(async () => {
+    const next: "mic" | "loopback" = audioSource === "mic" ? "loopback" : "mic";
+    setAudioSource(next);
+    await api.saveConfig({ audio: { audio_source: next } });
+  }, [audioSource]);
 
   // 噪音电平阈值：监听中防抖同步到后端（0..100 → 0..0.1 RMS 门限），无需停止监听
   useEffect(() => {
@@ -651,6 +659,8 @@ export default function App() {
         listening={listening}
         paused={paused}
         importing={importing}
+        audioSource={audioSource}
+        onToggleAudioSource={handleToggleAudioSource}
         onToggleListen={handleListen}
         onTogglePause={handlePause}
 
