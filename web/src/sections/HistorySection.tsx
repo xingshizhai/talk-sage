@@ -334,6 +334,16 @@ export default function HistorySection({
                 )}
                 {!masterUrl && <div style={{ fontSize: 10, color: "var(--muted)" }}>该旧会话没有完整主录音，请展开下方原始分轨播放。</div>}
                 <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 3 }}>播放时下方对应时间的转写会同步高亮；双流录音左声道为麦克风，右声道为系统音频。</div>
+                <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    onClick={() => void runExport("audio")}
+                    disabled={exporting !== null}
+                    style={{ fontSize: 11, padding: "2px 10px", cursor: exporting !== null ? "default" : "pointer" }}
+                  >
+                    {exporting === "audio" ? "导出中…" : "导出完整录音"}
+                  </button>
+                  <span style={{ fontSize: 10, color: "var(--muted)" }}>导出为 WAV 音频文件（完整会议）</span>
+                </div>
                 {recs.length > 0 && (
                   <details style={{ marginTop: 8 }}>
                     <summary style={{ cursor: "pointer", fontSize: 10, color: "var(--text-2)", fontWeight: 700 }}>原始输入分轨（{recs.length}）</summary>
@@ -379,6 +389,13 @@ export default function HistorySection({
             </select>
             <button onClick={() => onGenerateNotes(templateId)} disabled={notesBusy} style={{ fontSize: 12 }}>
               {notesBusy ? "生成中…" : "生成纪要"}
+            </button>
+            <button
+              onClick={() => void runExport("markdown")}
+              disabled={exporting !== null}
+              style={{ fontSize: 12, marginLeft: "auto" }}
+            >
+              {exporting === "markdown" ? "导出中…" : "导出 Markdown"}
             </button>
           </div>
           {detail.notes && (
@@ -459,6 +476,17 @@ export default function HistorySection({
             );
           })()}
 
+          <div style={{ marginTop: 10, borderTop: "1px dashed var(--border)", paddingTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
+            <b style={{ fontSize: 12 }}>转写</b>
+            <span style={{ fontSize: 10, color: "var(--muted)" }}>{detail.segments.length} 段</span>
+            <button
+              onClick={() => void runExport("text")}
+              disabled={exporting !== null}
+              style={{ fontSize: 11, padding: "2px 10px", marginLeft: "auto", cursor: exporting !== null ? "default" : "pointer" }}
+            >
+              {exporting === "text" ? "导出中…" : "导出文本"}
+            </button>
+          </div>
           <div style={{ marginTop: 6 }}>
             {detail.segments.map((s, i) => {
               const sentences = punctuateAndSplit(s.text);
@@ -545,27 +573,6 @@ export default function HistorySection({
           )}
 
           <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <button
-              onClick={() => void runExport("markdown")}
-              disabled={exporting !== null}
-              style={{ fontSize: 12 }}
-            >
-              {exporting === "markdown" ? "导出中…" : "导出 Markdown"}
-            </button>
-            <button
-              onClick={() => void runExport("text")}
-              disabled={exporting !== null}
-              style={{ fontSize: 12 }}
-            >
-              {exporting === "text" ? "导出中…" : "导出文本"}
-            </button>
-            <button
-              onClick={() => void runExport("audio")}
-              disabled={exporting !== null}
-              style={{ fontSize: 12 }}
-            >
-              {exporting === "audio" ? "导出中…" : "导出录音"}
-            </button>
             <button
               onClick={() => confirmDelete(detail.id)}
               style={{ ...deleteBtnStyle, color: confirmDeleteId === detail.id ? "var(--danger)" : "var(--muted)" }}
