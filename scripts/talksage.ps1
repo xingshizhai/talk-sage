@@ -25,6 +25,13 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
   TALKSAGE_DATA_DIR: 外部已设（命令行/系统环境变量）则沿用；未设时脚本显式指定
     项目内 config\（配置 + 数据目录）。直接运行 talksage.exe（不经脚本）时程序默认 ~/.talksage。
     首次使用：.\scripts\talksage.ps1 dev 会自动从 config\talksage.example.toml 初始化 config\talksage.toml
+
+Windows x64 Vulkan 构建环境（dev/build/package 自动配置）:
+  VULKAN_SDK: 外部未设时自动探测 C:\VulkanSDK\*（最新版本）
+  LIBCLANG_PATH: 外部未设时自动探测 C:\Program Files\LLVM\bin
+  CARGO_TARGET_DIR: 外部未设时自动设为 C:\wt（短路径，避免 vulkan-shaders-gen MAX_PATH 崩溃）
+  RUSTFLAGS: 外部未设时自动配置全静态 CRT（+crt-static + /NODEFAULTLIB）
+
 代理: 设置 $env:https_proxy / $env:http_proxy 后运行本脚本即可。
 #>
 
@@ -156,6 +163,7 @@ function Cmd-Deps {
 }
 
 function Cmd-Build {
+    Ensure-VulkanEnv
     Write-Step "全量编译（cargo + 前端）"
     $code = Invoke-Native { cargo build --workspace }
     if ($code -ne 0) { Write-Host "cargo 编译失败" -ForegroundColor Red; return 1 }
@@ -173,8 +181,56 @@ function Cmd-Build {
     }
 }
 
+# Windows x64 Vulkan 构建环境配置：
+#   自动检测 VULKAN_SDK / LIBCLANG_PATH，设置短 target 路径避免 MAX_PATH，
+#   并配置 RUSTFLAGS 全静态 CRT（与 whisper.cpp /MT 和 sherpa-onnx /MT 一致）。
+# 仅在 Windows x64 上生效，其他平台跳过。
+function Ensure-VulkanEnv {
+    if ($env:OS -ne "Windows_NT" -or $env:PROCESSOR_ARCHITECTURE -ne "AMD64") { return }
+
+    # VULKAN_SDK：已设则沿用，否则从常见安装位置自动探测
+    if (-not $env:VULKAN_SDK) {
+        $candidates = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending | Select-Object -First 1
+        if ($candidates) {
+            $env:VULKAN_SDK = $candidates.FullName
+            Write-Host "  [auto] VULKAN_SDK=$env:VULKAN_SDK" -ForegroundColor DarkGray
+        } else {
+            Write-Host "警告: 未找到 Vulkan SDK（C:\VulkanSDK\*），whisper.cpp Vulkan 构建会失败。" -ForegroundColor Yellow
+            Write-Host "      安装 Vulkan SDK：https://vulkan.lunarg.com/sdk/home#windows" -ForegroundColor Yellow
+            return
+        }
+    }
+
+    # LIBCLANG_PATH：bindgen 生成 whisper-rs-sys 绑定时需要
+    if (-not $env:LIBCLANG_PATH) {
+        $llvmBin = "C:\Program Files\LLVM\bin"
+        if (Test-Path "$llvmBin\libclang.dll") {
+            $env:LIBCLANG_PATH = $llvmBin
+            Write-Host "  [auto] LIBCLANG_PATH=$env:LIBCLANG_PATH" -ForegroundColor DarkGray
+        } else {
+            Write-Host "警告: 未找到 libclang.dll（LIBCLANG_PATH 未设），bindgen 会失败。" -ForegroundColor Yellow
+            Write-Host "      安装 LLVM：https://github.com/llvm/llvm-project/releases （22.x）" -ForegroundColor Yellow
+            return
+        }
+    }
+
+    # CARGO_TARGET_DIR 短路径：避免 vulkan-shaders-gen 子项目触发 MAX_PATH（260字符）限制
+    if (-not $env:CARGO_TARGET_DIR) {
+        $env:CARGO_TARGET_DIR = "C:\wt"
+        Write-Host "  [auto] CARGO_TARGET_DIR=$env:CARGO_TARGET_DIR（短路径，避免 MAX_PATH）" -ForegroundColor DarkGray
+    }
+
+    # RUSTFLAGS 全静态 CRT（与 whisper.cpp /MT + sherpa-onnx /MT 一致，避免 LNK2005）
+    if (-not $env:RUSTFLAGS) {
+        $env:RUSTFLAGS = "-C target-feature=+crt-static -C link-arg=/NODEFAULTLIB:msvcrt.lib -C link-arg=/NODEFAULTLIB:msvcp140.dll -C link-arg=/NODEFAULTLIB:msvcprt.lib -C link-arg=libcmt.lib -C link-arg=libcpmt.lib -C link-arg=libucrt.lib -C link-arg=libvcruntime.lib -C link-arg=legacy_stdio_definitions.lib"
+        Write-Host "  [auto] RUSTFLAGS=+crt-static（全静态 CRT）" -ForegroundColor DarkGray
+    }
+}
+
 function Cmd-Dev {
     Ensure-DevData
+    Ensure-VulkanEnv
     Write-Step "Tauri 开发模式"
     Push-Location (Join-Path $Root "web")
     $null = Invoke-Native { npx tauri dev }
@@ -284,6 +340,7 @@ function Cmd-Test {
 }
 
 function Cmd-Package {
+    Ensure-VulkanEnv
     Write-Step "打包（tauri build：NSIS/MSI）"
     Push-Location (Join-Path $Root "web")
     $null = Invoke-Native { npx tauri build }
