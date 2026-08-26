@@ -8,6 +8,7 @@ use crate::brief_retriever::BriefRetrieverPluginDef;
 use crate::conversation_metrics::ConversationMetricsPlugin;
 use crate::cross_stream_dedup::CrossStreamDedupPlugin;
 use crate::key_point_extractor::KeyPointExtractorPlugin;
+use crate::key_point_llm::KeyPointLlmPlugin;
 use crate::registry::{
     config_type_name, CapabilityAvailability, HookRegistry, Plugin, PluginCategory,
     PluginConfig, PluginConfigIssue, PluginRegistration, RegistrationStatus,
@@ -51,6 +52,7 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
         Box::new(TranslatorPluginDef),
         Box::new(BriefRetrieverPluginDef),
         Box::new(KeyPointExtractorPlugin),
+        Box::new(KeyPointLlmPlugin),
         // finalizer：session_quality 必须在 webhook 之前 —— 它把质量 meta 写进
         // 会话行，webhook 要重新读这一行来拼载荷
         Box::new(SessionQualityPlugin),

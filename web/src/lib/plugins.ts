@@ -132,6 +132,11 @@ export function fieldLabel(key: string): string {
     cooldown_seconds: "冷却间隔（秒）",
     min_ms: "最短时长（ms）",
     min_score: "最低匹配分",
+    llm_extract: "LLM 自动识别术语",
+    min_chars: "触发最短字数",
+    user_terms: "自定义关注词（逗号分隔）",
+    batch_size: "批量积累段数",
+    tail_timeout_ms: "末段超时（ms）",
   };
   return known[key] ?? key;
 }

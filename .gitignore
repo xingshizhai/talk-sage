@@ -26,6 +26,9 @@ evaluation/reports/
 # 分析用临时目录
 _meetily_src/
 
+# 开发数据目录（配置、会话数据库、录音；不入库，不随 clean 删除）
+.dev-data/
+
 # Misc
 dist/
 .env

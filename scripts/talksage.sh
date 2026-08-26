@@ -26,7 +26,9 @@ cd "$ROOT"
 # 项目目录会导致已安装的 cargo/rustc 消失。仅把依赖构建产物留在仓库内。
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 export SHERPA_ONNX_ARCHIVE_DIR="$ROOT/.tools/sherpa-onnx-archives"
-export TALKSAGE_DATA_DIR="$ROOT/.tools/data"
+# TALKSAGE_DATA_DIR: 外部已设则沿用；否则默认使用项目内 .dev-data（方便调试）
+export TALKSAGE_DATA_DIR="${TALKSAGE_DATA_DIR:-$ROOT/.dev-data}"
+DATA_DIR="$TALKSAGE_DATA_DIR"
 export TALKSAGE_MODELS_DIR="$ROOT/models"
 
 # Homebrew keg-only rustup、Apple Silicon Homebrew 和 rustup 默认目录兼容。
@@ -96,6 +98,25 @@ require_file() {
     [ -e "$1" ] || { echo "缺少 $1；请先运行 ./scripts/talksage.sh build" >&2; exit 1; }
 }
 
+# 确保开发数据目录与配置文件存在（首次自动从模板初始化）
+ensure_dev_data() {
+    local config="$TALKSAGE_DATA_DIR/talksage.toml"
+    local template="$ROOT/config/talksage.example.toml"
+    if [ ! -d "$TALKSAGE_DATA_DIR" ]; then
+        mkdir -p "$TALKSAGE_DATA_DIR"
+        echo "已创建开发数据目录: $TALKSAGE_DATA_DIR"
+    fi
+    if [ ! -f "$config" ]; then
+        if [ -f "$template" ]; then
+            cp "$template" "$config"
+            echo "已从模板初始化配置文件: $config"
+            echo "提示: 编辑该文件填写 API Key 等配置（LLM 要点聚合 / 术语解释需要）"
+        else
+            echo "警告: 未找到配置模板 config/talksage.example.toml，将使用内置默认值运行"
+        fi
+    fi
+}
+
 case "$CMD" in
     bootstrap)
         env_check
@@ -119,12 +140,12 @@ case "$CMD" in
     deps)    deps ;;
     build)   build ;;
     release) release ;;
-    dev)     (cd web && npm run tauri -- dev) ;;
+    dev)     ensure_dev_data; (cd web && npm run tauri -- dev) ;;
     # cargo build 的 debug Tauri 二进制使用 tauri.conf.json 的 devUrl，不能脱离
     # Vite 单独启动；由 tauri dev 同时管理前端服务与原生进程。
-    run)     (cd web && npm run tauri -- dev) ;;
-    serve)   require_file "$CARGO_TARGET_DIR/debug/talksage"; "$CARGO_TARGET_DIR/debug/talksage" serve ;;
-    listen)  require_file "$CARGO_TARGET_DIR/debug/talksage"; "$CARGO_TARGET_DIR/debug/talksage" listen --input mic ;;
+    run)     ensure_dev_data; (cd web && npm run tauri -- dev) ;;
+    serve)   ensure_dev_data; require_file "$CARGO_TARGET_DIR/debug/talksage"; "$CARGO_TARGET_DIR/debug/talksage" serve ;;
+    listen)  ensure_dev_data; require_file "$CARGO_TARGET_DIR/debug/talksage"; "$CARGO_TARGET_DIR/debug/talksage" listen --input mic ;;
     doctor)  require_file "$CARGO_TARGET_DIR/debug/talksage"; "$CARGO_TARGET_DIR/debug/talksage" doctor ;;
     test)
         # 固定测试日志级别，避免调用者的 RUST_LOG（例如 warn）使日志集成测试失真。
@@ -149,6 +170,6 @@ case "$CMD" in
         bundle="$CARGO_TARGET_DIR/release/bundle/macos/拓思者.app"
         [ -d "$bundle" ] && echo "产物: $bundle（麦克风授权在此包内才生效）"
         ;;
-    logs)    ls -t "$TALKSAGE_DATA_DIR/logs"/talksage.log.* 2>/dev/null | head -1 | xargs -I{} sh -c 'echo "=== {} ==="; tail -50 "{}"' ;;
+    logs)    ls -t "$DATA_DIR/logs"/talksage.log.* 2>/dev/null | head -1 | xargs -I{} sh -c 'echo "=== {} ==="; tail -50 "{}"' ;;
     *)       sed -n 's/^# //p' "$0" | head -20 ;;
 esac

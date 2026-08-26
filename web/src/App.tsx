@@ -842,11 +842,16 @@ export default function App() {
             {!importing && !importDone && (
               <KeyPointsCard
                 points={points}
-                pluginLabel={
-                  config?.plugins?.["key_point_extractor"]?.enabled === false
-                    ? "已禁用"
-                    : "本地规则"
-                }
+                pluginLabel={(() => {
+                  const llmEnabled = config?.plugins?.["key_point_llm"]?.enabled !== false;
+                  const oldEnabled = config?.plugins?.["key_point_extractor"]?.enabled !== false;
+                  if (llmEnabled) {
+                    const provider = config?.llm?.default ?? "deepseek";
+                    return provider;
+                  }
+                  if (!oldEnabled) return "已禁用";
+                  return "本地规则";
+                })()}
               />
             )}
           </>

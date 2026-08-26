@@ -1046,6 +1046,24 @@ impl ConfigManager {
             let raw = std::fs::read_to_string(&path)?;
             let user: Config = toml::from_str(&raw)?;
             config = merge_config(config, user);
+            // 双通道：log 进日志文件（server/cli 在 load 前已初始化日志）；
+            // eprintln 兜底（tauri 先 load 配置才知道日志目录，此前的 log 会丢）。
+            log::info!("配置文件: {}", path.display());
+            eprintln!("[talksage] 配置文件: {}", path.display());
+        } else {
+            log::warn!(
+                "未找到配置文件: {}；使用内置默认值运行（LLM 功能不可用）。\
+                 提示: 复制 config/talksage.example.toml 到该路径并填写 API Key 等配置，\
+                 或设置环境变量 TALKSAGE_DATA_DIR 指向配置目录。",
+                path.display()
+            );
+            eprintln!(
+                "[talksage] 未找到配置文件: {}\n\
+                 提示: 复制 config/talksage.example.toml 到该路径并填写 API Key 等配置，\
+                 或设置环境变量 TALKSAGE_DATA_DIR 指向配置目录。\
+                 当前使用内置默认值运行（LLM 功能不可用）。",
+                path.display()
+            );
         }
         apply_env_overrides(&mut config);
         Ok(Self {

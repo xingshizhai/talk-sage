@@ -1,0 +1,187 @@
+# TalkSage 配置模板
+# 复制本文件为 talksage.toml 并放置于数据目录（默认 ~/.talksage/talksage.toml）
+# 所有字段均可省略，省略时使用内置默认值。
+# 敏感字段（API Key 等）建议用环境变量覆盖：TALKSAGE_LLM_API_KEY=xxx
+
+# ── ASR（语音识别）──────────────────────────────────────────────────────────
+
+[asr]
+# 中文引擎：qwen3-asr（默认，高精度流式）| paraformer-zh | whisper-large-v3
+engine_zh = "qwen3-asr"
+# 英文引擎：qwen3-asr | zipformer-en
+engine_en = "qwen3-asr"
+# 推理后端：auto（自动选 GPU/CPU）| cpu | cuda（NVIDIA）| metal（Apple）
+backend = "auto"
+# ASR 模式：auto（本地优先，无 GPU 时回退云端）| local（仅本地）| cloud（仅阿里云）
+asr_mode = "auto"
+# 标点恢复与语义分段（需安装标点模型）
+punct_enabled = true
+
+# 阿里云实时语音识别（cloud 模式或 auto 回退时使用）
+# 建议通过环境变量设置，不写入配置文件：
+#   ALIYUN_ACCESS_ID / ALIYUN_ACCESS_SECRET / ALIYUN_APP_ID
+aliyun_access_key_id     = ""
+aliyun_access_key_secret = ""
+aliyun_app_key           = ""
+
+# 热词与纠错
+[asr.terminology]
+enabled       = false
+hotword_score = 1.5       # 上下文偏置强度（支持热词的模型使用）
+terms         = []        # 热词列表，例：["NPI", "MOQ", "TalkSage"]
+[asr.terminology.corrections]
+# 常见误识别 → 正确术语（ASR 输出后同步替换，不增加推理延迟）
+# "脱丝者" = "TalkSage"
+
+# ── 音频采集 ────────────────────────────────────────────────────────────────
+
+[audio]
+# 采集源：mic（麦克风）| loopback（系统音频，视频会议识别对方时使用）
+audio_source  = "mic"
+# 麦克风输入增益（dB，范围 0~24）
+input_gain_db = 12.0
+# 麦克风设备索引（null = 系统默认）
+# mic_device = 0
+# 回环设备索引（null = 系统默认渲染设备）
+# loopback_device = 0
+
+[audio.vad]
+# VAD 灵敏度预设：standard | sensitive（捕获弱语音）| strict（抗噪）
+preset         = "standard"
+# 以下覆盖项为 null 时使用预设默认值
+# threshold      = 0.50   # 检测阈值（0~1）
+# min_speech_ms  = 250    # 最小语音时长（ms）
+# min_silence_ms = 500    # 段结束静音（ms）
+# max_speech_ms  = 30000  # 最长语音（ms）
+
+[audio.denoise]
+# 降噪总开关（默认关：噪声门会压弱语音；嘈杂环境可开启）
+enabled            = false
+gate_threshold     = 0.008   # 噪声门 RMS 阈值
+highpass           = true    # 高通滤波（去低频轰鸣/空调声）
+highpass_cutoff_hz = 100.0
+
+[audio.ducking]
+# 闪避：用户说话时自动降低客户流增益，减少串扰
+enabled   = true
+threshold = 0.04
+factor    = 0.35
+
+[audio.endpoint]
+# 流式 ASR 文本稳定性端点（结合停顿自然提交）
+enabled        = true
+stable_ms      = 350    # 文本稳定多久后提交
+quiet_ms       = 450    # 静音多久后提交
+force_quiet_ms = 850    # 无论文本是否变化，连续静音达此时长强制提交
+quiet_rms      = 0.008
+min_segment_ms = 1000
+
+# ── LLM（要点聚合 / 术语解释 / 翻译）──────────────────────────────────────
+
+[llm]
+# 默认使用的 provider（与下方 [llm.providers.*] 键名对应）
+default = "deepseek"
+
+[llm.providers.deepseek]
+base_url = "https://api.deepseek.com/v1"
+model    = "deepseek-chat"
+api_key  = ""   # 填入 DeepSeek API Key，或留空通过环境变量设置
+
+[llm.providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+model    = "deepseek/deepseek-chat-v3-0324"
+api_key  = ""   # 填入 OpenRouter API Key
+
+[llm.providers.ollama]
+base_url = "http://localhost:11434/v1"
+model    = "llama3"
+api_key  = "ollama"   # Ollama 本地服务无需真实 key
+
+# ── 插件 ────────────────────────────────────────────────────────────────────
+# 插件配置按 id 分节，缺省使用插件内置默认值。
+# 只需写需要修改的字段。
+
+[key_point_llm]
+enabled         = true
+batch_size      = 4       # 积累多少段后调用一次 LLM
+tail_timeout_ms = 60000   # 超过此时长无新段时，不足 batch_size 也触发（ms）
+
+[key_point_extractor]
+# 本地规则要点提取（与 key_point_llm 可同时启用）
+enabled = false   # 已有 LLM 版本时建议关闭本地规则
+
+[term_explainer]
+enabled          = true
+llm_extract      = true   # LLM 自动识别专业术语
+cooldown_seconds = 20.0   # LLM 提取的冷却间隔（秒）
+min_chars        = 15     # 段落最短字符数，低于此值不触发 LLM 提取
+user_terms       = ""     # 用户自定义关注词（逗号分隔），出现即解释，例："NPI,MOQ,API"
+
+[translator]
+enabled = false   # 实时翻译（需在场景中开启 translation_mode）
+
+[brief_retriever]
+enabled = true    # 客户简报检索（需配置 knowledge_base）
+
+# ── 场景 ────────────────────────────────────────────────────────────────────
+
+[scene]
+# 场景模式：conversation | dictation | bilingual | live_translation | meeting | lecture | custom
+mode = "conversation"
+
+# 自定义场景参数（mode = "custom" 时生效）
+# [scene.custom]
+# user_engine       = "qwen3-asr"
+# client_enabled    = true
+# client_engine     = "qwen3-asr"
+# language          = "zh"
+# client_language   = "en"
+# translation_mode  = "off"    # off | client_to_user | bidirectional
+# speaker_mode      = "channel"  # off | channel | voiceprint
+# vad_preset        = "standard"
+# denoise_enabled   = false
+# min_segment_ms    = 300
+# noise_auto_detect = true
+# plugin_allowlist  = ["term_explainer", "brief_retriever", "key_point_llm"]
+
+# ── 会话记录 ─────────────────────────────────────────────────────────────────
+
+[session]
+sqlite          = true    # 会话存入 SQLite 数据库
+export_markdown = true    # 同时导出 Markdown 文件
+record_audio    = true    # 同时录制原始音频
+
+[recording]
+enabled       = true    # 监听时自动保存录音
+dir           = ""      # 录音目录（空 = <data_dir>/recordings，可填绝对路径）
+clean_silence = false   # 自动静音裁剪（预留）
+
+# ── 会话质量评估 ──────────────────────────────────────────────────────────
+
+[quality]
+auto_detect          = true   # 根据背景噪音自动校准能量阈值
+text_noise_threshold = 0.45   # 文本噪音评分阈值（超过 = 噪音段）
+min_speech_ratio     = 0.15   # 语音占比低于此值 → 静音会话
+max_speech_ratio     = 0.85   # 语音占比高于此值 → 持续噪音
+silence_rms          = 0.01   # 静音能量阈值
+high_rms             = 0.5    # 高能量噪音阈值
+
+# ── 知识库（客户简报）────────────────────────────────────────────────────
+
+[knowledge_base]
+enabled = false
+folder  = ""    # 客户简报文件夹路径（支持 .md / .txt）
+
+# ── Webhook（会后推送）───────────────────────────────────────────────────
+
+[webhooks]
+enabled = false
+urls    = []    # 例：["https://n8n.example.com/webhook/talksage"]
+
+# ── Headless 服务器 ──────────────────────────────────────────────────────
+
+[server]
+enabled = false
+host    = "127.0.0.1"
+port    = 8080
+token   = ""    # API 鉴权 token（空 = 不鉴权，仅限本机访问时可用）

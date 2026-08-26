@@ -1,7 +1,14 @@
-//! 术语解释插件：客户英文段中的缩写 → LLM 中文解释。
-//! 触发条件：speaker=client（英文客户）且含未见缩写，且冷却期已过。
-//! 流程：`skeleton` 先发 `NPI = …`（同步）；`run` 调 LLM 后发最终解释。
+//! 术语解释插件：从转写文本中识别专业术语并用 LLM 解释。
+//!
+//! 两种触发模式（可同时生效）：
+//! 1. `llm_extract`（默认开）：LLM 自动识别段落中的专业术语/行业词汇
+//! 2. `user_terms`：用户指定关注词（逗号/换行分隔），出现即优先解释
+//!
+//! 冷却计时器：`llm_extract` 模式受 `cooldown_seconds` 约束，避免每段都调 LLM。
+//! `user_terms` 命中不受冷却影响，但同一词在本次会话里只解释一次（去重）。
 
+use std::collections::HashSet;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use talksage_core::{DomainEvent, ResultStatus, TranscriptSegment};
@@ -9,20 +16,208 @@ use talksage_llm::render_prompt;
 
 use super::{prompts, PluginContext, SegmentObserver};
 
-fn now() -> f64 {
+fn now_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
 }
 
-/// 提取 2+ 位连续大写字母的缩写（前后非字母数字边界）。
-/// 若文本几乎全大写（ASR 英文输出风格），视为正常文本而非缩写集合。
+/// 从逗号/换行分隔的字符串解析词条列表（去空格、去重、过滤空串）。
+fn parse_user_terms(raw: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    raw.split([',', '\n', '；', '，'])
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty() && seen.insert(t.clone()))
+        .collect()
+}
+
+/// 在 text 中查找 user_terms 里出现的词，保持原大小写。
+fn matched_user_terms(text: &str, terms: &[String]) -> Vec<String> {
+    let lower = text.to_lowercase();
+    terms
+        .iter()
+        .filter(|t| lower.contains(t.to_lowercase().as_str()))
+        .cloned()
+        .collect()
+}
+
+// ── Plugin 状态 ──────────────────────────────────────────────────────────────
+
+pub struct TermExplainerPlugin {
+    cooldown_seconds: f64,
+    llm_extract: bool,
+    min_chars: usize,
+    user_terms: Vec<String>,
+    /// 已解释过的用户词（会话级去重）。
+    explained_terms: Mutex<HashSet<String>>,
+    last_llm_trigger_at: Mutex<f64>,
+    pending_result_id: Mutex<Option<String>>,
+}
+
+impl TermExplainerPlugin {
+    pub fn new(cooldown_seconds: f64, llm_extract: bool, min_chars: usize, user_terms_raw: &str) -> Self {
+        Self {
+            cooldown_seconds,
+            llm_extract,
+            min_chars,
+            user_terms: parse_user_terms(user_terms_raw),
+            explained_terms: Mutex::new(HashSet::new()),
+            last_llm_trigger_at: Mutex::new(0.0),
+            pending_result_id: Mutex::new(None),
+        }
+    }
+
+    fn cooldown_active(&self) -> bool {
+        let last = *self.last_llm_trigger_at.lock().unwrap();
+        self.cooldown_seconds > 0.0 && last > 0.0 && now_secs() - last < self.cooldown_seconds
+    }
+
+    fn new_user_terms_in(&self, text: &str) -> Vec<String> {
+        let explained = self.explained_terms.lock().unwrap();
+        matched_user_terms(text, &self.user_terms)
+            .into_iter()
+            .filter(|t| !explained.contains(t))
+            .collect()
+    }
+
+    fn mark_explained(&self, terms: &[String]) {
+        let mut explained = self.explained_terms.lock().unwrap();
+        for t in terms {
+            explained.insert(t.clone());
+        }
+    }
+}
+
+// ── SegmentObserver ──────────────────────────────────────────────────────────
+
+impl SegmentObserver for TermExplainerPlugin {
+    fn name(&self) -> &'static str {
+        "term_explainer"
+    }
+
+    fn should_trigger(&self, seg: &TranscriptSegment) -> bool {
+        if seg.is_partial || seg.text.trim().is_empty() {
+            return false;
+        }
+        // 用户词命中：不受冷却
+        if !self.new_user_terms_in(&seg.text).is_empty() {
+            return true;
+        }
+        // LLM 主动提取：受冷却 + 最短字数
+        self.llm_extract
+            && !self.cooldown_active()
+            && seg.text.trim().chars().count() >= self.min_chars
+    }
+
+    fn skeleton(&self, seg: &TranscriptSegment) -> Vec<DomainEvent> {
+        let result_id = format!("term-{}", now_secs() as u64);
+        *self.pending_result_id.lock().unwrap() = Some(result_id.clone());
+
+        // 用户词命中时骨架里提示词名，增强反馈感
+        let pinned = self.new_user_terms_in(&seg.text);
+        let content = if !pinned.is_empty() {
+            format!("{} = …", pinned.join("、"))
+        } else {
+            "术语识别中…".to_string()
+        };
+        vec![DomainEvent::Term {
+            result_id,
+            status: ResultStatus::Skeleton,
+            content,
+        }]
+    }
+
+    fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> anyhow::Result<Option<DomainEvent>> {
+        let Some(llm) = ctx.llm.as_ref() else {
+            return Ok(None);
+        };
+        let pinned = self.new_user_terms_in(&seg.text);
+        let pinned_section = if pinned.is_empty() {
+            String::new()
+        } else {
+            format!("\n用户关注词（必须解释）：{}\n", pinned.join("、"))
+        };
+        let prompt = render_prompt(
+            prompts::TERM_EXPLAINER_USER,
+            &[("text", seg.text.trim()), ("pinned_section", &pinned_section)],
+        );
+        let content = llm.complete(&prompt, prompts::TERM_EXPLAINER_SYSTEM)?;
+        let content = content.trim().to_string();
+        if content.is_empty() {
+            return Ok(None);
+        }
+        // 标记用户词已解释；更新冷却（非用户词触发时才更新）
+        if !pinned.is_empty() {
+            self.mark_explained(&pinned);
+        } else {
+            *self.last_llm_trigger_at.lock().unwrap() = now_secs();
+        }
+        let result_id = self
+            .pending_result_id
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| format!("term-{}", now_secs() as u64));
+        Ok(Some(DomainEvent::Term {
+            result_id,
+            status: ResultStatus::Final,
+            content,
+        }))
+    }
+}
+
+// ── Plugin 注册 ───────────────────────────────────────────────────────────────
+
+pub struct TermExplainerPluginDef;
+
+impl crate::registry::Plugin for TermExplainerPluginDef {
+    fn descriptor(&self) -> &'static crate::PluginDescriptor {
+        static D: crate::PluginDescriptor = crate::PluginDescriptor {
+            id: "term_explainer",
+            label: "术语解释",
+            description: "LLM 识别专业术语并解释；支持用户自定义关注词",
+            category: crate::PluginCategory::Analysis,
+            phase: crate::PluginPhase::Observer,
+            capabilities: &[crate::PluginCapability::Llm],
+            host_managed: &[],
+            after: &[],
+        };
+        &D
+    }
+
+    fn default_config(&self) -> crate::registry::PluginConfig {
+        crate::registry::PluginConfig::from_value(serde_json::json!({
+            "enabled": true,
+            "llm_extract": true,
+            "cooldown_seconds": 20.0,
+            "min_chars": 15,
+            "user_terms": "",
+        }))
+    }
+
+    fn register(&self, cfg: &crate::registry::PluginConfig, _ctx: &PluginContext, hooks: &mut crate::registry::HookRegistry) {
+        let cooldown = cfg.get_f64("cooldown_seconds", 20.0);
+        let llm_extract = cfg.get_bool("llm_extract", true);
+        let min_chars = cfg.get_u64("min_chars", 15) as usize;
+        let user_terms = cfg.get_str("user_terms", "");
+        hooks.add_observer(std::sync::Arc::new(TermExplainerPlugin::new(
+            cooldown,
+            llm_extract,
+            min_chars,
+            &user_terms,
+        )));
+    }
+}
+
+// ── 旧版 find_acronyms（保留供外部兼容）──────────────────────────────────────
+
+/// 提取 2+ 位连续大写字母的缩写。保留以兼容任何直接引用它的测试/代码。
 pub fn find_acronyms(text: &str) -> Vec<String> {
     let uppercase = text.chars().filter(|c| c.is_ascii_uppercase()).count();
     let alphabetic = text.chars().filter(|c| c.is_alphabetic()).count();
     if alphabetic > 0 && uppercase as f64 / alphabetic as f64 > 0.7 {
-        return Vec::new(); // 全大写输出（如 zipformer-en），非缩写
+        return Vec::new();
     }
     let bytes = text.as_bytes();
     let mut out: Vec<String> = Vec::new();
@@ -36,7 +231,7 @@ pub fn find_acronyms(text: &str) -> Vec<String> {
             let word = &text[start..j];
             let prev_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
             let next_ok = j >= bytes.len() || !bytes[j].is_ascii_alphanumeric();
-            if prev_ok && next_ok && !out.iter().any(|w| w == word) {
+            if prev_ok && next_ok && word.len() >= 2 && !out.iter().any(|w| w == word) {
                 out.push(word.to_string());
             }
         } else {
@@ -46,161 +241,16 @@ pub fn find_acronyms(text: &str) -> Vec<String> {
     out
 }
 
-pub struct TermExplainerPlugin {
-    cooldown_seconds: f64,
-    seen: std::sync::Mutex<std::collections::HashSet<String>>,
-    last_trigger_at: std::sync::Mutex<f64>,
-    /// 最近骨架的 result_id（final 复用，前端按 id 原地更新）。
-    pending_result_id: std::sync::Mutex<Option<String>>,
-}
-
-impl TermExplainerPlugin {
-    pub fn new(cooldown_seconds: f64) -> Self {
-        Self {
-            cooldown_seconds,
-            seen: std::sync::Mutex::new(std::collections::HashSet::new()),
-            last_trigger_at: std::sync::Mutex::new(0.0),
-            pending_result_id: std::sync::Mutex::new(None),
-        }
-    }
-
-    fn unseen_acronyms(&self, text: &str) -> Vec<String> {
-        let seen = self.seen.lock().unwrap();
-        find_acronyms(text)
-            .into_iter()
-            .filter(|a| !seen.contains(a))
-            .collect()
-    }
-
-    fn cooldown_active(&self) -> bool {
-        let last = *self.last_trigger_at.lock().unwrap();
-        self.cooldown_seconds > 0.0 && last > 0.0 && now() - last < self.cooldown_seconds
-    }
-
-    fn reserve(&self, acronyms: &[String]) {
-        let mut seen = self.seen.lock().unwrap();
-        for a in acronyms {
-            seen.insert(a.clone());
-        }
-        *self.last_trigger_at.lock().unwrap() = now();
-    }
-}
-
-impl SegmentObserver for TermExplainerPlugin {
-    fn name(&self) -> &'static str {
-        "term_explainer"
-    }
-
-    fn should_trigger(&self, seg: &TranscriptSegment) -> bool {
-        seg.speaker_id != 0
-            && !self.unseen_acronyms(&seg.text).is_empty()
-            && !self.cooldown_active()
-    }
-
-    fn skeleton(&self, seg: &TranscriptSegment) -> Vec<DomainEvent> {
-        let acronyms = self.unseen_acronyms(&seg.text);
-        if acronyms.is_empty() {
-            return Vec::new();
-        }
-        let result_id = format!("term-{}", now() as u64);
-        *self.pending_result_id.lock().unwrap() = Some(result_id.clone());
-        let content = if acronyms.len() == 1 {
-            format!("{} = …", acronyms[0])
-        } else {
-            format!("{} = …", acronyms.join("、"))
-        };
-        vec![DomainEvent::Term {
-            result_id,
-            status: ResultStatus::Skeleton,
-            content,
-        }]
-    }
-
-    fn run(
-        &self,
-        seg: &TranscriptSegment,
-        ctx: &PluginContext,
-    ) -> anyhow::Result<Option<DomainEvent>> {
-        let acronyms = find_acronyms(&seg.text);
-        if acronyms.is_empty() {
-            return Ok(None);
-        }
-        let Some(llm) = ctx.llm.as_ref() else {
-            return Ok(None);
-        };
-        let acronyms_joined = acronyms.join(", ");
-        let prompt = render_prompt(
-            prompts::TERM_EXPLAINER_USER,
-            &[("text", &seg.text), ("acronyms", &acronyms_joined)],
-        );
-        let content = llm.complete(&prompt, prompts::TERM_EXPLAINER_SYSTEM)?;
-        if content.trim().is_empty() {
-            return Ok(None);
-        }
-        self.reserve(&acronyms);
-        // 复用骨架 result_id，前端按 id 原地更新
-        let result_id = self
-            .pending_result_id
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or_else(|| format!("term-{}", now() as u64));
-        Ok(Some(DomainEvent::Term {
-            result_id,
-            status: ResultStatus::Final,
-            content: content.trim().to_string(),
-        }))
-    }
-}
-
-/// 注册表条目。与 observer 本体 `TermExplainerPlugin` 分开命名：
-/// 前者是「插件身份 + 配置 + 装配」，后者是钩子实现。
-pub struct TermExplainerPluginDef;
-
-impl crate::registry::Plugin for TermExplainerPluginDef {
-    fn descriptor(&self) -> &'static crate::PluginDescriptor {
-        static D: crate::PluginDescriptor = crate::PluginDescriptor {
-            id: "term_explainer",
-            label: "术语解释",
-            description: "使用 LLM 解释会话中的专业术语和缩写",
-            category: crate::PluginCategory::Analysis,
-            phase: crate::PluginPhase::Observer,
-            capabilities: &[crate::PluginCapability::Llm],
-            host_managed: &[],
-            after: &[],
-        };
-        &D
-    }
-
-    fn default_config(&self) -> crate::registry::PluginConfig {
-        crate::registry::PluginConfig::from_value(serde_json::json!({
-            "enabled": true,
-            "cooldown_seconds": 10.0,
-        }))
-    }
-
-    fn register(
-        &self,
-        cfg: &crate::registry::PluginConfig,
-        _ctx: &PluginContext,
-        hooks: &mut crate::registry::HookRegistry,
-    ) {
-        hooks.add_observer(std::sync::Arc::new(TermExplainerPlugin::new(
-            cfg.get_f64("cooldown_seconds", 10.0),
-        )));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use talksage_core::TranscriptSegment;
     use talksage_llm::MockProvider;
 
-    fn seg(speaker: u32, text: &str) -> TranscriptSegment {
+    fn seg(text: &str) -> TranscriptSegment {
         TranscriptSegment {
-            speaker_id: speaker,
-            speaker_label: if speaker == 1 { "客户" } else { "我" }.into(),
+            speaker_id: 1,
+            speaker_label: "客户".into(),
             speaker_attribution: None,
             text: text.into(),
             is_partial: false,
@@ -211,79 +261,74 @@ mod tests {
     }
 
     #[test]
-    fn finds_acronyms_in_text() {
-        let found = find_acronyms("We need NPI and MOQ by Friday. ETA is next week.");
+    fn parse_user_terms_handles_various_separators() {
+        let terms = parse_user_terms("API, REST\nGraphQL；gRPC，SDK");
+        assert!(terms.contains(&"API".to_string()));
+        assert!(terms.contains(&"REST".to_string()));
+        assert!(terms.contains(&"GraphQL".to_string()));
+        assert!(terms.contains(&"gRPC".to_string()));
+        assert!(terms.contains(&"SDK".to_string()));
+    }
+
+    #[test]
+    fn user_terms_trigger_without_cooldown() {
+        let p = TermExplainerPlugin::new(999.0, false, 5, "NPI, MOQ");
+        assert!(p.should_trigger(&seg("We need NPI samples")));
+        assert!(!p.should_trigger(&seg("How are you today")));
+    }
+
+    #[test]
+    fn user_terms_deduplicate_across_session() {
+        let p = TermExplainerPlugin::new(0.0, false, 5, "NPI");
+        assert!(p.should_trigger(&seg("We need NPI")));
+        p.mark_explained(&["NPI".to_string()]);
+        assert!(!p.should_trigger(&seg("NPI status?")));
+    }
+
+    #[test]
+    fn llm_extract_respects_cooldown() {
+        let p = TermExplainerPlugin::new(999.0, true, 5, "");
+        assert!(p.should_trigger(&seg("请讨论系统架构设计方案")));
+        *p.last_llm_trigger_at.lock().unwrap() = now_secs();
+        assert!(!p.should_trigger(&seg("另一段关于架构设计的内容")));
+    }
+
+    #[test]
+    fn llm_extract_respects_min_chars() {
+        let p = TermExplainerPlugin::new(0.0, true, 20, "");
+        assert!(!p.should_trigger(&seg("短段落"))); // < 20 chars
+        assert!(p.should_trigger(&seg("这是一段较长的关于系统架构设计的讨论内容")));
+    }
+
+    #[test]
+    fn skeleton_includes_pinned_terms_if_matched() {
+        let p = TermExplainerPlugin::new(0.0, false, 5, "NPI");
+        let events = p.skeleton(&seg("We need NPI samples"));
+        match &events[0] {
+            DomainEvent::Term { status: ResultStatus::Skeleton, content, .. } => {
+                assert!(content.contains("NPI"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_calls_llm_and_returns_final_term() {
+        let mock = MockProvider { response: "NPI：New Product Introduction，新产品导入流程".into() };
+        let ctx = PluginContext { kb: None, llm: Some(std::sync::Arc::new(mock)), ..PluginContext::new() };
+        let p = TermExplainerPlugin::new(0.0, true, 5, "");
+        match p.run(&seg("We need NPI samples"), &ctx).unwrap() {
+            Some(DomainEvent::Term { status: ResultStatus::Final, content, .. }) => {
+                assert!(content.contains("NPI"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn find_acronyms_still_works() {
+        let found = find_acronyms("We need NPI and MOQ by Friday.");
         assert!(found.contains(&"NPI".to_string()));
         assert!(found.contains(&"MOQ".to_string()));
-        assert!(found.contains(&"ETA".to_string()));
-    }
-
-    #[test]
-    fn ignores_all_uppercase_output() {
-        // zipformer-en 全大写输出：不应被视为缩写
-        assert!(find_acronyms("AFTER EARLY NIGHTFALL THE YELLOW LAMPS").is_empty());
-    }
-
-    #[test]
-    fn ignores_non_client_segments() {
-        let p = TermExplainerPlugin::new(0.0);
-        assert!(!p.should_trigger(&seg(0, "NPI 是什么")));
-    }
-
-    #[test]
-    fn triggers_and_emits_skeleton() {
-        let p = TermExplainerPlugin::new(0.0);
-        assert!(p.should_trigger(&seg(1, "We need NPI samples")));
-        let mut skels = p.skeleton(&seg(1, "We need NPI samples"));
-        assert!(!skels.is_empty(), "应有骨架");
-        match skels.remove(0) {
-            DomainEvent::Term {
-                status: ResultStatus::Skeleton,
-                content,
-                ..
-            } => {
-                assert!(content.contains("NPI"));
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn run_reserves_acronyms_for_dedup() {
-        let mock = MockProvider {
-            response: "NPI = New Product Introduction".into(),
-        };
-        let ctx = PluginContext {
-            kb: None,
-            llm: Some(std::sync::Arc::new(mock)),
-            ..PluginContext::new()
-        };
-        let p = TermExplainerPlugin::new(0.0);
-        let _ = p.run(&seg(1, "We need NPI samples"), &ctx);
-        // 会话去重：run 后同缩写不再触发
-        assert!(!p.should_trigger(&seg(1, "NPI again")));
-    }
-
-    #[test]
-    fn run_uses_ctx_llm_for_final() {
-        let mock = MockProvider {
-            response: "NPI = New Product Introduction（新产品导入）".into(),
-        };
-        let ctx = PluginContext {
-            kb: None,
-            llm: Some(std::sync::Arc::new(mock)),
-            ..PluginContext::new()
-        };
-        let p = TermExplainerPlugin::new(0.0);
-        match p.run(&seg(1, "NPI status?"), &ctx).unwrap() {
-            Some(DomainEvent::Term {
-                status: ResultStatus::Final,
-                content,
-                ..
-            }) => {
-                assert!(content.contains("NPI"));
-            }
-            other => panic!("应有 final: {other:?}"),
-        }
     }
 }

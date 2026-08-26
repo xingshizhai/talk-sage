@@ -21,7 +21,9 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
 
 环境变量自动设置（本脚本进程内）:
   CARGO_HOME=$PWD\.cargo-home  SHERPA_ONNX_ARCHIVE_DIR=$PWD\.tools\sherpa-onnx-archives
-  TALKSAGE_DATA_DIR=$PWD\.tools\data  TALKSAGE_MODELS_DIR=$PWD\models
+  TALKSAGE_MODELS_DIR=$PWD\models
+  TALKSAGE_DATA_DIR: 外部已设则沿用；未设则默认 $PWD\.dev-data（调试数据与生产隔离）
+    首次使用：cp config\talksage.example.toml .dev-data\talksage.toml 然后填入 API Key
 代理: 设置 $env:https_proxy / $env:http_proxy 后运行本脚本即可。
 #>
 
@@ -43,7 +45,10 @@ Set-Location $Root
 $env:HTTP_PROXY = ""; $env:HTTPS_PROXY = ""; $env:http_proxy = ""; $env:https_proxy = ""
 $env:CARGO_HOME = Join-Path $Root ".cargo-home"
 $env:SHERPA_ONNX_ARCHIVE_DIR = Join-Path $Root ".tools\sherpa-onnx-archives"
-$env:TALKSAGE_DATA_DIR = Join-Path $Root ".tools\data"
+# TALKSAGE_DATA_DIR: 外部已设则沿用；否则默认使用项目内 .dev-data（方便调试）
+if (-not $env:TALKSAGE_DATA_DIR) {
+    $env:TALKSAGE_DATA_DIR = Join-Path $Root ".dev-data"
+}
 $env:TALKSAGE_MODELS_DIR = Join-Path $Root "models"
 $CargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
 if (Test-Path $CargoBin) { $env:Path = "$CargoBin;" + $env:Path }
@@ -52,6 +57,26 @@ $CliExe = Join-Path $Root "target\debug\talksage.exe"
 $ReleaseExe = Join-Path $Root "target\release\talksage-app.exe"
 
 function Write-Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
+
+# 确保开发数据目录存在，首次自动从模板初始化配置文件
+function Ensure-DevData {
+    $devData = $env:TALKSAGE_DATA_DIR
+    $config  = Join-Path $devData "talksage.toml"
+    $template = Join-Path $Root "config/talksage.example.toml"
+    if (-not (Test-Path $devData)) {
+        New-Item -ItemType Directory -Force $devData | Out-Null
+        Write-Host "已创建开发数据目录: $devData" -ForegroundColor Green
+    }
+    if (-not (Test-Path $config)) {
+        if (Test-Path $template) {
+            Copy-Item $template $config
+            Write-Host "已从模板初始化配置文件: $config" -ForegroundColor Green
+            Write-Host "提示: 编辑该文件填写 API Key 等配置（LLM 要点聚合 / 术语解释需要）" -ForegroundColor Yellow
+        } else {
+            Write-Host "警告: 未找到配置模板 talksage.example.toml，将使用内置默认值运行" -ForegroundColor Yellow
+        }
+    }
+}
 
 # 原生命令包装：显示输出（stderr 并入）并返回退出码
 function Invoke-Native([scriptblock]$sb) {
@@ -125,9 +150,17 @@ function Cmd-Build {
     Pop-Location
     if ($code2 -ne 0) { Write-Host "前端构建失败" -ForegroundColor Red; return 1 }
     Write-Host "`n编译完成: target\debug\talksage.exe"
+    $devData = Join-Path $Root ".dev-data"
+    if (-not (Test-Path (Join-Path $devData "talksage.toml"))) {
+        Write-Host "提示: 尚未配置开发数据目录，运行以下命令初始化:" -ForegroundColor Yellow
+        Write-Host "  New-Item -ItemType Directory -Force .dev-data | Out-Null" -ForegroundColor Yellow
+        Write-Host "  Copy-Item config\talksage.example.toml .dev-data\talksage.toml" -ForegroundColor Yellow
+        Write-Host "  然后在 .dev-data\talksage.toml 中填入 API Key 等配置" -ForegroundColor Yellow
+    }
 }
 
 function Cmd-Dev {
+    Ensure-DevData
     Write-Step "Tauri 开发模式"
     Push-Location (Join-Path $Root "web")
     $null = Invoke-Native { npx tauri dev }
@@ -135,6 +168,7 @@ function Cmd-Dev {
 }
 
 function Cmd-Run {
+    Ensure-DevData
     if (-not (Test-Path $ReleaseExe)) {
         Write-Host "release 未构建，先运行: .\scripts\talksage.ps1 package（或 build 后手动构建 release）" -ForegroundColor Yellow
         Write-Host "快速 release 构建: cd web; npx tauri build --no-bundle"
@@ -145,6 +179,7 @@ function Cmd-Run {
 }
 
 function Cmd-Serve {
+    Ensure-DevData
     $host = "127.0.0.1"; $port = 8080
     for ($i = 0; $i -lt $Rest.Count; $i++) {
         if ($Rest[$i] -eq "-host" -and $i + 1 -lt $Rest.Count) { $host = $Rest[$i + 1] }
@@ -160,6 +195,7 @@ function Cmd-Serve {
 }
 
 function Cmd-Listen {
+    Ensure-DevData
     $wav = ""; $engine = "paraformer-zh"; $client = ""; $save = $false
     for ($i = 0; $i -lt $Rest.Count; $i++) {
         if ($Rest[$i] -eq "-wav" -and $i + 1 -lt $Rest.Count) { $wav = $Rest[$i + 1] }
@@ -177,6 +213,7 @@ function Cmd-Listen {
 }
 
 function Cmd-Import {
+    Ensure-DevData
     $wav = ""; $engine = "paraformer-zh"
     for ($i = 0; $i -lt $Rest.Count; $i++) {
         if ($Rest[$i] -eq "-wav" -and $i + 1 -lt $Rest.Count) { $wav = $Rest[$i + 1] }

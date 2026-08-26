@@ -11,6 +11,7 @@ pub mod builtin;
 pub mod conversation_metrics;
 pub mod cross_stream_dedup;
 pub mod key_point_extractor;
+pub mod key_point_llm;
 pub mod registry;
 pub mod session_quality;
 pub mod short_segment;
