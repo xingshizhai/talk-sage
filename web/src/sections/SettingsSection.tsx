@@ -37,7 +37,7 @@ export default function SettingsSection({
   onSave: (updates: Record<string, unknown>) => Promise<void>;
   onOpenModels: () => void;
 }) {
-  const [tab, setTab] = useState<SettingsTab>("asr");
+  const [tab, setTab] = useState<SettingsTab>("scene");
   // 场景模式
   const [sceneMode, setSceneMode] = useState<SceneMode>(() => {
     const m = (config?.scene?.mode ?? "conversation") as string;
