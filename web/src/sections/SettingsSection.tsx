@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import type { AppConfig, AsrModelInfo, AsrRuntimeStatus, PluginMeta, PluginStatusInfo, SceneMode, SceneParams } from "../lib/api";
 import type { PluginValues } from "../lib/plugins";
 import { analysisPluginIds, buildPluginUpdates, fieldLabel, initialPluginValues, pluginFields, pluginStatusLabel } from "../lib/plugins";
+import { llmProviderApiKey } from "../lib/llm";
 import { getApi } from "../lib/transport";
 
 const api = getApi();
@@ -82,7 +83,7 @@ export default function SettingsSection({
     noise_auto_detect: config?.scene?.custom?.noise_auto_detect ?? true,
   }));
   const [defaultProvider, setDefaultProvider] = useState(config?.llm?.default ?? "deepseek");
-  const [apiKey, setApiKey] = useState<string>("");
+  const [apiKey, setApiKey] = useState(() => llmProviderApiKey(config, config?.llm?.default ?? "deepseek"));
   const [llmTesting, setLlmTesting] = useState(false);
   const [llmTestResult, setLlmTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [aliyunTesting, setAliyunTesting] = useState(false);
@@ -183,6 +184,12 @@ export default function SettingsSection({
     // 只在挂载时跑一次：config 也只在挂载时读（本组件其余 state 同一约定），
     // 设置页是从 App 的 navPage 切进来的，切进来就是一次新的挂载。
   }, []);
+
+  // API Key 必须跟当前 provider / 已加载配置走：state 初始值在 config 尚未到达时是空的，
+  // 且切换供应商时也不能继续显示上一家的密钥。
+  useEffect(() => {
+    setApiKey(llmProviderApiKey(config, defaultProvider));
+  }, [config, defaultProvider]);
 
   /** 改某个插件的某个配置键。 */
   function setPluginField(id: string, key: string, value: boolean | number | string) {
@@ -345,7 +352,7 @@ export default function SettingsSection({
     try {
       await api.testLlm({
         provider: defaultProvider,
-        apiKey: apiKey.trim(),
+        apiKey: apiKey.trim() || undefined,
       });
       setLlmTestResult({ ok: true, text: "连接正常，API Key 有效" });
     } catch (e) {

@@ -1061,7 +1061,9 @@ fn test_llm(
         .get(&provider)
         .ok_or_else(|| format!("未知 provider: {provider}"))?;
     let llm = talksage_llm::OpenAICompatProvider::new(
-        api_key.unwrap_or_else(|| cfg.api_key.clone()),
+        api_key
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| cfg.api_key.clone()),
         model.unwrap_or_else(|| cfg.model.clone()),
         base_url.unwrap_or_else(|| cfg.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com/v1".to_string())),
     );

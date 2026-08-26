@@ -945,7 +945,10 @@ async fn test_llm_api(State(state): State<ServerState>, headers: axum::http::Hea
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("未知 provider: {provider}") }))).into_response();
     };
     let llm = talksage_llm::OpenAICompatProvider::new(
-        body.api_key.clone().unwrap_or_else(|| cfg.api_key.clone()),
+        body.api_key
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| cfg.api_key.clone()),
         body.model.clone().unwrap_or_else(|| cfg.model.clone()),
         body.base_url.clone().unwrap_or_else(|| cfg.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com/v1".to_string())),
     );
