@@ -134,20 +134,17 @@ Rust         /MT  ─┘（RUSTFLAGS: +crt-static + /NODEFAULTLIB:msvcrt.lib 等
 
 ## 六、当前状态与下一步
 
-**已完成**：
+**全部完成**：
 - ✅ Vulkan SDK 1.4.357.0 + LLVM 22.1.8 安装，SHA256 校验通过；
-- ✅ `cargo check -p talksage-asr --features vulkan-gpu` 通过（whisper.cpp Vulkan 代码路径无编译错误）；
-- ✅ `cargo check -p talksage-app`（含 vulkan feature）通过；
-- ✅ 无 feature 的 fallback 路径全绿（asr 51 测试、pipeline 59 测试）；
-- ✅ CRT 双链接问题根本原因查明并修复（`vendor/whisper-rs-sys/build.rs`，见 5.4、5.5）。
+- ✅ `cargo check -p talksage-asr --features vulkan-gpu` 通过；
+- ✅ `cargo build -p talksage-app` 链接成功（talksage-app.exe 113 MB），无任何 LNK 错误；
+- ✅ `dumpbin /directives` 确认所有 whisper.cpp .lib（ggml.lib / ggml-base.lib / ggml-cpu.lib /
+  ggml-vulkan.lib / whisper.lib）均含 `/DEFAULTLIB:LIBCMT`（静态 CRT /MT），无 MSVCRT；
+- ✅ `GpuBackend::detect()` 返回 `Vulkan`（provider=vulkan, accelerated=true）；
+- ✅ 无 feature fallback 路径全绿（asr 51 测试、pipeline 59 测试）；
+- ✅ `LIBCLANG_PATH` 已 `setx` 持久化至用户级环境变量；
+- ✅ `scripts/build-vulkan.bat` 一键构建脚本已提交；
+- ✅ `vendor/whisper-rs-sys` patch + 根 `Cargo.toml` + `docs/vulkan-gpu-build.md` 全部已提交。
 
-**待验证**（下次在完整构建环境下执行）：
-- ⬜ 用四节中的 `.bat` 脚本执行 `cargo build -p talksage-app`，确认链接无 LNK 错误；
-- ⬜ 构建成功后用 `dumpbin /directives` 验证 whisper.cpp 各 .lib 含 `DEFAULTLIB:LIBCMT`；
-- ⬜ 验证 `GpuBackend::detect()` 在真实机器上返回 `Vulkan`（本机有 `vulkan-1.dll`）；
-- ⬜ 用真实 Whisper large-v3-turbo Q5_0 模型跑一次转写，确认 GPU 推理正常。
-
-**后续工作**：
-1. 持久化 `LIBCLANG_PATH` 用户级环境变量（当前需每次手动设置；`setx LIBCLANG_PATH "C:\Program Files\LLVM\bin"`）；
-2. 将构建批处理固化为 `scripts/build-vulkan.bat`（或集成进 `talksage.ps1` 的 build 子命令）；
-3. 提交 `vendor/whisper-rs-sys` patch + 根 `Cargo.toml` patch 段（当前 `vendor/` 未跟踪）。
+**遗留**：
+- ⬜ 用真实 Whisper large-v3-turbo Q5_0 模型跑一次完整转写，确认 GPU 推理质量（功能验证，非构建阻塞）。
