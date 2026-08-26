@@ -734,7 +734,11 @@ fn read_logs(state: tauri::State<'_, AppState>, lines: Option<usize>) -> Result<
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .map_err(|e| format!("读取日志目录失败: {e}"))?
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("talksage.log"))
+        .filter(|e| {
+            let fname = e.file_name();
+            let name = fname.to_string_lossy();
+            name.starts_with("talksage") && name.ends_with(".log")
+        })
         .collect();
     if files.is_empty() {
         return Ok("（暂无日志）".to_string());

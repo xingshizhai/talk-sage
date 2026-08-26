@@ -43,7 +43,13 @@ pub fn init(data_dir: Option<&PathBuf>) -> LogGuard {
 
     let dir = log_dir(data_dir);
     let _ = std::fs::create_dir_all(&dir);
-    let file_appender = tracing_appender::rolling::daily(&dir, "talksage.log");
+    // 每日轮转：talksage.YYYY-MM-DD.log（日期在文件名中，.log 为后缀）
+    let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("talksage")
+        .filename_suffix("log")
+        .build(&dir)
+        .expect("初始化滚动日志 appender 失败");
     let (file_writer, worker_guard) = tracing_appender::non_blocking(file_appender);
 
     let filter = EnvFilter::try_new(level_from_env()).unwrap_or_else(|_| EnvFilter::new("info"));

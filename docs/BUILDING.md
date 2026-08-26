@@ -255,10 +255,10 @@ cd web && npx vitest run
 ### 5.2 日志调试
 
 ```powershell
-# 结构化日志（JSON lines）写入 <数据目录>/logs/talksage.<日期>.log
+# 结构化日志（JSON lines）写入 <数据目录>/logs/talksage.YYYY-MM-DD.log
 # 级别：--verbose / --log-level / RUST_LOG / TALKSAGE_LOG
 .\target\debug\talksage.exe --verbose listen --input a.wav
-Get-Content "$env:TALKSAGE_DATA_DIR\logs\talksage.log.*" | Select-String '"level":"(ERROR|WARN)"'
+Get-Content "$env:TALKSAGE_DATA_DIR\logs\talksage.*.log" | Select-String '"level":"(ERROR|WARN)"'
 ```
 
 详见 [docs/LOGGING.md](LOGGING.md)（日志位置、字段、AI Agent 分析指引）。

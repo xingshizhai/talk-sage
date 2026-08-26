@@ -24,8 +24,12 @@ fn init_writes_json_lines_to_log_file() {
         files = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with("talksage.log"))
-            .collect();
+            .filter(|e| {
+                let fname = e.file_name();
+                let name = fname.to_string_lossy();
+                name.starts_with("talksage") && name.ends_with(".log")
+            })
+            .collect::<Vec<_>>();
         if !files.is_empty() {
             break;
         }

@@ -715,7 +715,11 @@ async fn read_logs_api(State(state): State<ServerState>, headers: axum::http::He
     };
     let mut files: Vec<_> = entries
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("talksage.log"))
+        .filter(|e| {
+            let fname = e.file_name();
+            let name = fname.to_string_lossy();
+            name.starts_with("talksage") && name.ends_with(".log")
+        })
         .collect();
     if files.is_empty() {
         return (StatusCode::OK, Json(serde_json::json!({ "logs": "" }))).into_response();

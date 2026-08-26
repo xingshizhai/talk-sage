@@ -10,7 +10,7 @@
 | 控制台 | 人类可读文本（级别着色），CLI 直接可见 |
 
 - 数据目录：`TALKSAGE_DATA_DIR`（默认 `~/.talksage`）
-- 每日轮转（`talksage.log.<日期>`），多天日志并存
+- 每日轮转（`talksage.YYYY-MM-DD.log`），多天日志并存
 
 **JSON lines 示例：**
 

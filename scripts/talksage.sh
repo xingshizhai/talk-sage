@@ -178,6 +178,6 @@ case "$CMD" in
         bundle="$CARGO_TARGET_DIR/release/bundle/macos/拓思者.app"
         [ -d "$bundle" ] && echo "产物: $bundle（麦克风授权在此包内才生效）"
         ;;
-    logs)    ls -t "$DATA_DIR/logs"/talksage.log.* 2>/dev/null | head -1 | xargs -I{} sh -c 'echo "=== {} ==="; tail -50 "{}"' ;;
+    logs)    ls -t "$DATA_DIR/logs"/talksage.*.log 2>/dev/null | head -1 | xargs -I{} sh -c 'echo "=== {} ==="; tail -50 "{}"' ;;
     *)       sed -n 's/^# //p' "$0" | head -20 ;;
 esac

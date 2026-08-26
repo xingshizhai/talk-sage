@@ -21,7 +21,7 @@ def main() -> int:
     parser.add_argument(
         "paths",
         nargs="*",
-        help="日志路径或 glob；默认 <TALKSAGE_DATA_DIR|~/.talksage>/logs/talksage.log.*",
+        help="日志路径或 glob；默认 <TALKSAGE_DATA_DIR|~/.talksage>/logs/talksage.*.log",
     )
     args = parser.parse_args()
     if args.paths:
@@ -30,7 +30,7 @@ def main() -> int:
         data_dir = os.environ.get("TALKSAGE_DATA_DIR") or os.path.join(
             os.path.expanduser("~"), ".talksage"
         )
-        patterns = [os.path.join(data_dir, "logs", "talksage.log.*")]
+        patterns = [os.path.join(data_dir, "logs", "talksage.*.log")]
     files = sorted({Path(p) for pattern in patterns for p in glob.glob(pattern)})
     decisions: Counter[str] = Counter()
     labels: Counter[str] = Counter()

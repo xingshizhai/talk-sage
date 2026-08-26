@@ -290,7 +290,7 @@ function Cmd-Logs {
     $dataDir = $env:TALKSAGE_DATA_DIR
     $logDir = Join-Path $dataDir "logs"
     if (-not (Test-Path $logDir)) { Write-Host "无日志目录: $logDir"; return }
-    $log = Get-ChildItem $logDir -Filter "talksage.log.*" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $log = Get-ChildItem $logDir -Filter "talksage.*.log" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $log) { Write-Host "无日志文件"; return }
     Write-Host "=== $($log.Name)（最近 50 行）==="
     Get-Content $log.FullName -Tail 50
