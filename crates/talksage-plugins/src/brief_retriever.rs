@@ -1,4 +1,7 @@
-//! 简报检索插件：客户发言命中知识库 → 相关简报片段。
+//! 简报检索插件：发言命中知识库 → 相关简报片段。
+//!
+//! 默认跳过主人（`SpeakerRole::Owner`，无归属时回退 `speaker_id == 0`）。
+//! 无客户流场景由宿主把 `include_user` 设为 true，检索主讲人。
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,16 +19,27 @@ fn now() -> f64 {
 pub struct BriefRetrieverPlugin {
     cooldown_seconds: f64,
     min_score: f32,
+    include_user: bool,
     last_trigger_at: std::sync::Mutex<f64>,
 }
 
 impl BriefRetrieverPlugin {
-    pub fn new(cooldown_seconds: f64, min_score: f32) -> Self {
+    pub fn new(cooldown_seconds: f64, min_score: f32, include_user: bool) -> Self {
         Self {
             cooldown_seconds,
             min_score,
+            include_user,
             last_trigger_at: std::sync::Mutex::new(0.0),
         }
+    }
+}
+
+/// 是否为主人发言。有归属时看 role；没有或 Unknown 时回退 speaker_id == 0。
+fn is_owner_speech(seg: &TranscriptSegment) -> bool {
+    match seg.speaker_attribution.as_ref().map(|a| a.role) {
+        Some(talksage_core::SpeakerRole::Owner) => true,
+        Some(talksage_core::SpeakerRole::Client | talksage_core::SpeakerRole::Other) => false,
+        Some(talksage_core::SpeakerRole::Unknown) | None => seg.speaker_id == 0,
     }
 }
 
@@ -35,8 +49,8 @@ impl SegmentObserver for BriefRetrieverPlugin {
     }
 
     fn should_trigger(&self, seg: &TranscriptSegment) -> bool {
-        if seg.speaker_id == 0 {
-            return false; // 主人发言不检索简报（简报针对客户/其他说话人）
+        if is_owner_speech(seg) && !self.include_user {
+            return false; // 主人发言默认不检索；无客户流场景由 include_user 打开
         }
         let last = *self.last_trigger_at.lock().unwrap();
         !(self.cooldown_seconds > 0.0 && last > 0.0 && now() - last < self.cooldown_seconds)
@@ -86,9 +100,9 @@ impl crate::registry::Plugin for BriefRetrieverPluginDef {
     fn descriptor(&self) -> &'static crate::PluginDescriptor {
         static D: crate::PluginDescriptor = crate::PluginDescriptor {
             id: "brief_retriever", label: "简报检索",
-            description: "从本地知识库检索与客户发言相关的简报",
+            description: "从本地知识库检索与发言相关的简报；有客户流时跳过主人",
             category: crate::PluginCategory::Analysis, phase: crate::PluginPhase::Observer,
-            capabilities: &[crate::PluginCapability::KnowledgeBase], host_managed: &[], after: &[],
+            capabilities: &[crate::PluginCapability::KnowledgeBase], host_managed: &["include_user"], after: &[],
         };
         &D
     }
@@ -100,6 +114,7 @@ impl crate::registry::Plugin for BriefRetrieverPluginDef {
             "enabled": true,
             "cooldown_seconds": 15.0,
             "min_score": 0.05,
+            "include_user": false,
         }))
     }
 
@@ -117,6 +132,7 @@ impl crate::registry::Plugin for BriefRetrieverPluginDef {
         hooks.add_observer(std::sync::Arc::new(BriefRetrieverPlugin::new(
             cfg.get_f64("cooldown_seconds", 15.0),
             cfg.get_f64("min_score", 0.05) as f32,
+            cfg.get_bool("include_user", false),
         )));
     }
 }
@@ -142,6 +158,34 @@ mod tests {
         }
     }
 
+    fn with_role(mut s: TranscriptSegment, role: talksage_core::SpeakerRole) -> TranscriptSegment {
+        s.speaker_attribution = Some(talksage_core::SpeakerAttribution {
+            source: talksage_core::AudioSource::Unknown,
+            role,
+            voice: None,
+        });
+        s
+    }
+
+    #[test]
+    fn owner_role_does_not_trigger_even_on_client_stream_id() {
+        let p = BriefRetrieverPlugin::new(0.0, 0.05, false);
+        assert!(!p.should_trigger(&with_role(seg(1, "我在客户流上说话"), talksage_core::SpeakerRole::Owner)));
+    }
+
+    #[test]
+    fn client_role_triggers_even_when_speaker_id_is_zero() {
+        let p = BriefRetrieverPlugin::new(0.0, 0.05, false);
+        assert!(p.should_trigger(&with_role(seg(0, "NPI samples"), talksage_core::SpeakerRole::Client)));
+    }
+
+    #[test]
+    fn owner_triggers_when_include_user_is_enabled() {
+        let p = BriefRetrieverPlugin::new(0.0, 0.05, true);
+        assert!(p.should_trigger(&with_role(seg(0, "样品交期"), talksage_core::SpeakerRole::Owner)));
+        assert!(p.should_trigger(&seg(0, "样品交期")), "无归属时 speaker_id=0 也应检索");
+    }
+
     #[test]
     fn retrieves_brief_on_kb_hit() {
         let dir = std::env::temp_dir().join(format!("talksage-brief-test-{}", std::process::id()));
@@ -151,7 +195,7 @@ mod tests {
         let mut kb = KnowledgeBase::new();
         kb.index_folder(Path::new(&dir.to_string_lossy().to_string()));
         let ctx = PluginContext { kb: Some(Arc::new(kb)), llm: None, ..PluginContext::new() };
-        let p = BriefRetrieverPlugin::new(0.0, 0.05);
+        let p = BriefRetrieverPlugin::new(0.0, 0.05, false);
         assert!(p.should_trigger(&seg(1, "NPI samples MOQ")));
         let ev = p.run(&seg(1, "NPI samples MOQ"), &ctx).unwrap().expect("应有简报");
         match ev {
@@ -164,7 +208,7 @@ mod tests {
     #[test]
     fn no_hit_returns_none() {
         let ctx = PluginContext { kb: None, llm: None, ..PluginContext::new() };
-        let p = BriefRetrieverPlugin::new(0.0, 0.05);
+        let p = BriefRetrieverPlugin::new(0.0, 0.05, false);
         assert!(p.run(&seg(1, "hello world"), &ctx).unwrap().is_none());
     }
 }

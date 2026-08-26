@@ -71,6 +71,11 @@ export interface AppConfig {
     mode: SceneMode;
     custom: SceneParams;
   };
+  /** 本地知识库（Obsidian 仓库或普通 .md/.txt 文件夹）。 */
+  knowledge_base: {
+    enabled: boolean;
+    folder: string;
+  };
   [key: string]: unknown;
 }
 
@@ -447,6 +452,8 @@ export interface AppApi {
   onEvent(handler: (ev: DomainEvent) => void): () => void;
   /** 打开系统文件对话框，选择一个 WAV 录音文件；用户取消时返回 null。 */
   pickAudioFile(): Promise<string | null>;
+  /** 打开系统文件夹对话框，选择知识库 / Obsidian 仓库目录；取消时返回 null。 */
+  pickFolder(): Promise<string | null>;
   /** 导入本地录音文件：全量转写并落库，返回创建的 session_id。
    *  转写期间通过 onImportEvent 推送进度；可调用 cancelFileImport 中止。 */
   startFileImport(path: string): Promise<number>;

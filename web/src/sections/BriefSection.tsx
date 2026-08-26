@@ -19,7 +19,7 @@ export default function BriefSection({ items }: { items: BriefItem[] }) {
         lineHeight: 1.6,
       }}
     >
-      {items.length === 0 && <div style={{ color: "#64748b" }}>客户发言命中知识库后，简报显示在这里…</div>}
+      {items.length === 0 && <div style={{ color: "#64748b" }}>发言命中知识库后，简报显示在这里…</div>}
       {items.map((b, i) => (
         <div key={i} style={{ marginBottom: 6, wordBreak: "break-word" }}>
           <span

@@ -263,6 +263,10 @@ async fn get_config_api(State(state): State<ServerState>, headers: axum::http::H
         // 通用表：每个插件的默认值 + 用户覆盖，键就是插件 id。
         // 前端不需要预先知道有哪些插件（Task 4 的 /plugins 端点给出元数据）。
         "plugins": talksage_plugins::effective_plugin_configs(&cfg.plugins.entries),
+        "knowledge_base": {
+            "enabled": cfg.knowledge_base.enabled,
+            "folder": cfg.knowledge_base.folder,
+        },
         "server": { "host": cfg.server.host, "port": cfg.server.port },
     });
     (StatusCode::OK, Json(body)).into_response()

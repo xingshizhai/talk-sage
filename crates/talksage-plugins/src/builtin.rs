@@ -215,7 +215,7 @@ pub fn effective_plugin_configs(
 ///
 /// 装配时 `plugin_overrides_for`（talksage-pipeline）无条件覆盖它们：
 /// `short_segment.min_ms` 取场景的 `min_segment_ms`；`cross_stream_dedup.enabled`
-/// 恒为真（双流去重是基础设施，关掉就会冒出重复段）。
+/// 恒为真；`brief_retriever.include_user` 在无客户流时为真（演讲检索主讲人）。
 ///
 /// 元数据带上它，设置页才能把这些控件置灰并说明原因。否则页面上会出现一个
 /// 能改、保存也成功、运行时却永远不生效的输入框 —— 那比没有这个输入框更糟。

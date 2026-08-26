@@ -1546,6 +1546,17 @@ knob = 42
         assert_eq!(p.client_language, "en");
     }
 
+    /// 演讲保留简报插件，但没有客户流 —— 检索主讲人由 pipeline 的 include_user 覆盖实现。
+    #[test]
+    fn lecture_keeps_brief_retriever_without_a_client_stream() {
+        let p = scene_params(SceneMode::Lecture);
+        assert!(!p.client_enabled, "演讲是单流");
+        assert!(
+            p.plugin_allowlist.contains(&"brief_retriever".to_string()),
+            "演讲应保留简报，而不是从 allowlist 拿掉"
+        );
+    }
+
     #[test]
     fn apply_scene_params_replaces_the_whole_allowlist() {
         let mut p = scene_params(SceneMode::Meeting);

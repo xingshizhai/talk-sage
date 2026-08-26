@@ -122,6 +122,7 @@ enabled = false   # 实时翻译（需在场景中开启 translation_mode）
 
 [brief_retriever]
 enabled = true    # 客户简报检索（需配置 knowledge_base）
+# include_user 由场景裁决：无客户流（演讲）时检索主讲人，有客户流时只检索对方
 
 # ── 场景 ────────────────────────────────────────────────────────────────────
 
@@ -170,7 +171,7 @@ high_rms             = 0.5    # 高能量噪音阈值
 
 [knowledge_base]
 enabled = false
-folder  = ""    # 客户简报文件夹路径（支持 .md / .txt）
+folder  = ""    # Obsidian 仓库或普通 .md/.txt 文件夹（会跳过 .obsidian / .trash）
 
 # ── Webhook（会后推送）───────────────────────────────────────────────────
 

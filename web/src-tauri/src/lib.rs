@@ -946,6 +946,15 @@ fn pick_audio_file() -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
+/// 打开系统文件夹对话框，选择知识库 / Obsidian 仓库目录。用户取消时返回 null。
+#[tauri::command]
+fn pick_folder() -> Option<String> {
+    rfd::FileDialog::new()
+        .set_title("选择 Obsidian 仓库或知识库文件夹")
+        .pick_folder()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 /// 导入本地录音文件：全量转写 + 落库，转写期间逐段向前端推送 `talksage://import-event`。
 /// 异步命令：在阻塞线程池运行，不冻结 UI；文件转写完毕（或取消）后返回。
 #[tauri::command]
@@ -1144,6 +1153,7 @@ pub fn run() {
             get_gpu_status,
             test_aliyun_asr,
             pick_audio_file,
+            pick_folder,
             start_file_import,
             cancel_file_import
         ])

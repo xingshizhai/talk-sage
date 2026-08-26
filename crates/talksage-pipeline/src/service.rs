@@ -738,8 +738,8 @@ fn build_master_recording(sid: i64, stats: &[talksage_session::StreamMeta]) -> O
 /// 里与默认值合并），第三步就是本函数余下的部分。
 ///
 /// 这里刻意不认识任何具体插件的配置结构：通用表原样透传，插件 id 只在
-/// 「宿主必须裁决」的三处出现（场景 VAD 参数、跨流去重、webhook 宿主可用性），
-/// 以及场景 allowlist 的循环里 —— 而那个循环遍历的是
+/// 「宿主必须裁决」处出现（场景 VAD 参数、跨流去重、简报是否检索主讲人、
+/// webhook 宿主可用性），以及场景 allowlist 的循环里 —— 而那个循环遍历的是
 /// descriptor 派生的分析插件列表，不是写死的三个名字。
 ///
 /// webhook 不在这里裁决：它要看 `PluginContext.webhook` 是否有宿主，
@@ -761,6 +761,11 @@ fn plugin_overrides_for(
         &mut overrides,
         "cross_stream_dedup",
         serde_json::json!({ "enabled": true }),
+    );
+    merge_override(
+        &mut overrides,
+        "brief_retriever",
+        serde_json::json!({ "include_user": !scene.client_enabled }),
     );
 
     // 场景 allowlist 最后裁决：分析类插件不在列表里就关掉。只有分析类受此
@@ -1071,6 +1076,24 @@ mod tests {
         plugins.merge_entry("short_segment", &serde_json::json!({ "min_ms": 7 }));
         let o = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Conversation));
         assert_eq!(o["short_segment"]["min_ms"], serde_json::json!(300));
+    }
+
+    /// 无客户流且 allowlist 含简报（演讲）时，必须检索主讲人；有客户流（会议）则不检索主人。
+    #[test]
+    fn brief_include_user_follows_client_stream_availability() {
+        let plugins = talksage_config::PluginsConfig::default();
+        let lecture = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Lecture));
+        assert_eq!(
+            lecture["brief_retriever"]["include_user"],
+            serde_json::json!(true),
+            "演讲无客户流，简报应检索主讲人"
+        );
+        let meeting = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Meeting));
+        assert_eq!(
+            meeting["brief_retriever"]["include_user"],
+            serde_json::json!(false),
+            "会议有客户流，简报只检索对方"
+        );
     }
 
     /// descriptor 的 host_managed 是设置页「这个控件置灰」的依据，必须与本文件

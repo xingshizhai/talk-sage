@@ -133,7 +133,7 @@ export default function AsidePanel({
           <b style={{ fontSize: 13 }}>知识库命中</b>
         </div>
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 9 }}>
-          {briefs.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13 }}>客户发言命中知识库后显示…</div>}
+          {briefs.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13 }}>发言命中知识库后显示…</div>}
           {briefs.map((b, i) => (
             <div key={i} style={{ fontSize: 12, lineHeight: 1.6, color: "var(--text-2)", wordBreak: "break-word", padding: "8px 10px", borderRadius: 8, background: "var(--surface-2)" }}>
               {b.text}

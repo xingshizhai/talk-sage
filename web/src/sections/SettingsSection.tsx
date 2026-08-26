@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import type { AppConfig, AsrModelInfo, AsrRuntimeStatus, PluginMeta, PluginStatusInfo, SceneMode, SceneParams } from "../lib/api";
 import type { PluginValues } from "../lib/plugins";
 import { analysisPluginIds, buildPluginUpdates, fieldLabel, initialPluginValues, pluginFields, pluginStatusLabel } from "../lib/plugins";
+import { knowledgeBaseSettings } from "../lib/knowledge";
 import { llmProviderApiKey } from "../lib/llm";
 import { getApi } from "../lib/transport";
 
@@ -92,8 +93,8 @@ export default function SettingsSection({
   const [pluginMeta, setPluginMeta] = useState<PluginMeta[]>([]);
   const [pluginStatus, setPluginStatus] = useState<PluginStatusInfo[]>([]);
   const [pluginValues, setPluginValues] = useState<PluginValues>({});
-  const [kbFolder, setKbFolder] = useState<string>("");
-  const [kbEnabled, setKbEnabled] = useState(false);
+  const [kbFolder, setKbFolder] = useState(() => knowledgeBaseSettings(config).folder);
+  const [kbEnabled, setKbEnabled] = useState(() => knowledgeBaseSettings(config).enabled);
   // 引擎显示值：自定义场景读场景参数；否则读全局 ASR 配置（与 pipeline 实际
   // 生效逻辑一致：非自定义场景的用户流引擎跟随 [asr].user_engine）。
   const initialEngineZh = () =>
@@ -190,6 +191,12 @@ export default function SettingsSection({
   useEffect(() => {
     setApiKey(llmProviderApiKey(config, defaultProvider));
   }, [config, defaultProvider]);
+
+  useEffect(() => {
+    const kb = knowledgeBaseSettings(config);
+    setKbEnabled(kb.enabled);
+    setKbFolder(kb.folder);
+  }, [config]);
 
   /** 改某个插件的某个配置键。 */
   function setPluginField(id: string, key: string, value: boolean | number | string) {
@@ -379,6 +386,18 @@ export default function SettingsSection({
       setAliyunTestResult({ ok: false, text: String(e) });
     } finally {
       setAliyunTesting(false);
+    }
+  }
+
+  async function handlePickKbFolder() {
+    try {
+      const path = await api.pickFolder();
+      if (path) {
+        setKbFolder(path);
+        setKbEnabled(true);
+      }
+    } catch (e) {
+      setMessage(String(e));
     }
   }
 
@@ -1090,17 +1109,28 @@ export default function SettingsSection({
             </>
           )}
 
-          <h3 style={{ ...groupTitle, marginTop: 10 }}>知识库（客户简报）</h3>
+          <h3 style={{ ...groupTitle, marginTop: 10 }}>知识库（Obsidian 仓库）</h3>
           <label style={labelBlock}>
-            <input type="checkbox" checked={kbEnabled} onChange={(e) => setKbEnabled(e.target.checked)} /> 启用
+            <input type="checkbox" checked={kbEnabled} onChange={(e) => setKbEnabled(e.target.checked)} /> 启用简报检索
           </label>
-          <input
-            value={kbFolder}
-            onChange={(e) => setKbFolder(e.target.value)}
-            placeholder="简报 .md/.txt 文件夹路径"
-            style={{ ...inputStyle, width: "100%" }}
-          />
-          <div style={hint}>知识库命中后，客户发言的相关简报显示在右侧「知识库命中」卡片。</div>
+          <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+            <input
+              value={kbFolder}
+              onChange={(e) => setKbFolder(e.target.value)}
+              placeholder="Obsidian 仓库路径，例如 D:\Obsidian"
+              style={{ ...inputStyle, flex: 1 }}
+            />
+            <button
+              type="button"
+              onClick={() => void handlePickKbFolder()}
+              style={{ fontSize: 12, padding: "4px 10px", cursor: "pointer", flexShrink: 0 }}
+            >
+              浏览…
+            </button>
+          </div>
+          <div style={hint}>
+            会中由「简报检索」插件检索此目录下的 .md/.txt。Obsidian 的 .obsidian / .trash 不会进索引。保存后下次监听生效。
+          </div>
         </div>
       )}
 

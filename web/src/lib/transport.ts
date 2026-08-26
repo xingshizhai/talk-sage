@@ -202,6 +202,10 @@ export const ipcApi: AppApi = {
     return invoke<string | null>("pick_audio_file");
   },
 
+  async pickFolder(): Promise<string | null> {
+    return invoke<string | null>("pick_folder");
+  },
+
   async startFileImport(path: string): Promise<number> {
     return invoke<number>("start_file_import", { path });
   },
@@ -461,6 +465,10 @@ export const httpApi: AppApi = {
 
   async pickAudioFile(): Promise<string | null> {
     throw new Error("headless 模式不支持本地文件对话框");
+  },
+
+  async pickFolder(): Promise<string | null> {
+    throw new Error("headless 模式不支持本地文件夹对话框");
   },
 
   async startFileImport(_path: string): Promise<number> {

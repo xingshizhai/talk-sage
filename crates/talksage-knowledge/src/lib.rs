@@ -1,4 +1,5 @@
 //! TalkSage v2 本地知识库：索引 `.md/.txt` 文件夹，关键词 Jaccard 检索（零依赖）。
+//! 中文按 2-gram 分词，英文/数字按词。兼容 Obsidian 仓库（跳过 `.obsidian` / `.trash`）。
 
 use std::path::Path;
 
@@ -27,7 +28,7 @@ impl KnowledgeBase {
         Self { chunks: Vec::new() }
     }
 
-    /// 索引文件夹下的 .md/.txt（递归）。返回 chunk 数。
+    /// 索引文件夹下的 .md/.txt（递归）。跳过 `.obsidian` / `.trash` / `.git`。返回 chunk 数。
     pub fn index_folder(&mut self, folder: &Path) -> usize {
         self.chunks.clear();
         if !folder.is_dir() {
@@ -93,13 +94,16 @@ impl Default for KnowledgeBase {
     }
 }
 
-/// 递归收集 .md/.txt 文件。
+/// 递归收集 .md/.txt 文件。跳过 Obsidian 元数据/回收站和 .git。
 fn walk_files(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_dir() {
+                if is_skipped_dir(&p) {
+                    continue;
+                }
                 out.extend(walk_files(&p));
             } else if matches!(p.extension().and_then(|e| e.to_str()), Some("md") | Some("txt")) {
                 out.push(p);
@@ -107,6 +111,13 @@ fn walk_files(dir: &Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+fn is_skipped_dir(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some(".obsidian" | ".trash" | ".git")
+    )
 }
 
 /// 按标题分块（超出 800 字再按段落切）。
@@ -152,7 +163,9 @@ fn chunk_file(text: &str, source: &str) -> Vec<KBChunk> {
     out
 }
 
-/// 分词：中文字符串（≥2 字连续）+ 英文/数字词。
+/// 分词：英文/数字词（≥2）+ 连续汉字的 2-gram。
+///
+/// 整段汉字当一个 token 时，「样品交期」无法命中「客户关注样品交期与最小起订量」。
 fn tokenize(text: &str) -> std::collections::HashSet<String> {
     let mut tokens = std::collections::HashSet::new();
     let chars: Vec<char> = text.chars().collect();
@@ -169,13 +182,15 @@ fn tokenize(text: &str) -> std::collections::HashSet<String> {
                 tokens.insert(word);
             }
         } else if is_cjk(c) {
-            // 连续 CJK 串（不跨空白）
             let start = i;
             while i < chars.len() && is_cjk(chars[i]) {
                 i += 1;
             }
-            if i - start >= 2 {
-                tokens.insert(chars[start..i].iter().collect());
+            let run = &chars[start..i];
+            if run.len() >= 2 {
+                for window in run.windows(2) {
+                    tokens.insert(window.iter().collect());
+                }
             }
         } else {
             i += 1;
@@ -192,8 +207,8 @@ fn is_cjk(c: char) -> bool {
 mod tests {
     use super::*;
 
-    fn temp_dir() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("talksage-kb-test-{}", std::process::id()));
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("talksage-kb-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -201,7 +216,7 @@ mod tests {
 
     #[test]
     fn index_and_search_english_term() {
-        let dir = temp_dir();
+        let dir = temp_dir("en");
         std::fs::write(
             dir.join("client.md"),
             "# 客户简报\n\n客户关注 NPI 样品交期与 MOQ。NPI 需要两周。",
@@ -216,6 +231,18 @@ mod tests {
     }
 
     #[test]
+    fn search_hits_chinese_phrase_inside_longer_sentence() {
+        let dir = temp_dir("zh");
+        std::fs::write(dir.join("brief.md"), "# 简报\n\n客户关注样品交期与最小起订量。").unwrap();
+        let mut kb = KnowledgeBase::new();
+        kb.index_folder(&dir);
+        let hits = kb.search("样品交期", 3, 0.05);
+        assert!(!hits.is_empty(), "中文短语应命中包含该短语的更长句子");
+        assert!(hits[0].text.contains("样品交期"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn search_returns_empty_when_kb_empty() {
         let kb = KnowledgeBase::new();
         assert!(kb.search("anything", 3, 0.05).is_empty());
@@ -225,5 +252,24 @@ mod tests {
     fn index_missing_folder_returns_zero() {
         let mut kb = KnowledgeBase::new();
         assert_eq!(kb.index_folder(Path::new("C:/definitely/not/exist")), 0);
+    }
+
+    #[test]
+    fn index_skips_obsidian_metadata_and_trash() {
+        let dir = temp_dir("obsidian");
+        std::fs::write(dir.join("note.md"), "# 笔记\n\n客户关注样品交期。").unwrap();
+        let meta = dir.join(".obsidian");
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(meta.join("workspace.md"), "# 不该被索引\n\n这是 Obsidian 配置。").unwrap();
+        let trash = dir.join(".trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(trash.join("deleted.md"), "# 已删除\n\n样品交期旧稿。").unwrap();
+        let mut kb = KnowledgeBase::new();
+        assert_eq!(kb.index_folder(&dir), 1, "只应索引仓库笔记，跳过 .obsidian 与 .trash");
+        let hits = kb.search("样品交期", 3, 0.05);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].source.contains("note.md"));
+        assert!(!hits[0].source.contains(".obsidian"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
