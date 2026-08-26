@@ -433,6 +433,8 @@ export interface AppApi {
   exportSessionMarkdown(sessionId: number): Promise<{ path: string; content: string }>;
   /** 整理会中要点（历史详情；需配置 LLM）。 */
   generateHighlights(sessionId: number): Promise<string[]>;
+  /** 验证 LLM 连接（设置页「检查」按钮）：用表单当前值（可未保存）发最小请求。 */
+  testLlm(opts: { provider: string; baseUrl?: string; model?: string; apiKey?: string }): Promise<void>;
   /** 调试：读取最近日志（尾部 N 行）。 */
   readLogs(lines?: number): Promise<string>;
   /** 订阅领域事件流，返回取消函数。 */

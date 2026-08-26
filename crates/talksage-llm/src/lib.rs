@@ -40,6 +40,52 @@ impl OpenAICompatProvider {
             base_url: base_url.into().trim_end_matches('/').to_string(),
         }
     }
+
+    /// 最小化连通性测试：向配置的端点发一个 max_tokens=1 的请求，
+    /// 验证 key / base_url / model 是否可用。不依赖 [`Self::complete`]
+    /// 的完整响应解析（有些端点可能因超长 prompt 拒绝）。
+    pub fn test_connection(&self) -> Result<()> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": [ { "role": "user", "content": "ping" } ],
+            "max_tokens": 1,
+            "temperature": 0.0,
+        });
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(LLM_CONNECT_TIMEOUT)
+            .timeout_read(LLM_READ_TIMEOUT)
+            .timeout_write(LLM_WRITE_TIMEOUT)
+            .build();
+        let mut req = agent
+            .post(&url)
+            .timeout(LLM_OVERALL_TIMEOUT)
+            .set("Content-Type", "application/json");
+        if !self.api_key.is_empty() && self.api_key != "ollama" {
+            req = req.set("Authorization", &format!("Bearer {}", self.api_key));
+        }
+        match req.send_json(&body) {
+            Ok(resp) if resp.status() == 200 => Ok(()),
+            Ok(_) => Err(anyhow!("HTTP 非 2xx，连接未通过验证")),
+            // ureq 对非 2xx 返回 Err（Error::Status）；从这里提取状态码给出可读提示
+            Err(ureq::Error::Status(status, _resp)) => Err(anyhow!(
+                "HTTP {status}：{}",
+                friendly_status(status)
+            )),
+            Err(e) => Err(anyhow!("请求失败: {e}")),
+        }
+    }
+}
+
+/// 常见 LLM 端点错误的人类可读说明（供「检查连接」按钮展示）。
+fn friendly_status(status: u16) -> &'static str {
+    match status {
+        401 => "API Key 无效或未授权（请核对 key 是否复制完整、是否为当前服务商的 key）",
+        403 => "无权限访问该模型（key 有效但模型不可用，或套餐未开通）",
+        404 => "端点或模型不存在（请核对 base_url / model 名称）",
+        429 => "请求过于频繁或余额不足（限流 / 配额用尽）",
+        _ => "请求被拒绝",
+    }
 }
 
 #[derive(Deserialize)]
@@ -127,5 +173,70 @@ impl LLMProvider for MockSeqProvider {
             .unwrap()
             .pop_front()
             .ok_or_else(|| anyhow::anyhow!("MockSeqProvider 应答耗尽"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn friendly_status_maps_common_errors() {
+        assert!(friendly_status(401).contains("API Key"));
+        assert!(friendly_status(403).contains("无权限"));
+        assert!(friendly_status(404).contains("不存在"));
+        assert!(friendly_status(429).contains("限流"));
+        assert!(!friendly_status(500).is_empty());
+    }
+
+    /// test_connection：本地端点返回 200 时成功，401 时报出可读错误。
+    #[test]
+    fn test_connection_hits_local_endpoint() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            // 处理两次请求（合法 key / 非法 key 各一次）
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                // 读完整请求头（直到空行）
+                let mut buf = [0u8; 8192];
+                let mut received = 0usize;
+                while received < buf.len() {
+                    match stream.read(&mut buf[received..]) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            received += n;
+                            if buf[..received].windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf[..received]);
+                let body = if req.contains("Authorization: Bearer sk-test") {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                } else {
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                };
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+
+        let provider = OpenAICompatProvider::new(
+            "sk-test",
+            "mock-model",
+            format!("http://{addr}/v1"),
+        );
+        assert!(provider.test_connection().is_ok(), "合法 key 应连接成功");
+
+        let bad = OpenAICompatProvider::new("bad-key", "mock-model", format!("http://{addr}/v1"));
+        let err = bad.test_connection().unwrap_err().to_string();
+        assert!(err.contains("401"), "无效 key 应报 401，实际: {err}");
+        assert!(err.contains("API Key"), "401 错误应含可读提示，实际: {err}");
+
+        server.join().unwrap();
     }
 }

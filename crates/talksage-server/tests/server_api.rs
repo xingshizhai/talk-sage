@@ -74,7 +74,8 @@ async fn health_returns_ok_and_version() {
     let (status, body) = get("/api/health").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("\"ok\":true"));
-    assert!(body.contains("0.1.1"));
+    // 版本号随发布递增，这里只断言存在 version 字段，不锁死具体值
+    assert!(body.contains("\"version\""), "应返回 version 字段: {body}");
 }
 
 #[tokio::test]

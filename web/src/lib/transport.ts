@@ -150,6 +150,15 @@ export const ipcApi: AppApi = {
     return invoke("generate_highlights", { sessionId });
   },
 
+  async testLlm(opts: { provider: string; baseUrl?: string; model?: string; apiKey?: string }): Promise<void> {
+    await invoke("test_llm", {
+      provider: opts.provider,
+      baseUrl: opts.baseUrl ?? null,
+      model: opts.model ?? null,
+      apiKey: opts.apiKey ?? null,
+    });
+  },
+
   async readLogs(lines?: number): Promise<string> {
     return invoke("read_logs", { lines });
   },
@@ -356,6 +365,19 @@ export const httpApi: AppApi = {
       body: "{}",
     });
     return r.points;
+  },
+
+  async testLlm(opts: { provider: string; baseUrl?: string; model?: string; apiKey?: string }): Promise<void> {
+    await req<{ ok: boolean }>("/llm/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: opts.provider,
+        base_url: opts.baseUrl ?? null,
+        model: opts.model ?? null,
+        api_key: opts.apiKey ?? null,
+      }),
+    });
   },
 
   async readLogs(_lines?: number): Promise<string> {

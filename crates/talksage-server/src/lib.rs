@@ -97,6 +97,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/session/{id}/trio-notes", axum::routing::post(generate_trio_notes_api))
         .route("/session/{id}/export", get(export_session_api))
         .route("/session/{id}/highlights", axum::routing::post(generate_highlights_api))
+        .route("/llm/test", axum::routing::post(test_llm_api))
         .route("/logs", get(read_logs_api))
         .route("/listen/start", axum::routing::post(start_listen_api))
         .route("/listen/stop", axum::routing::post(stop_listen_api))
@@ -824,6 +825,42 @@ async fn generate_highlights_api(State(state): State<ServerState>, headers: axum
     match talksage_notes::generate_highlights(&detail.key_points, &detail.segments, &llm) {
         Ok(points) => (StatusCode::OK, Json(serde_json::json!({ "points": points }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// 验证 LLM 连接（设置页「检查」按钮）：body 可选 provider/base_url/model/api_key
+/// 覆盖（用于表单未保存时验证）。不写入配置。
+#[derive(serde::Deserialize)]
+struct TestLlmBody {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+async fn test_llm_api(State(state): State<ServerState>, headers: axum::http::HeaderMap, body: axum::Json<TestLlmBody>) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let snapshot = state.config.snapshot();
+    let provider = body.provider.clone().unwrap_or(snapshot.llm.default.clone());
+    let Some(cfg) = snapshot.llm.providers.get(&provider) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("未知 provider: {provider}") }))).into_response();
+    };
+    let llm = talksage_llm::OpenAICompatProvider::new(
+        body.api_key.clone().unwrap_or_else(|| cfg.api_key.clone()),
+        body.model.clone().unwrap_or_else(|| cfg.model.clone()),
+        body.base_url.clone().unwrap_or_else(|| cfg.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com/v1".to_string())),
+    );
+    // 网络调用放进阻塞线程池，别占 tokio worker
+    match tokio::task::spawn_blocking(move || llm.test_connection()).await {
+        Ok(Ok(())) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("LLM 检查失败: {e}") }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("检查线程失败: {e}") }))).into_response(),
     }
 }
 

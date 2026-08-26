@@ -973,6 +973,30 @@ fn generate_highlights(session_id: i64, state: tauri::State<'_, AppState>) -> Re
     talksage_notes::generate_highlights(&detail.key_points, &detail.segments, &llm).map_err(|e| format!("要点整理失败: {e}"))
 }
 
+/// 验证 LLM 连接（设置页「检查」按钮）：用指定 provider（可带表单未保存的
+/// 覆盖值）发一个最小请求，返回 401/网络等可读错误。不写入配置。
+#[tauri::command]
+fn test_llm(
+    provider: String,
+    base_url: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let snapshot = state.config.snapshot();
+    let cfg = snapshot
+        .llm
+        .providers
+        .get(&provider)
+        .ok_or_else(|| format!("未知 provider: {provider}"))?;
+    let llm = talksage_llm::OpenAICompatProvider::new(
+        api_key.unwrap_or_else(|| cfg.api_key.clone()),
+        model.unwrap_or_else(|| cfg.model.clone()),
+        base_url.unwrap_or_else(|| cfg.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com/v1".to_string())),
+    );
+    llm.test_connection().map_err(|e| format!("LLM 检查失败: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // whisper.cpp 1.8.3 在 macOS 15+ 的 residency-set 全局析构阶段可能因
@@ -1040,6 +1064,7 @@ pub fn run() {
             generate_trio_notes,
             export_session_markdown,
             generate_highlights,
+            test_llm,
             read_logs,
             get_gpu_status,
             pick_audio_file,

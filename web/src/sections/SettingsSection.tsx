@@ -84,6 +84,8 @@ export default function SettingsSection({
   }));
   const [defaultProvider, setDefaultProvider] = useState(config?.llm?.default ?? "deepseek");
   const [apiKey, setApiKey] = useState<string>("");
+  const [llmTesting, setLlmTesting] = useState(false);
+  const [llmTestResult, setLlmTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   // 插件表单由 /plugins 元数据生成：设置页不认识任何具体插件。
   const [pluginMeta, setPluginMeta] = useState<PluginMeta[]>([]);
   const [pluginStatus, setPluginStatus] = useState<PluginStatusInfo[]>([]);
@@ -332,6 +334,24 @@ export default function SettingsSection({
         </div>
       );
     });
+  }
+
+  /** 验证 LLM 连接：用表单当前值（可未保存）发最小请求。 */
+  async function handleTestLlm() {
+    if (llmTesting) return;
+    setLlmTesting(true);
+    setLlmTestResult(null);
+    try {
+      await api.testLlm({
+        provider: defaultProvider,
+        apiKey: apiKey.trim(),
+      });
+      setLlmTestResult({ ok: true, text: "连接正常，API Key 有效" });
+    } catch (e) {
+      setLlmTestResult({ ok: false, text: String(e) });
+    } finally {
+      setLlmTesting(false);
+    }
   }
 
   async function handleSave() {
@@ -1194,8 +1214,20 @@ export default function SettingsSection({
               placeholder={`${defaultProvider} API Key（Ollama 可留空）`}
               style={{ ...inputStyle, flex: 1 }}
             />
+            <button
+              onClick={() => void handleTestLlm()}
+              disabled={llmTesting}
+              style={{ fontSize: 12, padding: "4px 10px", cursor: llmTesting ? "default" : "pointer", flexShrink: 0 }}
+            >
+              {llmTesting ? "检查中…" : "检查"}
+            </button>
           </div>
-          <div style={hint}>未配置密钥时，术语/翻译插件将只做本地检测（不产生最终结果）。</div>
+          {llmTestResult && (
+            <div style={{ fontSize: 11, marginBottom: 6, color: llmTestResult.ok ? "var(--live)" : "var(--danger)" }}>
+              {llmTestResult.ok ? `✓ ${llmTestResult.text}` : `✗ ${llmTestResult.text}`}
+            </div>
+          )}
+          <div style={hint}>未配置密钥时，术语/翻译插件将只做本地检测（不产生最终结果）。「检查」会用当前填写的 Key 向服务商发一个最小请求验证有效性，无需先保存。</div>
         </div>
       )}
       </div>
