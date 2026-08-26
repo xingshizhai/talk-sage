@@ -57,6 +57,13 @@ impl TokenManager {
         Ok(id)
     }
 
+    /// 验证 AccessKey 凭据是否有效（设置页「检查」按钮）：直接向阿里云
+    /// 请求一个 token，成功返回 token 有效期（Unix 秒），失败返回可读错误。
+    pub async fn verify(&self, client: &reqwest::Client) -> anyhow::Result<u64> {
+        let info = self.fetch(client).await?;
+        Ok(info.expire_time)
+    }
+
     async fn fetch(&self, client: &reqwest::Client) -> anyhow::Result<TokenInfo> {
         let timestamp = {
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
@@ -93,13 +100,31 @@ impl TokenManager {
         let status = resp.status();
         let body: serde_json::Value = resp.json().await?;
         if !status.is_success() {
-            anyhow::bail!("阿里云 Token 请求失败 {}: {}", status, body);
+            return Err(parse_error_response(status, &body));
         }
         let token = &body["Token"];
         Ok(TokenInfo {
             id: token["Id"].as_str().unwrap_or("").to_string(),
             expire_time: token["ExpireTime"].as_u64().unwrap_or(0),
         })
+    }
+}
+
+/// 把阿里云错误响应（Code/Message）解析成可读错误。
+fn parse_error_response(status: reqwest::StatusCode, body: &serde_json::Value) -> anyhow::Error {
+    let code = body["Code"].as_str().unwrap_or("");
+    let message = body["Message"].as_str().unwrap_or("");
+    let readable = match code {
+        "InvalidAccessKeyId" => "AccessKey ID 无效（请核对是否填错或已停用）",
+        "SignatureDoesNotMatch" => "AccessKey Secret 与 ID 不匹配（签名校验失败）",
+        "Forbidden" => "无权限访问该资源（子账号可能未授权 NLS 服务）",
+        "InvalidSecurityToken.Expired" => "临时凭证已过期",
+        _ => "请求被阿里云拒绝",
+    };
+    if message.is_empty() {
+        anyhow::anyhow!("阿里云 Token 请求失败 {status}: {readable}")
+    } else {
+        anyhow::anyhow!("阿里云 Token 请求失败 {status}: {readable}（{message}）")
     }
 }
 
@@ -193,5 +218,30 @@ mod tests {
     fn token_info_not_expired() {
         let t = TokenInfo { id: "tok".into(), expire_time: u64::MAX };
         assert!(!t.is_expired());
+    }
+
+    #[test]
+    fn error_response_maps_common_codes() {
+        let bad_id = parse_error_response(
+            reqwest::StatusCode::FORBIDDEN,
+            &serde_json::json!({ "Code": "InvalidAccessKeyId", "Message": "specified access key is not found" }),
+        )
+        .to_string();
+        assert!(bad_id.contains("AccessKey ID 无效"), "实际: {bad_id}");
+        assert!(bad_id.contains("specified access key"), "应附原始消息: {bad_id}");
+
+        let sig = parse_error_response(
+            reqwest::StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "Code": "SignatureDoesNotMatch", "Message": "" }),
+        )
+        .to_string();
+        assert!(sig.contains("Secret 与 ID 不匹配"), "实际: {sig}");
+
+        let unknown = parse_error_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            &serde_json::json!({ "Code": "ServiceUnavailable", "Message": "busy" }),
+        )
+        .to_string();
+        assert!(unknown.contains("请求被阿里云拒绝"), "实际: {unknown}");
     }
 }

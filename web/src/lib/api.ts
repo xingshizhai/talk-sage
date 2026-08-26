@@ -435,6 +435,8 @@ export interface AppApi {
   generateHighlights(sessionId: number): Promise<string[]>;
   /** 验证 LLM 连接（设置页「检查」按钮）：用表单当前值（可未保存）发最小请求。 */
   testLlm(opts: { provider: string; baseUrl?: string; model?: string; apiKey?: string }): Promise<void>;
+  /** 验证阿里云 ASR 凭据（设置页「检查」按钮）：请求 NLS AccessToken。返回有效期秒数。 */
+  testAliyunAsr(opts: { accessKeyId?: string; accessKeySecret?: string; appKey?: string }): Promise<{ ok: boolean; expire_at: number; valid_for_secs: number; app_key: string }>;
   /** 调试：读取最近日志（尾部 N 行）。 */
   readLogs(lines?: number): Promise<string>;
   /** 订阅领域事件流，返回取消函数。 */

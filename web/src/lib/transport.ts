@@ -159,6 +159,14 @@ export const ipcApi: AppApi = {
     });
   },
 
+  async testAliyunAsr(opts: { accessKeyId?: string; accessKeySecret?: string; appKey?: string }): Promise<{ ok: boolean; expire_at: number; valid_for_secs: number; app_key: string }> {
+    return invoke("test_aliyun_asr", {
+      accessKeyId: opts.accessKeyId ?? null,
+      accessKeySecret: opts.accessKeySecret ?? null,
+      appKey: opts.appKey ?? null,
+    });
+  },
+
   async readLogs(lines?: number): Promise<string> {
     return invoke("read_logs", { lines });
   },
@@ -378,6 +386,19 @@ export const httpApi: AppApi = {
         api_key: opts.apiKey ?? null,
       }),
     });
+  },
+
+  async testAliyunAsr(opts: { accessKeyId?: string; accessKeySecret?: string; appKey?: string }): Promise<{ ok: boolean; expire_at: number; valid_for_secs: number; app_key: string }> {
+    const r = await req<{ ok: boolean; expire_at: number; valid_for_secs: number; app_key: string }>("/asr/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        access_key_id: opts.accessKeyId ?? null,
+        access_key_secret: opts.accessKeySecret ?? null,
+        app_key: opts.appKey ?? null,
+      }),
+    });
+    return r;
   },
 
   async readLogs(_lines?: number): Promise<string> {

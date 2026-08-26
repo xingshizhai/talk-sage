@@ -86,6 +86,8 @@ export default function SettingsSection({
   const [apiKey, setApiKey] = useState<string>("");
   const [llmTesting, setLlmTesting] = useState(false);
   const [llmTestResult, setLlmTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [aliyunTesting, setAliyunTesting] = useState(false);
+  const [aliyunTestResult, setAliyunTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   // 插件表单由 /plugins 元数据生成：设置页不认识任何具体插件。
   const [pluginMeta, setPluginMeta] = useState<PluginMeta[]>([]);
   const [pluginStatus, setPluginStatus] = useState<PluginStatusInfo[]>([]);
@@ -351,6 +353,26 @@ export default function SettingsSection({
       setLlmTestResult({ ok: false, text: String(e) });
     } finally {
       setLlmTesting(false);
+    }
+  }
+
+  /** 验证阿里云 ASR 凭据：请求 NLS AccessToken（HMAC-SHA1 签名）。 */
+  async function handleTestAliyun() {
+    if (aliyunTesting) return;
+    setAliyunTesting(true);
+    setAliyunTestResult(null);
+    try {
+      const r = await api.testAliyunAsr({
+        accessKeyId: aliyunKeyId.trim(),
+        accessKeySecret: aliyunKeySecret.trim(),
+        appKey: aliyunAppKey.trim(),
+      });
+      const hours = Math.round(r.valid_for_secs / 3600);
+      setAliyunTestResult({ ok: true, text: `凭据有效，Token 有效期约 ${hours} 小时${r.app_key ? `（AppKey: ${r.app_key}）` : ""}` });
+    } catch (e) {
+      setAliyunTestResult({ ok: false, text: String(e) });
+    } finally {
+      setAliyunTesting(false);
     }
   }
 
@@ -901,6 +923,23 @@ export default function SettingsSection({
                   style={{ ...inputStyle, display: "block", width: "100%", marginTop: 2 }}
                 />
               </label>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button
+                  onClick={() => void handleTestAliyun()}
+                  disabled={aliyunTesting}
+                  style={{ fontSize: 11, padding: "3px 10px", cursor: aliyunTesting ? "default" : "pointer", flexShrink: 0 }}
+                >
+                  {aliyunTesting ? "检查中…" : "检查"}
+                </button>
+                {aliyunTestResult && (
+                  <span style={{ fontSize: 11, color: aliyunTestResult.ok ? "var(--live)" : "var(--danger)" }}>
+                    {aliyunTestResult.ok ? `✓ ${aliyunTestResult.text}` : `✗ ${aliyunTestResult.text}`}
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: 10, color: "var(--muted)" }}>
+                检查会向阿里云 NLS 请求一个 AccessToken（CreateToken，HMAC-SHA1 签名）验证 AccessKey 是否有效；无需先保存。
+              </div>
             </div>
           )}
         </div>

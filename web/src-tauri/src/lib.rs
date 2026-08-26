@@ -865,6 +865,43 @@ fn get_gpu_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
     })
 }
 
+/// 验证阿里云 ASR 凭据（设置页「检查」按钮）：向阿里云 NLS 请求一个
+/// AccessToken（CreateToken，HMAC-SHA1 签名）。成功返回 token 有效期秒数，
+/// 失败返回可读错误（InvalidAccessKeyId / SignatureDoesNotMatch 等）。
+/// 支持传入表单未保存的覆盖值（留 None 用已保存配置）。
+#[tauri::command]
+async fn test_aliyun_asr(
+    access_key_id: Option<String>,
+    access_key_secret: Option<String>,
+    app_key: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let cfg = state.config.snapshot();
+    let key_id = access_key_id.unwrap_or(cfg.asr.aliyun_access_key_id.clone());
+    let key_secret = access_key_secret.unwrap_or(cfg.asr.aliyun_access_key_secret.clone());
+    let app_key = app_key.unwrap_or(cfg.asr.aliyun_app_key.clone());
+    if key_id.trim().is_empty() || key_secret.trim().is_empty() {
+        return Err("请先填写 AccessKey ID 和 AccessKey Secret".into());
+    }
+    let key_id = key_id.trim().to_string();
+    let key_secret = key_secret.trim().to_string();
+    let expire = talksage_asr::aliyun::verify_aliyun_credentials(&key_id, &key_secret)
+        .await
+        .map_err(|e| format!("阿里云 ASR 验证失败: {e}"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let valid_for = expire.saturating_sub(now);
+    log::info!("阿里云 ASR 凭据验证通过: token 有效期剩余 {valid_for}s app_key={app_key}");
+    Ok(serde_json::json!({
+        "ok": true,
+        "expire_at": expire,
+        "valid_for_secs": valid_for,
+        "app_key": app_key,
+    }))
+}
+
 /// 打开系统文件对话框，让用户选择一个 WAV 录音文件。返回绝对路径，用户取消时返回 null。
 #[tauri::command]
 fn pick_audio_file() -> Option<String> {
@@ -1067,6 +1104,7 @@ pub fn run() {
             test_llm,
             read_logs,
             get_gpu_status,
+            test_aliyun_asr,
             pick_audio_file,
             start_file_import,
             cancel_file_import

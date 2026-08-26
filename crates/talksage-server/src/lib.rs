@@ -104,6 +104,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/listen/pause", axum::routing::post(pause_listen_api))
         .route("/noise_level", axum::routing::post(set_noise_level_api))
         .route("/asr/gpu_status", get(gpu_status_handler))
+        .route("/asr/test", axum::routing::post(test_aliyun_asr_api))
         .route("/voiceprint/status", axum::routing::get(voiceprint_status_api))
         .route("/voiceprint/enroll", axum::routing::post(voiceprint_enroll_api))
         .route("/voiceprint/remove", axum::routing::post(voiceprint_remove_api))
@@ -193,6 +194,46 @@ async fn gpu_status_handler(
         "route_error": route_error,
     }))
     .into_response()
+}
+
+/// 验证阿里云 ASR 凭据（设置页「检查」按钮）。body 可选覆盖 AccessKey/AppKey
+/// （表单未保存时验证），不写配置。成功返回 token 有效期。
+#[derive(serde::Deserialize)]
+struct TestAliyunBody {
+    #[serde(default)]
+    access_key_id: Option<String>,
+    #[serde(default)]
+    access_key_secret: Option<String>,
+    #[serde(default)]
+    app_key: Option<String>,
+}
+
+async fn test_aliyun_asr_api(State(state): State<ServerState>, headers: axum::http::HeaderMap, body: axum::Json<TestAliyunBody>) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let cfg = state.config.snapshot();
+    let key_id = body.access_key_id.clone().unwrap_or(cfg.asr.aliyun_access_key_id.clone());
+    let key_secret = body.access_key_secret.clone().unwrap_or(cfg.asr.aliyun_access_key_secret.clone());
+    let app_key = body.app_key.clone().unwrap_or(cfg.asr.aliyun_app_key.clone());
+    if key_id.trim().is_empty() || key_secret.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "请先填写 AccessKey ID 和 AccessKey Secret" }))).into_response();
+    }
+    let key_id = key_id.trim().to_string();
+    let key_secret = key_secret.trim().to_string();
+    match talksage_asr::aliyun::verify_aliyun_credentials(&key_id, &key_secret).await {
+        Ok(expire) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let valid_for = expire.saturating_sub(now);
+            (StatusCode::OK, Json(serde_json::json!({
+                "ok": true, "expire_at": expire, "valid_for_secs": valid_for, "app_key": app_key,
+            }))).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("阿里云 ASR 验证失败: {e}") }))).into_response(),
+    }
 }
 
 async fn health() -> impl IntoResponse {
