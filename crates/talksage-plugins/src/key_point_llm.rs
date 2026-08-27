@@ -7,7 +7,8 @@
 //! 剩余的不足 batch_size 的段会在最后一次 run() 里以 `flush_tail` 模式处理：
 //! 当超过 `tail_timeout_ms` 没有新段时，把剩余段也发给 LLM。
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -68,6 +69,8 @@ pub struct KeyPointLlmObserver {
     /// 超过此时长（ms）且 buffer 非空时，不足 batch_size 也触发。
     tail_timeout_ms: u64,
     state: Mutex<State>,
+    /// 手动 flush 标志：设为 true 后在下次 run() 中强制触发 LLM。
+    manual_flush: AtomicBool,
 }
 
 impl KeyPointLlmObserver {
@@ -76,6 +79,7 @@ impl KeyPointLlmObserver {
             batch_size,
             tail_timeout_ms,
             state: Mutex::new(State::new()),
+            manual_flush: AtomicBool::new(false),
         }
     }
 
@@ -94,11 +98,13 @@ impl KeyPointLlmObserver {
     }
 }
 
-use std::sync::Arc;
-
 impl SegmentObserver for KeyPointLlmObserver {
     fn name(&self) -> &'static str {
         "key_point_llm"
+    }
+
+    fn request_flush(&self) {
+        self.manual_flush.store(true, Ordering::Relaxed);
     }
 
     fn should_trigger(&self, seg: &TranscriptSegment) -> bool {
@@ -117,12 +123,18 @@ impl SegmentObserver for KeyPointLlmObserver {
     fn run(&self, _seg: &TranscriptSegment, ctx: &PluginContext) -> anyhow::Result<Option<DomainEvent>> {
         let Some(llm) = ctx.llm.as_ref() else { return Ok(None) };
 
+        let manual = self.manual_flush.swap(false, Ordering::Relaxed);
         let should_flush = {
             let g = self.state.lock().unwrap();
             let timeout_elapsed = self.tail_timeout_ms > 0
                 && g.last_flush.elapsed().as_millis() as u64 >= self.tail_timeout_ms;
-            g.buffer.len() >= self.batch_size || (timeout_elapsed && !g.buffer.is_empty())
+            g.buffer.len() >= self.batch_size
+                || (timeout_elapsed && !g.buffer.is_empty())
+                || (manual && !g.buffer.is_empty())
         };
+        if manual && should_flush {
+            log::info!("key_point_llm: 手动触发立即整理");
+        }
 
         if should_flush {
             let texts = {

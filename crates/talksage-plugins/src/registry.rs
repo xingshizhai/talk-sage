@@ -180,6 +180,9 @@ pub trait SegmentObserver: Send + Sync {
         seg: &TranscriptSegment,
         ctx: &PluginContext,
     ) -> anyhow::Result<Option<DomainEvent>>;
+    /// 可选：外部请求在下次 run() 时立即处理 buffer（手动触发）。
+    /// 默认空实现，不支持手动 flush 的 observer 无需实现。
+    fn request_flush(&self) {}
 }
 
 /// finalizer 的输入。会话已停、已落库，此处只读。
@@ -384,6 +387,15 @@ impl HookRegistry {
 
     pub fn observers(&self) -> &[Arc<dyn SegmentObserver>] {
         &self.observers
+    }
+
+    /// 通知所有支持手动 flush 的 observer 立即处理积累的 buffer。
+    pub fn request_flush_key_points(&self) {
+        for obs in &self.observers {
+            if obs.name() == "key_point_llm" {
+                obs.request_flush();
+            }
+        }
     }
 
     pub fn filter_count(&self) -> usize {

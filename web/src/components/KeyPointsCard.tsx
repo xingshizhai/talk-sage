@@ -1,5 +1,6 @@
 // 要点聚合卡片：分类徽章 + 文本。
 
+import { useState } from "react";
 import type { KeyPoint } from "../lib/highlights";
 
 const KIND_COLOR: Record<string, { fg: string; bg: string }> = {
@@ -11,7 +12,28 @@ const KIND_COLOR: Record<string, { fg: string; bg: string }> = {
   其他: { fg: "var(--muted)", bg: "var(--surface-2)" },
 };
 
-export default function KeyPointsCard({ points, pluginLabel }: { points: readonly KeyPoint[]; pluginLabel?: string }) {
+export default function KeyPointsCard({
+  points,
+  pluginLabel,
+  listening,
+  onFlush,
+}: {
+  points: readonly KeyPoint[];
+  pluginLabel?: string;
+  listening?: boolean;
+  onFlush?: () => Promise<void>;
+}) {
+  const [flushing, setFlushing] = useState(false);
+
+  const handleFlush = async () => {
+    if (!onFlush || flushing) return;
+    setFlushing(true);
+    try { await onFlush(); } finally {
+      // 给用户一点视觉反馈，稍后恢复
+      setTimeout(() => setFlushing(false), 2000);
+    }
+  };
+
   return (
     <section
       style={{
@@ -34,7 +56,29 @@ export default function KeyPointsCard({ points, pluginLabel }: { points: readonl
             {pluginLabel}
           </span>
         )}
-        <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>{points.length}</span>
+        <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          {listening && onFlush && (
+            <button
+              onClick={handleFlush}
+              disabled={flushing}
+              title="立即处理当前积累的转写段，提前生成要点"
+              style={{
+                fontSize: 10,
+                padding: "2px 8px",
+                borderRadius: 4,
+                border: "1px solid var(--border)",
+                background: flushing ? "var(--surface-2)" : "var(--card-bg)",
+                color: flushing ? "var(--muted)" : "var(--live)",
+                cursor: flushing ? "default" : "pointer",
+                fontWeight: 600,
+                transition: "all 0.15s",
+              }}
+            >
+              {flushing ? "整理中…" : "⚡ 立即整理"}
+            </button>
+          )}
+          <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>{points.length}</span>
+        </span>
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--pad)", display: "flex", flexDirection: "column", gap: 9 }}>
         {points.length === 0 && (

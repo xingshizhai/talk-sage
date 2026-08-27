@@ -94,6 +94,10 @@ export const ipcApi: AppApi = {
     await invoke("set_noise_level", { level });
   },
 
+  async flushKeyPoints(): Promise<void> {
+    await invoke("flush_key_points");
+  },
+
   async getVoiceprintStatus(): Promise<{ model_available: boolean; enrolled: boolean }> {
     return invoke("get_voiceprint_status");
   },
@@ -325,6 +329,10 @@ export const httpApi: AppApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ level }),
     });
+  },
+
+  async flushKeyPoints(): Promise<void> {
+    await req("/key_points/flush", { method: "POST" });
   },
 
   async getVoiceprintStatus(): Promise<{ model_available: boolean; enrolled: boolean }> {

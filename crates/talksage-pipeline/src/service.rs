@@ -111,6 +111,11 @@ impl RunningListen {
         self.runtime.is_paused()
     }
 
+    /// 手动触发要点聚合：通知 key_point_llm observer 立即处理当前 buffer。
+    pub fn flush_key_points(&self) {
+        self.hooks.request_flush_key_points();
+    }
+
     pub fn session_id(&self) -> Option<i64> {
         self.session_id
     }

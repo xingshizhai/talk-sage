@@ -923,6 +923,8 @@ export default function App() {
             {!importing && !importDone && (
               <KeyPointsCard
                 points={points}
+                listening={listening}
+                onFlush={async () => { await api.flushKeyPoints(); }}
                 pluginLabel={(() => {
                   const llmEnabled = config?.plugins?.["key_point_llm"]?.enabled !== false;
                   const oldEnabled = config?.plugins?.["key_point_extractor"]?.enabled !== false;

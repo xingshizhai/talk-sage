@@ -108,6 +108,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/listen/stop", axum::routing::post(stop_listen_api))
         .route("/listen/pause", axum::routing::post(pause_listen_api))
         .route("/noise_level", axum::routing::post(set_noise_level_api))
+        .route("/key_points/flush", axum::routing::post(flush_key_points_api))
         .route("/asr/gpu_status", get(gpu_status_handler))
         .route("/asr/test", axum::routing::post(test_aliyun_asr_api))
         .route("/voiceprint/status", axum::routing::get(voiceprint_status_api))
@@ -934,6 +935,22 @@ async fn set_noise_level_api(
         Some(p) => {
             p.set_noise_level(level);
             (StatusCode::OK, Json(serde_json::json!({ "ok": true, "level": p.noise_level() }))).into_response()
+        }
+        None => (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "not listening" }))).into_response(),
+    }
+}
+
+async fn flush_key_points_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    match state.running.lock().unwrap().as_ref() {
+        Some(p) => {
+            p.flush_key_points();
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
         }
         None => (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "not listening" }))).into_response(),
     }

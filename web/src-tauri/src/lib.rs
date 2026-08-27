@@ -441,6 +441,16 @@ fn set_listen_paused(paused: bool, state: tauri::State<'_, AppState>) -> Result<
     }
 }
 
+/// 手动触发要点聚合：通知 key_point_llm observer 立即处理当前 buffer。
+#[tauri::command]
+fn flush_key_points(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let guard = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+    match guard.as_ref() {
+        Some(running) => { running.flush_key_points(); Ok(()) }
+        None => Err("未在监听中".into()),
+    }
+}
+
 /// 实时调节噪音电平阈值（0 = 关闭；无需停止监听，下一音频块即生效）。
 #[tauri::command]
 fn set_noise_level(level: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
@@ -996,6 +1006,7 @@ pub fn run() {
             start_listen,
             stop_listen,
             set_listen_paused,
+            flush_key_points,
             set_noise_level,
             get_voiceprint_status,
             enroll_voice,
