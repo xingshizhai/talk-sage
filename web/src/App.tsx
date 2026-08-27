@@ -76,6 +76,7 @@ export default function App() {
   const [mode, setMode] = useState<TranscriptMode>(() => loadTranscriptMode());
   const [lines, setLines] = useState<TimelineLine[]>([]);
   const [points, setPoints] = useState<readonly KeyPoint[]>([]);
+  const [flushRecords, setFlushRecords] = useState<readonly { time: string; pointsBefore: number; msg: string }[]>([]);
   const [terms, setTerms] = useState<TermItem[]>([]);
   const [expandedTerms, setExpandedTerms] = useState<Record<string, boolean>>({});
   const [briefs, setBriefs] = useState<BriefItem[]>([]);
@@ -557,6 +558,7 @@ export default function App() {
     lastTranslationRef.current = {};
     setLines([]);
     setPoints([]);
+    setFlushRecords([]);
     setTerms([]);
     setExpandedTerms({});
     setBriefs([]);
@@ -923,8 +925,16 @@ export default function App() {
             {!importing && !importDone && (
               <KeyPointsCard
                 points={points}
+                flushRecords={flushRecords}
                 listening={listening}
-                onFlush={async () => { await api.flushKeyPoints(); }}
+                onFlush={async () => {
+                  const now = new Date();
+                  const time = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
+                  const pointsBefore = points.length;
+                  let msg = "整理中…";
+                  try { msg = await api.flushKeyPoints() ?? "已触发"; } catch (e) { msg = String(e); }
+                  setFlushRecords((prev) => [...prev, { time, pointsBefore, msg }]);
+                }}
                 pluginLabel={(() => {
                   const llmEnabled = config?.plugins?.["key_point_llm"]?.enabled !== false;
                   const oldEnabled = config?.plugins?.["key_point_extractor"]?.enabled !== false;

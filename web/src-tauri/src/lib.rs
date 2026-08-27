@@ -443,11 +443,19 @@ fn set_listen_paused(paused: bool, state: tauri::State<'_, AppState>) -> Result<
 
 /// 手动触发要点聚合：通知 key_point_llm observer 立即处理当前 buffer。
 #[tauri::command]
-fn flush_key_points(state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn flush_key_points(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    log::info!("flush_key_points: 收到手动触发请求");
     let guard = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
     match guard.as_ref() {
-        Some(running) => { running.flush_key_points(); Ok(()) }
-        None => Err("未在监听中".into()),
+        Some(running) => {
+            let msg = running.flush_key_points();
+            log::info!("flush_key_points: {msg}");
+            Ok(msg)
+        }
+        None => {
+            log::warn!("flush_key_points: 未在监听中");
+            Err("未在监听中".into())
+        }
     }
 }
 

@@ -447,8 +447,8 @@ export interface AppApi {
   setListenPaused(paused: boolean): Promise<void>;
   /** 实时调节噪音电平阈值（0 = 关闭，监听中生效，无需重启）。 */
   setNoiseLevel(level: number): Promise<void>;
-  /** 手动触发要点聚合：立即处理当前积累的转写段。 */
-  flushKeyPoints(): Promise<void>;
+  /** 手动触发要点聚合：立即处理当前积累的转写段，返回诊断消息。 */
+  flushKeyPoints(): Promise<string>;
   /** 说话人声纹状态。 */
   getVoiceprintStatus(): Promise<{ model_available: boolean; enrolled: boolean }>;
   /** 注册主人声音（录制麦克风 seconds 秒 → 提取声纹保存）。 */

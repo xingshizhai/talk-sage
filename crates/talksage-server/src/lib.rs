@@ -949,8 +949,8 @@ async fn flush_key_points_api(
     }
     match state.running.lock().unwrap().as_ref() {
         Some(p) => {
-            p.flush_key_points();
-            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+            let msg = p.flush_key_points();
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "msg": msg }))).into_response()
         }
         None => (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "not listening" }))).into_response(),
     }

@@ -410,6 +410,10 @@ impl HookRegistry {
         }
     }
 
+    pub fn has_key_point_llm(&self) -> bool {
+        self.observers.iter().any(|o| o.name() == "key_point_llm")
+    }
+
     pub fn filter_count(&self) -> usize {
         self.filters.len()
     }

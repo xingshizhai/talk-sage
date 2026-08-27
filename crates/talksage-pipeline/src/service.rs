@@ -116,13 +116,23 @@ impl RunningListen {
     }
 
     /// 手动触发要点聚合：在后台线程直接调用 LLM 处理当前 buffer 并发射事件。
-    pub fn flush_key_points(&self) {
+    /// 返回诊断消息供日志记录。
+    pub fn flush_key_points(&self) -> String {
+        let has_llm = self.plugin_ctx.llm.is_some();
+        let has_observer = self.hooks.has_key_point_llm();
+        if !has_observer {
+            return "key_point_llm observer 未注册（插件可能已禁用）".into();
+        }
+        if !has_llm {
+            return "LLM 未配置，无法整理要点".into();
+        }
         let emit = self.emit.clone();
         let ctx = self.plugin_ctx.clone();
         let hooks = self.hooks.clone();
         std::thread::spawn(move || {
             hooks.flush_key_points_now(&ctx, &|ev| emit(ev));
         });
+        "已启动后台整理".into()
     }
 
     pub fn session_id(&self) -> Option<i64> {

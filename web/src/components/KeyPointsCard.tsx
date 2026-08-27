@@ -1,4 +1,4 @@
-// 要点聚合卡片：分类徽章 + 文本。
+// 要点聚合卡片：分类徽章 + 文本 + 手动整理时间戳记录。
 
 import { useState } from "react";
 import type { KeyPoint } from "../lib/highlights";
@@ -12,13 +12,17 @@ const KIND_COLOR: Record<string, { fg: string; bg: string }> = {
   其他: { fg: "var(--muted)", bg: "var(--surface-2)" },
 };
 
+type FlushRecord = { time: string; pointsBefore: number; msg: string };
+
 export default function KeyPointsCard({
   points,
+  flushRecords = [],
   pluginLabel,
   listening,
   onFlush,
 }: {
   points: readonly KeyPoint[];
+  flushRecords?: readonly FlushRecord[];
   pluginLabel?: string;
   listening?: boolean;
   onFlush?: () => Promise<void>;
@@ -29,10 +33,32 @@ export default function KeyPointsCard({
     if (!onFlush || flushing) return;
     setFlushing(true);
     try { await onFlush(); } finally {
-      // 给用户一点视觉反馈，稍后恢复
-      setTimeout(() => setFlushing(false), 2000);
+      setTimeout(() => setFlushing(false), 1500);
     }
   };
+
+  // 把 points 和 flushRecords 交织：flush 记录插在它触发时已有的要点数量之后
+  type Row =
+    | { kind: "point"; point: KeyPoint; idx: number }
+    | { kind: "flush"; record: FlushRecord; key: string };
+
+  const rows: Row[] = [];
+  let flushIdx = 0;
+  for (let i = 0; i <= points.length; i++) {
+    // 插入所有 pointsBefore === i 的 flush 记录
+    while (flushIdx < flushRecords.length && flushRecords[flushIdx].pointsBefore === i) {
+      rows.push({ kind: "flush", record: flushRecords[flushIdx], key: `flush-${flushIdx}` });
+      flushIdx++;
+    }
+    if (i < points.length) {
+      rows.push({ kind: "point", point: points[i], idx: i });
+    }
+  }
+  // 剩余的 flush 记录追加到末尾
+  while (flushIdx < flushRecords.length) {
+    rows.push({ kind: "flush", record: flushRecords[flushIdx], key: `flush-${flushIdx}` });
+    flushIdx++;
+  }
 
   return (
     <section
@@ -81,17 +107,32 @@ export default function KeyPointsCard({
         </span>
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--pad)", display: "flex", flexDirection: "column", gap: 9 }}>
-        {points.length === 0 && (
+        {rows.length === 0 && (
           <div style={{ color: "var(--muted)", fontSize: 13 }}>会中要点由插件抽取；关闭插件或听写场景下这里为空…</div>
         )}
-        {points.map((p, i) => {
-          const c = KIND_COLOR[p.kind] ?? KIND_COLOR["其他"];
+        {rows.map((row) => {
+          if (row.kind === "flush") {
+            const ok = row.record.msg.startsWith("已");
+            return (
+              <div
+                key={row.key}
+                style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--muted)", fontSize: 10, userSelect: "none" }}
+              >
+                <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
+                <span title={row.record.msg} style={{ color: ok ? "var(--live)" : "var(--danger)", whiteSpace: "nowrap" }}>
+                  ⚡ {row.record.time} 整理{ok ? "" : `（${row.record.msg}）`}
+                </span>
+                <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
+              </div>
+            );
+          }
+          const c = KIND_COLOR[row.point.kind] ?? KIND_COLOR["其他"];
           return (
-            <div key={p.resultId || i} style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
+            <div key={row.point.resultId || row.idx} style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
               <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 5, background: c.bg, color: c.fg }}>
-                {p.kind}
+                {row.point.kind}
               </span>
-              <span style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)" }}>{p.text}</span>
+              <span style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)" }}>{row.point.text}</span>
             </div>
           );
         })}
