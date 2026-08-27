@@ -801,7 +801,9 @@ fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode 
     let kind = match EngineKind::from_name(engine) {
         Some(k) => k,
         None => {
-            eprintln!("未知引擎: {engine}（可选 paraformer-zh | zipformer-en）");
+            eprintln!(
+                "未知引擎: {engine}（可选 qwen3-asr | whisper-large-v3-turbo-metal | paraformer-zh | zipformer-en）"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -877,7 +879,11 @@ fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode 
                     latency_n += 1;
                 }
                 let err = reference.as_deref().map(|r| {
-                    if kind == EngineKind::ParaformerZh {
+                    // 中文/多语言模型按字符计 CER；英文流式引擎按词计 WER。
+                    if kind == EngineKind::ParaformerZh
+                        || kind == EngineKind::Qwen3Asr
+                        || kind == EngineKind::WhisperLargeV3TurboMetal
+                    {
                         talksage_core::cer(r, &tr.text)
                     } else {
                         talksage_core::wer(r, &tr.text)

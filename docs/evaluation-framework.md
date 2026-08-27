@@ -52,8 +52,9 @@ CI 不应依赖物理麦克风。设备无关逻辑由合成/固定 wav 确定�
 python3 scripts/evaluate.py prepare
 ./scripts/talksage.sh evaluate
 
-# 只比较当前产品本地模型
+# 只比较当前产品本地模型（CUDA: qwen3-asr；Apple Silicon: whisper-large-v3-turbo-metal）
 python3 scripts/evaluate.py asr --engines qwen3-asr
+python3 scripts/evaluate.py asr --engines whisper-large-v3-turbo-metal
 
 # 真实麦克风测试（macOS 需终端或 .app 已获麦克风权限）
 ./scripts/talksage.sh audio-test 10

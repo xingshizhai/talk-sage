@@ -550,6 +550,7 @@ cmd_package() {
         echo
         echo "macOS 应用: $app（麦克风授权在此包内才生效）"
         echo "运行: open \"$app\""
+        echo "离线升级：设置 → 升级 → 选择 bundle/dmg 下的 .dmg（或本 .app）"
     fi
 }
 

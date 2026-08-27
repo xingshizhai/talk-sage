@@ -1,6 +1,6 @@
 # TalkSage ASR 架构与优化
 
-**最后更新：** 2026-08-25（ASR 路由、产品模型目录与模型管理下载架构）
+**最后更新：** 2026-08-27（Apple Metal whisper.cpp 在 M4 上实测通过）
 
 ---
 
@@ -43,17 +43,18 @@ TalkSage ASR 采用"VAD 切段 + 离线整段推理"架构（2026-08-25 迁移�
 
 `GpuBackend::detect()` 运行时自动检测：
 
-| 后端 | 检测方式 | sherpa-onnx provider |
+| 后端 | 检测方式 | 实际推理 |
 |---|---|---|
-| `Cuda` | `dlopen nvcuda.dll`（Windows）/ `libcuda.so.1`（Linux） | `"cuda"` |
-| `CoreMl` | 预留枚举；当前产品构建不返回该值 | `"coreml"` |
-| `None` | 以上均不满足 | `"cpu"` |
+| `Metal` | macOS **aarch64**（Apple Silicon） | whisper.cpp `use_gpu=true`；native 日志须出现 `using Metal backend` |
+| `Vulkan` | Windows x64 且以 `vulkan-gpu` feature 编译，并能加载 `vulkan-1.dll` | 同一套 whisper.cpp adapter |
+| `Cuda` | `dlopen nvcuda.dll`（Windows）/ `libcuda.so.1`（Linux） | sherpa-onnx Qwen3-ASR |
+| `None` | 以上均不满足 | CPU（仅 `asr_mode=local`）或阿里云 |
 
-`resolve_asr_route()` 是路由的单一事实来源：当前 `auto` 模式只有经过运行时确认的 CUDA 才走 sherpa 本地，其他机器要求阿里云；`local` 模式保留显式 CPU 作为离线、隐私和诊断选项。Apple GPU 不通过 sherpa provider 路由，而由后续独立 Metal adapter 承载。Intel GPU 尚未实现。
+`resolve_asr_route()` 是路由的单一事实来源：`auto` 模式在检测到 CUDA / Metal / Vulkan 时走本地 GPU；否则要求完整阿里云凭证。`local` 可显式 `cpu` / `cuda` / `metal` / `vulkan`。Apple GPU **不**走 sherpa `provider=coreml`（该路径会 `Fallback to cpu!`）。Intel GPU 尚未实现。
 
-路由确定后 provider 会先写入 `EngineOptions`，再进入 `EnginePool`。因此缓存键和实际 ONNX Runtime provider 一致，CPU/CUDA/CoreML 模型实例不会混用。
+路由确定后 provider 写入 `EngineOptions` 再进 `EnginePool`。whisper.cpp Metal/Vulkan 与 sherpa CPU/CUDA 实例不会混用。
 
-`GET /api/asr/gpu_status`（headless）和 Tauri `get_gpu_status` 命令向前端暴露 `{backend, display_name, is_accelerated}`。
+`GET /api/asr/gpu_status`（headless）和 Tauri `get_gpu_status` 暴露 `{backend, display_name, hardware_candidate, is_accelerated, effective_route}`。
 
 ---
 
@@ -83,20 +84,37 @@ aliyun_app_key = "..."               # NLS 项目 AppKey（实时语音识别）
 
 ```
 cloud  →  AliyunEngine（强制云端）
-local  →  create_engine_auto(gpu)（强制本地）
-auto   →  已验证可用的 NVIDIA CUDA          → 本地 Qwen3-ASR
+local  →  按 backend 偏好走本地（auto 时用 detect() 结果）
+auto   →  NVIDIA CUDA                         → 本地 Qwen3-ASR
+          Apple Silicon Metal                 → 本地 Whisper large-v3-turbo Q5_0
+          Windows Vulkan                      → 同上 whisper.cpp GPU
           无受支持 GPU + 完整三项凭证        → AliyunEngine
           无受支持 GPU + 凭证不完整           → 启动前返回配置错误
 ```
 
 ### Apple Silicon 实测与模型决策（M4 / 16GB）
 
-本机使用 sherpa-onnx 1.13.5 macOS arm64 静态库，以同一 Paraformer 模型、同一段 10.05 秒音频测试：CPU RTF 为 0.064，`provider=coreml` 为 0.065，并由 native runtime 明确打印 `Fallback to cpu!`。因此旧架构中的“Apple Silicon → CoreML → Qwen3-ASR”只是配置推断，并没有使用 GPU。
+sherpa-onnx 1.13.5 macOS arm64 静态库**不能**当 Apple GPU 用：同一 Paraformer、同一段 10.05s 音频，CPU RTF 0.064，`provider=coreml` RTF 0.065，native 打印 `Fallback to cpu!`。因此禁止把 Qwen3-ASR 配成 Apple GPU 默认模型。
 
-Apple GPU 路线应拆成独立适配器，首选 `whisper.cpp + Metal`，不要继续复用当前 sherpa provider 字段。M4 16GB 的默认模型建议为多语言 `Whisper large-v3-turbo` 的量化版本；它比 small 更适合作为中文、英文和专业术语混合场景的质量/速度平衡。`Whisper small` 只作为低内存、最低延迟档。现有 `Qwen3-ASR 0.6B int8` 保留给 CUDA 和 CPU 对比评估；在没有经过模型级 CoreML/Metal 基准前，不把它配置为 Apple GPU 默认模型。
+产品路径是独立的 **whisper.cpp + Metal** adapter（`crates/talksage-asr/src/metal.rs`，`whisper-rs` feature `metal`）。`asr_mode=auto` 在 Apple Silicon 上路由到 `whisper-large-v3-turbo-metal`。
 
-Metal 适配器完成前，macOS 自动模式会诚实地视为“无可用本地 GPU 后端”，有完整阿里云凭证时使用云端；用户仍可显式选择本地 CPU。设置页同时展示“物理硬件”和“当前推理后端”，避免再次把 M4 GPU 与实际执行 provider 混为一谈。
+**2026-08-27 本机复测（Apple M4 16GB，macOS 26.5.1，whisper.cpp 1.8.3，debug CLI）：**
 
+```bash
+python3 scripts/evaluate.py asr --engines whisper-large-v3-turbo-metal
+```
+
+| 项 | 结果 |
+|---|---|
+| native GPU | `ggml_metal_device_init: GPU name: Apple M4`；`whisper_backend_init_gpu: using Metal backend` |
+| 权重量 GPU | `whisper_model_load: Metal total size = 573.40 MB` |
+| 模型加载 | 首次 390–675 ms；引擎池复用后约 8–10 ms |
+| 段级推理 RTF | 英文 6.4s 段 **0.32**；中英混合三段 **0.56–0.81**（均 < 1） |
+| 管道实时系数 | **1.29**（含按墙钟喂 wav，不是纯 GPU RTF） |
+| 启动语料 CER | 英文 **2.9%**，中英混合 **11.8%**，两条平均 **7.3%**（门禁通过，推荐该引擎） |
+| 稳定性 | `GGML_METAL_NO_RESIDENCY=1` 关闭 residency set，不关闭 Metal |
+
+设置页同时展示「物理硬件」和「当前推理后端」，避免把 M4 GPU 与 sherpa CPU 混为一谈。Qwen3-ASR 0.6B 仍留给 CUDA 与显式 CPU 对比。
 ---
 
 ## 实时链路（双流）
@@ -167,7 +185,7 @@ cargo run -p talksage-asr --bin bench_cer --release -- \
 |---|---|---|
 | 旧：Paraformer-zh 流式 | <500ms | ~15–25% |
 | 新：Qwen3-ASR (GPU) | 1–3s（段结束后） | <5% |
-| large-v3-turbo Q5_0 (M4 Metal) | 0.607–0.929（段级，首次固定语料） | 固定中英混合语料已输出完整文本；需扩大语料计算稳定 CER |
+| large-v3-turbo Q5_0（M4 Metal，2026-08-27） | 段级推理 RTF 0.32–0.81；管道（含喂文件）约 1.29 | 启动语料英文 CER 2.9%、中英混合 CER 11.8%、平均 7.3% |
 | 新：阿里云云端 | 200–500ms（段结束后） | <5% |
 
-> CER 数字为估算，以实际 AISHELL-1 bench 结果为准。
+> 启动语料 CER 来自 2026-08-27 M4 实测（见上节）；AISHELL-1 全量仍以 `talksage bench` / `bench_cer` 为准。

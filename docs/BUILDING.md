@@ -318,9 +318,10 @@ npx tauri build
 
 应用内置两种升级方式，设置页「升级」Tab 操作：
 
-**离线升级（可用）**：选择 `talksage.ps1 package` / `talksage.sh package` 产出的安装包
-（Windows：NSIS `.exe` 或 MSI；macOS：`.dmg` / `拓思者.app`），
-应用校验版本（需高于当前）与架构后静默启动安装程序并退出，安装完成重新启动即可。
+**离线升级（可用）**：设置页「升级」Tab 选择已下载的安装包。应用校验版本（须高于当前）与架构后：
+
+- **Windows**：静默启动 NSIS `.exe`（`/S`）或 MSI（`msiexec /qb`），应用退出，安装程序替换文件；装完后手动再开应用。
+- **macOS**：接受 `talksage.sh package` 产出的 `.dmg` 或 `拓思者.app`。应用退出后，后台脚本把 bundle **ditto 到 `/Applications/拓思者.app`** 并 `open`。这是「把 App 拖进应用程序」的可编程对应（macOS 没有 NSIS 那种静默安装器）。日志：`/tmp/talksage-offline-upgrade.log`。
 
 **在线升级（框架）**：基于标准 Tauri v2 方案 `tauri-plugin-updater`：
 

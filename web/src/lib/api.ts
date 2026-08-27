@@ -490,12 +490,26 @@ export interface AppApi {
   cancelFileImport(): Promise<void>;
   /** 订阅文件导入事件流（独立频道，不影响实时转写），返回取消函数。 */
   onImportEvent(handler: (ev: DomainEvent) => void): () => void;
-  /** 在线检查更新（框架：返回是否有新版本及提示，不自动安装）。 */
+  /** 在线检查更新（框架；未配置公钥时 configured=false）。 */
   checkForUpdates(): Promise<UpdateCheckResult>;
-  /** 打开系统文件对话框，选择升级安装包（NSIS .exe / MSI）；取消时返回 null。 */
+  /** 选择离线升级包；取消时返回 null。仅桌面。Windows：NSIS/MSI；macOS：.dmg/.app。 */
   pickUpgradePackage(): Promise<string | null>;
-  /** 离线升级：校验安装包（版本/架构）后静默启动安装程序，应用随后退出。 */
+  /** 校验并安装离线升级包，成功后应用会退出。仅桌面。 */
   installOfflineUpgrade(path: string): Promise<OfflineUpgradeResult>;
   /** 传输载体标识（调试用）。 */
   readonly transport: "ipc" | "http";
+}
+
+export interface UpdateCheckResult {
+  available: boolean;
+  configured: boolean;
+  current_version: string;
+  latest_version?: string;
+  message: string;
+}
+
+export interface OfflineUpgradeResult {
+  ok: boolean;
+  version: string;
+  message: string;
 }

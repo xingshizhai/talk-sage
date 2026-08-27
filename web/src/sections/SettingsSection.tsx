@@ -656,6 +656,7 @@ export default function SettingsSection({
     } catch (e) {
       setUpgradeCheckResult({
         available: false,
+        configured: false,
         current_version: appVersion ?? "",
         message: e instanceof Error ? e.message : String(e),
       });
@@ -1442,9 +1443,11 @@ export default function SettingsSection({
             )}
           </div>
           <div style={{ ...hint, marginBottom: 12 }}>
-            离线升级：使用 <code>talksage.ps1 package</code> 产出的安装包（NSIS .exe 或 MSI），
-            选择后应用会校验版本（需高于当前版本）并静默安装，安装完成后重新启动即可。
-            在线升级为框架预留：配置更新源与签名公钥后，「检查更新」即可在线升级。
+            离线升级：选择本机已下载的安装包，校验版本（须高于当前）与架构后安装。
+            Windows：<code>talksage.ps1 package</code> 产出的 NSIS <code>.exe</code> / MSI，静默安装后请再开应用。
+            macOS：<code>talksage.sh package</code> 产出的 <code>.dmg</code> 或 <code>拓思者.app</code>，会替换
+            <code>/Applications/拓思者.app</code> 并重新打开。
+            在线升级为框架预留：配置更新源与签名公钥后，「检查更新」即可查询新版本。
           </div>
           <h3 style={{ ...groupTitle, marginTop: 10 }}>在线升级</h3>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>

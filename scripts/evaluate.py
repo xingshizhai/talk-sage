@@ -71,10 +71,14 @@ def installed_engines(config: dict) -> tuple[list[str], list[str]]:
         "whisper-base": "sherpa-onnx-whisper-base",
         "whisper-small": "sherpa-onnx-whisper-small",
         "qwen3-asr": "sherpa-onnx-qwen3-asr-0.6b",
+        "whisper-large-v3-turbo-metal": "whisper.cpp-large-v3-turbo-q5_0",
     }
     installed, skipped = [], []
     for engine in config["engines"]:
-        if (ROOT / "models" / model_dirs[engine]).is_dir():
+        model_root = ROOT / "models" / model_dirs[engine]
+        metal_bin = model_root / "ggml-large-v3-turbo-q5_0.bin"
+        ready = metal_bin.is_file() if engine == "whisper-large-v3-turbo-metal" else model_root.is_dir()
+        if ready:
             installed.append(engine)
         else:
             skipped.append(engine)
@@ -117,6 +121,11 @@ def run_asr(config: dict, requested: list[str] | None) -> dict:
     results = []
     env = os.environ.copy()
     env["TALKSAGE_MODELS_DIR"] = str(ROOT / "models")
+    # 捕获 whisper.cpp native 日志（是否真正 using Metal backend）
+    env.setdefault("RUST_LOG", "info")
+    env.setdefault("TALKSAGE_LOG", "info")
+    if sys.platform == "darwin":
+        env.setdefault("GGML_METAL_NO_RESIDENCY", "1")
     for engine in engines:
         if engine not in installed:
             results.append({"engine": engine, "status": "skipped", "reason": "model_not_installed"})

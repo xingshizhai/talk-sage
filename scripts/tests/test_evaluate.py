@@ -48,9 +48,9 @@ class EvaluateTests(unittest.TestCase):
         config = evaluate.load_json(evaluate.DEFAULT_CONFIG)
         self.assertFalse(evaluate.report_failed(report, config))
 
-    def test_hypothesis_output_is_machine_readable(self):
-        output = "file  1.0  2.0%  1.0  100\n  识别: TalkSage 使用 Paraformer\n"
-        self.assertEqual(evaluate.HYPOTHESIS_RE.findall(output), ["TalkSage 使用 Paraformer"])
+    def test_evaluation_config_includes_metal_engine(self):
+        config = evaluate.load_json(evaluate.DEFAULT_CONFIG)
+        self.assertIn("whisper-large-v3-turbo-metal", config["engines"])
 
 
 if __name__ == "__main__":

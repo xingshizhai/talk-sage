@@ -89,13 +89,25 @@ python3 scripts/evaluate.py asr \
   --engines qwen3-asr
 ```
 
-未安装的模型会标记为 `model_not_installed`，不会假装参与比较。当前产品可运行的本地段级引擎是 Qwen3-ASR：
+未安装的模型会标记为 `model_not_installed`，不会假装参与比较。
+
+**Apple Silicon（whisper.cpp Metal）：**
+
+```bash
+python3 scripts/download_models.py whisper-metal
+python3 scripts/evaluate.py asr --engines whisper-large-v3-turbo-metal
+```
+
+日志中应出现 `whisper_backend_init_gpu: using Metal backend` 以及本机 GPU 名（例如 `GPU name: Apple M4`）。`talksage bench` 对 Qwen3 / Metal 按 **CER** 计分；英文流式引擎仍用 WER。启动语料只有 2 条，正式选型需更大语料。
+
+**NVIDIA / 显式 CPU（Qwen3-ASR）：**
 
 ```bash
 python3 scripts/download_models.py qwen3-asr
+python3 scripts/evaluate.py asr --engines qwen3-asr
 ```
 
-Apple Silicon 的 Whisper large-v3-turbo Q5_0 可通过 `whisper-metal` 目标下载，并使用 `whisper-large-v3-turbo-metal` 引擎参加真实 Metal 对比。Paraformer、Zipformer 和旧 sherpa Whisper 只用于历史回归，可通过 `legacy` 目标准备。下载后重新运行 `./scripts/talksage.sh build` 和评估命令。
+Paraformer、Zipformer 和旧 sherpa Whisper 只用于历史回归，可通过 `legacy` 目标准备。下载后重新运行 `./scripts/talksage.sh build` 和评估命令。
 
 ## 5. 检查真实麦克风
 

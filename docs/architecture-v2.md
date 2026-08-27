@@ -220,7 +220,7 @@ flowchart LR
 
 ### 8.2 ASR 域（talksage-asr）
 
-- **统一接口而非单一运行时**：`SegmentEngine` 屏蔽 sherpa-onnx、阿里云和后续 whisper.cpp/Metal 的实现差异；模型清单由 `EngineKind::ALL` / `ModelProfile` 统一声明
+- **统一接口而非单一运行时**：`SegmentEngine` 屏蔽 sherpa-onnx、阿里云和 whisper.cpp Metal/Vulkan 的实现差异；模型清单由 `EngineKind::ALL` / `ModelProfile` 统一声明
 - **架构（2026-08-25 迁移）**：已从”流式逐帧增量”切换为”VAD 切段 + 离线整段推理”
   ```
   旧：麦克风 → VAD → Paraformer-zh 流式（每帧增量）→ partial 文本
@@ -352,7 +352,7 @@ enum DomainEvent {
 |---|---|---|
 | 回环采集 | WASAPI loopback（壳内 / capture-agent） | ScreenCaptureKit（macOS 13+）或 BlackHole 虚拟声卡 |
 | 权限 | 麦克风；无需额外（回环走 WASAPI） | 麦克风 + 屏幕录制（SCK 必需）权限引导 |
-| GPU | NVIDIA CUDA（ONNX Runtime CUDA） | Apple Metal（独立适配器；当前待实现） |
+| GPU | NVIDIA CUDA（ONNX Runtime CUDA）或 whisper.cpp Vulkan | Apple Metal（whisper.cpp large-v3-turbo；Apple Silicon 已落地） |
 | 分发 | NSIS 安装包（WebView2 常驻） | dmg（WKWebView） |
 
 ---
@@ -624,7 +624,7 @@ revision / processed_until_sample / committed_until_sample
 
 | 模块 | 位置 | 功能 |
 |---|---|---|
-| `GpuBackend` | `talksage-asr::gpu` | 检测真正可用的 CUDA / CPU；CoreML 枚举仅预留，不用芯片型号代替 provider 验证 |
+| `GpuBackend` | `talksage-asr::gpu` | Apple Silicon → `Metal`（whisper.cpp）；Windows → Vulkan（`vulkan-gpu`）或 CUDA；否则 CPU。不再用 sherpa CoreML 冒充 Apple GPU |
 | `resolve_asr_route` | `talksage-asr::routing` | 集中裁决 auto/local/cloud 的有效路线和错误信息 |
 | `EngineKind::ALL` / `ModelProfile` | `talksage-asr::models` | 统一产品模型目录，并区分可下载与可选择 |
 | 模型管理器 | `web/src-tauri` | 统一模型目录、断点续传、空间预检、校验、任务状态与日志 |
@@ -674,3 +674,4 @@ else (auto):
 - ✅ WebSocket 连接 + PCM 流推送 + `finish()` 正常返回
 - ✅ 全量单元测试（36 个，含 GPU 检测、Token 签名、WebSocket 消息构建）
 - ✅ 集成测试：`cargo test -p talksage-asr --test aliyun_token_live --test aliyun_ws_live`
+- ✅ Apple Metal：2026-08-27 在 M4 16GB 上 `evaluate.py asr --engines whisper-large-v3-turbo-metal` 日志确认 `using Metal backend`，启动语料平均 CER 7.3%、门禁通过

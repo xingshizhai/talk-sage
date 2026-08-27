@@ -1,11 +1,10 @@
 //! GPU 后端检测：运行时探测可用的硬件加速后端。
 //!
 //! 检测策略（按优先级）：
-//!   1. Apple CoreML：只有运行时确实带 CoreML EP 才能选择。当前随
-//!      `sherpa-onnx-sys` 1.13.5 分发的 macOS arm64 静态库会明确回退 CPU，
-//!      因而不能仅凭 Apple Silicon 架构宣称 GPU 可用。
-//!   2. NVIDIA CUDA（Windows/Linux）：尝试动态加载 CUDA runtime 库。
-//!   3. 回退 CPU。
+//!   1. macOS Apple Silicon：whisper.cpp Metal adapter（不使用会回退 CPU 的
+//!      sherpa-onnx CoreML EP）。
+//!   2. Windows x64：whisper.cpp Vulkan（`vulkan-gpu` feature）或 NVIDIA CUDA。
+//!   3. 其他：尝试 CUDA runtime；否则 CPU。
 
 /// 可用的硬件加速后端。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

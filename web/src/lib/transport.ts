@@ -512,15 +512,21 @@ export const httpApi: AppApi = {
   },
 
   async checkForUpdates(): Promise<UpdateCheckResult> {
-    throw new Error("headless 模式不支持在线升级检查");
+    const version = await this.getVersion();
+    return {
+      available: false,
+      configured: false,
+      current_version: version,
+      message: "在线升级仅桌面应用可用",
+    };
   },
 
   async pickUpgradePackage(): Promise<string | null> {
-    throw new Error("headless 模式不支持本地安装包选择");
+    return null;
   },
 
   async installOfflineUpgrade(_path: string): Promise<OfflineUpgradeResult> {
-    throw new Error("headless 模式不支持离线升级");
+    throw new Error("离线升级仅桌面应用可用");
   },
 
   onImportEvent(_handler: (ev: DomainEvent) => void): () => void {
