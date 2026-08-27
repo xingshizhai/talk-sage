@@ -542,3 +542,185 @@ async fn save_config_persists_scene_custom_engine() {
     assert_eq!(snap.scene.custom.user_engine, "qwen3-asr");
     assert_eq!(snap.scene.custom.client_engine, "qwen3-asr");
 }
+
+/// GET /config 上取一份 JSON（复用同一个 router，配置状态才连得上）。
+async fn get_config_json(router: &axum::Router) -> serde_json::Value {
+    let resp = router
+        .clone()
+        .oneshot(Request::builder().uri("/api/config").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn post_config(router: &axum::Router, body: &serde_json::Value) -> StatusCode {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/config")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// `GET /config` 必须返回完整的 scene（mode + custom）——
+/// 浏览器模式下设置页的「场景模式」全靠它还原；缺字段时前端只能显示默认值，
+/// 保存又会把默认值写回去，等于静默覆盖用户的真实场景。
+#[tokio::test]
+async fn config_endpoint_returns_scene_mode_and_custom() {
+    let (status, body) = get("/api/config").await;
+    assert_eq!(status, StatusCode::OK);
+    let cfg: serde_json::Value = serde_json::from_str(&body).expect("应为 JSON 对象");
+    assert_eq!(cfg["scene"]["mode"], "conversation");
+    // custom 是自定义模式的完整参数表，前端逐字段回填，不能只给 mode。
+    assert!(cfg["scene"]["custom"].is_object(), "缺少 scene.custom: {body}");
+    assert!(cfg["scene"]["custom"]["user_engine"].is_string());
+    assert!(cfg["scene"]["custom"]["plugin_allowlist"].is_array());
+}
+
+/// 设置页每个 tab 读的配置段都得在 —— 少一段，那个 tab 就显示默认值，
+/// 保存时再把默认值写回去。scene / recording / quality / network 都这么丢过。
+#[tokio::test]
+async fn config_endpoint_carries_every_section_the_settings_page_reads() {
+    let (status, body) = get("/api/config").await;
+    assert_eq!(status, StatusCode::OK);
+    let cfg: serde_json::Value = serde_json::from_str(&body).unwrap();
+    for section in [
+        "asr", "audio", "llm", "plugins", "scene", "recording", "quality",
+        "webhooks", "network", "knowledge_base", "server",
+    ] {
+        assert!(cfg.get(section).is_some(), "GET /config 缺少 `{section}` 段: {body}");
+    }
+    // plugins 是「默认值 + 用户覆盖」的生效配置，不是用户显式写过的那几个。
+    assert!(cfg["plugins"].as_object().is_some_and(|p| !p.is_empty()));
+}
+
+/// headless 走网络，且 `/config` 在未设 token 时匿名可读 —— 密钥必须打码。
+/// 标识（AccessKey ID / AppKey）不是凭据，保持明文供设置页显示与验签。
+#[tokio::test]
+async fn config_endpoint_masks_credentials_over_http() {
+    let state = test_state();
+    state
+        .config
+        .update(|c| {
+            c.llm.default = "deepseek".into();
+            c.llm.providers.insert(
+                "deepseek".into(),
+                talksage_config::LlmProviderConfig {
+                    base_url: None,
+                    model: "deepseek-chat".into(),
+                    api_key: "sk-1234567890abcdef".into(),
+                },
+            );
+            c.asr.aliyun_access_key_id = "LTAI5tSomeKeyId".into();
+            c.asr.aliyun_access_key_secret = "verySecretValue123".into();
+            c.asr.aliyun_app_key = "app-key-plain".into();
+        })
+        .unwrap();
+    let router = build_router(state, &std::path::PathBuf::from("nonexistent-dist"));
+
+    let cfg = get_config_json(&router).await;
+    let body = cfg.to_string();
+    for secret in ["sk-1234567890abcdef", "verySecretValue123"] {
+        assert!(!body.contains(secret), "密钥明文出现在 /config 响应里: {secret}");
+    }
+    assert_eq!(cfg["asr"]["aliyun_access_key_id"], "LTAI5tSomeKeyId");
+    assert_eq!(cfg["asr"]["aliyun_app_key"], "app-key-plain");
+    // 打码不等于清空：前端要能看出「已配置」。
+    assert!(cfg["llm"]["providers"]["deepseek"]["api_key"].as_str().is_some_and(|s| !s.is_empty()));
+}
+
+/// 设置页最常见的一次操作：打开设置、改一个开关、点保存 —— 提交的是它读到的
+/// 那份快照。快照原样写回后，密钥和各配置段必须一个不少、一个不改。
+/// 这条挂了，用户的表现就是「改了个采样开关，LLM key 没了」。
+#[tokio::test]
+async fn saving_the_snapshot_back_changes_nothing() {
+    let state = test_state();
+    state
+        .config
+        .update(|c| {
+            c.llm.default = "deepseek".into();
+            c.llm.providers.insert(
+                "deepseek".into(),
+                talksage_config::LlmProviderConfig {
+                    base_url: Some("https://api.deepseek.com/v1".into()),
+                    model: "deepseek-chat".into(),
+                    api_key: "sk-1234567890abcdef".into(),
+                },
+            );
+            c.asr.aliyun_access_key_secret = "verySecretValue123".into();
+            c.scene.mode = talksage_config::SceneMode::Meeting;
+            c.webhooks.urls = vec!["https://example.com/hook".into()];
+            c.network.proxy = "http://127.0.0.1:7890".into();
+        })
+        .unwrap();
+    let router = build_router(state.clone(), &std::path::PathBuf::from("nonexistent-dist"));
+
+    let snapshot = get_config_json(&router).await;
+    assert_eq!(post_config(&router, &snapshot).await, StatusCode::OK);
+
+    let after = state.config.snapshot();
+    assert_eq!(after.llm.providers["deepseek"].api_key, "sk-1234567890abcdef");
+    assert_eq!(after.asr.aliyun_access_key_secret, "verySecretValue123");
+    assert_eq!(after.scene.mode, talksage_config::SceneMode::Meeting);
+    assert_eq!(after.webhooks.urls, vec!["https://example.com/hook".to_string()]);
+    assert_eq!(after.network.proxy, "http://127.0.0.1:7890");
+}
+
+/// 保存 → 读回必须闭环：POST 写入的场景要能被 GET 读到，
+/// 否则设置页刷新后又退回默认值。
+#[tokio::test]
+async fn config_endpoint_reflects_saved_scene() {
+    let state = test_state();
+    let router = build_router(state, &std::path::PathBuf::from("nonexistent-dist"));
+    let body = serde_json::json!({
+        "scene": { "mode": "meeting", "custom": { "user_engine": "qwen3-asr" } }
+    });
+    assert_eq!(post_config(&router, &body).await, StatusCode::OK);
+
+    let cfg = get_config_json(&router).await;
+    assert_eq!(cfg["scene"]["mode"], "meeting");
+    assert_eq!(cfg["scene"]["custom"]["user_engine"], "qwen3-asr");
+}
+
+/// recording / quality / network / audio_source 以前只有桌面端那份拷贝认，
+/// headless 收到就丢 —— 用户在浏览器里改完设置，保存成功，什么也没变。
+#[tokio::test]
+async fn save_config_persists_recording_quality_network_and_audio_source() {
+    let state = test_state();
+    let router = build_router(state.clone(), &std::path::PathBuf::from("nonexistent-dist"));
+    let body = serde_json::json!({
+        "audio": { "audio_source": "loopback" },
+        "recording": { "enabled": false, "dir": "D:/rec" },
+        "quality": { "auto_detect": false, "silence_rms": 0.02 },
+        "network": { "proxy": "http://127.0.0.1:7890" },
+    });
+    assert_eq!(post_config(&router, &body).await, StatusCode::OK);
+
+    let snap = state.config.snapshot();
+    assert_eq!(snap.audio.audio_source, "loopback");
+    assert!(!snap.recording.enabled);
+    assert_eq!(snap.recording.dir, "D:/rec");
+    assert!(!snap.quality.auto_detect);
+    assert_eq!(snap.network.proxy, "http://127.0.0.1:7890");
+}
+
+/// 用户在设置页真的换了一把 key：掩码之外的提交必须照写。
+#[tokio::test]
+async fn save_config_accepts_a_newly_typed_api_key() {
+    let state = test_state();
+    let router = build_router(state.clone(), &std::path::PathBuf::from("nonexistent-dist"));
+    let body = serde_json::json!({
+        "llm": { "default": "deepseek", "providers": { "deepseek": { "api_key": "sk-typed-by-user" } } }
+    });
+    assert_eq!(post_config(&router, &body).await, StatusCode::OK);
+    assert_eq!(state.config.snapshot().llm.providers["deepseek"].api_key, "sk-typed-by-user");
+}

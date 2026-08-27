@@ -47,24 +47,19 @@ fn get_version() -> String {
 
 /// 配置快照。
 ///
-/// `plugins` 单独换成**生效配置**（插件默认值 + 用户覆盖）。原样序列化的话
-/// 通用表里只有用户显式写过的插件，设置页读 `plugins.<id>.enabled` 会拿到
-/// undefined —— 默认值归插件所有，宿主在出口处替前端补齐。
+/// 组装规则在 `talksage_config::ui_config_json`，headless 的 `GET /api/config`
+/// 调的是同一个函数 —— 设置页两种 transport 下必须看到同一份数据。
+///
+/// 桌面端用 `Reveal`：IPC 不出进程，密钥本来就要显示在输入框里；headless 走
+/// 网络，那边传 `Mask`。
 #[tauri::command]
 fn get_config(state: tauri::State<'_, AppState>) -> serde_json::Value {
     let snapshot = state.config.snapshot();
-    let mut value =
-        serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
-    if let Some(obj) = value.as_object_mut() {
-        let mut plugins =
-            talksage_plugins::effective_plugin_configs(&snapshot.plugins.entries);
-        plugins.insert(
-            "notes".into(),
-            serde_json::json!({ "template": snapshot.plugins.notes.template }),
-        );
-        obj.insert("plugins".into(), serde_json::Value::Object(plugins));
-    }
-    value
+    talksage_config::ui_config_json(
+        &snapshot,
+        talksage_plugins::effective_plugin_configs(&snapshot.plugins.entries),
+        talksage_config::SecretPolicy::Reveal,
+    )
 }
 
 /// 插件元数据（id / 显示名 / 是否分析类 / 默认配置）。
@@ -345,7 +340,7 @@ fn save_config(
     state
         .config
         .update(|c| {
-            apply_config_updates(c, &updates);
+            talksage_config::apply_updates(c, &updates);
         })
         .map_err(|e| format!("保存配置失败: {e}"))?;
     // 记录保存后实际生效的代理，验证 network 字段是否正确写入
@@ -354,195 +349,6 @@ fn save_config(
     // 录音目录可在设置页修改，保存后同步刷新 asset scope。
     allow_recording_assets(&app, &state.config)?;
     Ok(())
-}
-
-/// 把前端提交的更新应用到配置。
-fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::Value) {
-    if let Some(llm) = updates.get("llm") {
-        if let Some(default) = llm.get("default").and_then(|v| v.as_str()) {
-            c.llm.default = default.to_string();
-        }
-        if let Some(providers) = llm.get("providers").and_then(|v| v.as_object()) {
-            for (name, p) in providers {
-                let entry = c.llm.providers.entry(name.clone()).or_default();
-                if let Some(k) = p.get("api_key").and_then(|v| v.as_str()) {
-                    entry.api_key = k.to_string();
-                }
-                if let Some(m) = p.get("model").and_then(|v| v.as_str()) {
-                    entry.model = m.to_string();
-                }
-                if let Some(b) = p.get("base_url").and_then(|v| v.as_str()) {
-                    entry.base_url = Some(b.to_string());
-                }
-            }
-        }
-    }
-    if let Some(plugins) = updates.get("plugins") {
-        // 通用表：逐插件逐键合并，宿主不认识具体插件的配置结构。
-        c.plugins.apply_updates(plugins);
-    }
-    if let Some(kb) = updates.get("knowledge_base") {
-        if let Some(e) = kb.get("enabled").and_then(|v| v.as_bool()) {
-            c.knowledge_base.enabled = e;
-        }
-        if let Some(f) = kb.get("folder").and_then(|v| v.as_str()) {
-            c.knowledge_base.folder = f.to_string();
-        }
-    }
-    if let Some(asr) = updates.get("asr") {
-        if let Some(e) = asr.get("engine_en").or_else(|| asr.get("client_engine")).and_then(|v| v.as_str()) {
-            c.asr.engine_en = e.to_string();
-        }
-        if let Some(e) = asr.get("engine_zh").or_else(|| asr.get("user_engine")).and_then(|v| v.as_str()) {
-            c.asr.engine_zh = e.to_string();
-        }
-        if let Some(b) = asr.get("backend").and_then(|v| v.as_str()) {
-            c.asr.backend = b.to_string();
-        }
-        if let Some(v) = asr.get("punct_enabled").and_then(|v| v.as_bool()) {
-            c.asr.punct_enabled = v;
-        }
-        if let Some(v) = asr.get("asr_mode").and_then(|v| v.as_str()) {
-            c.asr.asr_mode = v.to_string();
-        }
-        if let Some(v) = asr.get("aliyun_access_key_id").and_then(|v| v.as_str()) {
-            c.asr.aliyun_access_key_id = v.trim().to_string();
-        }
-        if let Some(v) = asr.get("aliyun_access_key_secret").and_then(|v| v.as_str()) {
-            c.asr.aliyun_access_key_secret = v.trim().to_string();
-        }
-        if let Some(v) = asr.get("aliyun_app_key").and_then(|v| v.as_str()) {
-            c.asr.aliyun_app_key = v.trim().to_string();
-        }
-        if let Some(t) = asr.get("terminology") {
-            if let Some(v) = t.get("enabled").and_then(|v| v.as_bool()) { c.asr.terminology.enabled = v; }
-            if let Some(v) = t.get("hotword_score").and_then(|v| v.as_f64()) { c.asr.terminology.hotword_score = (v as f32).clamp(0.0, 10.0); }
-            if let Some(v) = t.get("terms").and_then(|v| v.as_array()) {
-                c.asr.terminology.terms = v.iter().filter_map(|x| x.as_str()).map(str::to_string).collect();
-            }
-            if let Some(v) = t.get("corrections").and_then(|v| v.as_object()) {
-                c.asr.terminology.corrections = v.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect();
-            }
-        }
-    }
-    if let Some(audio) = updates.get("audio") {
-        if let Some(v) = audio.get("input_gain_db").and_then(|v| v.as_f64()) {
-            c.audio.input_gain_db = (v as f32).clamp(0.0, 24.0);
-        }
-        if let Some(vad) = audio.get("vad") {
-            if let Some(p) = vad.get("preset").and_then(|v| v.as_str()) {
-                c.audio.vad.preset = match p {
-                    "sensitive" => talksage_config::VadPreset::Sensitive,
-                    "strict" => talksage_config::VadPreset::Strict,
-                    _ => talksage_config::VadPreset::Standard,
-                };
-            }
-            if let Some(t) = vad.get("threshold").and_then(|v| v.as_f64()) {
-                c.audio.vad.threshold = Some(t as f32);
-            }
-        }
-        if let Some(d) = audio.get("denoise") {
-            if let Some(e) = d.get("enabled").and_then(|v| v.as_bool()) {
-                c.audio.denoise.enabled = e;
-            }
-            if let Some(g) = d.get("gate_threshold").and_then(|v| v.as_f64()) {
-                c.audio.denoise.gate_threshold = g as f32;
-            }
-            if let Some(h) = d.get("highpass").and_then(|v| v.as_bool()) {
-                c.audio.denoise.highpass = h;
-            }
-        }
-        if let Some(e) = audio.get("endpoint") {
-            if let Some(v) = e.get("enabled").and_then(|v| v.as_bool()) { c.audio.endpoint.enabled = v; }
-            if let Some(v) = e.get("stable_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.stable_ms = v.max(100); }
-            if let Some(v) = e.get("quiet_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.quiet_ms = v.max(100); }
-            if let Some(v) = e.get("force_quiet_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.force_quiet_ms = v.max(200); }
-            if let Some(v) = e.get("quiet_rms").and_then(|v| v.as_f64()) { c.audio.endpoint.quiet_rms = (v as f32).clamp(0.0, 0.5); }
-            if let Some(v) = e.get("min_segment_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.min_segment_ms = v; }
-        }
-        // 最短提交时长（ms）：0/null = 不限制
-        if let Some(m) = audio.get("min_segment_ms") {
-            if let Some(v) = m.as_u64() {
-                c.audio.min_segment_ms = if v == 0 { None } else { Some(v) };
-            } else if m.is_null() {
-                c.audio.min_segment_ms = None;
-            }
-        }
-    }
-    // 会议结束 Webhook（借鉴 Call.md workflow-webhook）
-    if let Some(w) = updates.get("webhooks") {
-        if let Some(e) = w.get("enabled").and_then(|v| v.as_bool()) {
-            c.webhooks.enabled = e;
-        }
-        if let Some(urls) = w.get("urls").and_then(|v| v.as_array()) {
-            c.webhooks.urls = urls
-                .iter()
-                .filter_map(|u| u.as_str().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
-    }
-    // 场景模式
-    if let Some(scene) = updates.get("scene") {
-        if let Some(m) = scene.get("mode").and_then(|v| v.as_str()) {
-            c.scene.mode = match m {
-                "dictation" => talksage_config::SceneMode::Dictation,
-                "conversation" => talksage_config::SceneMode::Conversation,
-                "translation" | "bilingual" => talksage_config::SceneMode::Bilingual,
-                "live_translation" => talksage_config::SceneMode::LiveTranslation,
-                "meeting" => talksage_config::SceneMode::Meeting,
-                "lecture" => talksage_config::SceneMode::Lecture,
-                "custom" => talksage_config::SceneMode::Custom,
-                _ => talksage_config::SceneMode::Conversation,
-            };
-        }
-        if let Some(cu) = scene.get("custom") {
-            talksage_config::apply_scene_params(&mut c.scene.custom, cu);
-        }
-    }
-    if let Some(rec) = updates.get("recording") {
-        if let Some(e) = rec.get("enabled").and_then(|v| v.as_bool()) {
-            c.recording.enabled = e;
-        }
-        if let Some(d) = rec.get("dir").and_then(|v| v.as_str()) {
-            c.recording.dir = d.to_string();
-        }
-        if let Some(cs) = rec.get("clean_silence").and_then(|v| v.as_bool()) {
-            c.recording.clean_silence = cs;
-        }
-    }
-    if let Some(net) = updates.get("network") {
-        if let Some(p) = net.get("proxy").and_then(|v| v.as_str()) {
-            c.network.proxy = p.trim().to_string();
-        }
-    }
-    // quality：null → 恢复默认；否则按字段更新
-    match updates.get("quality") {
-        Some(serde_json::Value::Null) => {
-            c.quality = talksage_config::QualityConfig::default();
-        }
-        Some(q) => {
-            if let Some(a) = q.get("auto_detect").and_then(|v| v.as_bool()) {
-                c.quality.auto_detect = a;
-            }
-            if let Some(t) = q.get("text_noise_threshold").and_then(|v| v.as_f64()) {
-                c.quality.text_noise_threshold = t as f32;
-            }
-            if let Some(v) = q.get("min_speech_ratio").and_then(|v| v.as_f64()) {
-                c.quality.min_speech_ratio = v as f32;
-            }
-            if let Some(v) = q.get("max_speech_ratio").and_then(|v| v.as_f64()) {
-                c.quality.max_speech_ratio = v as f32;
-            }
-            if let Some(v) = q.get("silence_rms").and_then(|v| v.as_f64()) {
-                c.quality.silence_rms = v as f32;
-            }
-            if let Some(v) = q.get("high_rms").and_then(|v| v.as_f64()) {
-                c.quality.high_rms = v as f32;
-            }
-        }
-        None => {}
-    }
 }
 
 /// hello-world 事件：前端 ping → 后端推送领域事件。

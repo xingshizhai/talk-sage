@@ -1347,6 +1347,308 @@ fn apply_env_overrides(cfg: &mut Config) {
     }
 }
 
+// ── 设置页配置面：读快照 / 写更新（桌面端与 headless 共用）──────────────
+//
+// 这两件事以前在 `talksage-server` 与 `web/src-tauri` 里各抄了一份。抄本会
+// drift，而 drift 的代价用户看不见：headless 少返回一段配置 → 设置页把默认值
+// 当成真值显示 → 保存时原样写回去 → 静默覆盖用户配置（scene / recording /
+// quality / network 都这么丢过）。放在这里，两个宿主只能调同一份实现。
+
+/// 密钥出口策略：本机 IPC 明文，跨网络打码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretPolicy {
+    /// 明文返回。桌面端 IPC：同进程同用户，设置页本来就要把 key 显示在输入框里。
+    Reveal,
+    /// 打码返回。headless 的 `/api/config` 在未设 token 时匿名可读，
+    /// 明文吐 key 等于把凭据挂在端口上。
+    Mask,
+}
+
+/// 密钥掩码：`sk-••••••••cdef`；空值返回空串（前端据此区分「未配置」）。
+///
+/// 掩码必须稳定且可原样写回：[`apply_updates`] 把「与当前值掩码相同的提交」
+/// 视作未修改，设置页因此不需要知道自己拿到的是掩码还是真值。
+pub fn mask_secret(secret: &str) -> String {
+    let s = secret.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    // 太短的密钥露头露尾就等于露全部。
+    if chars.len() <= 8 {
+        return "••••••••".to_string();
+    }
+    let head: String = chars[..3].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}••••••••{tail}")
+}
+
+/// 提交值是否就是 `stored` 的掩码 —— 即用户没有修改这个字段。
+pub fn is_secret_mask(submitted: &str, stored: &str) -> bool {
+    !stored.trim().is_empty() && submitted == mask_secret(stored)
+}
+
+/// 密钥写入：掩码原样回传 = 保持原值；其余一律采用提交值（空串 = 主动清空）。
+fn apply_secret(stored: &mut String, submitted: &str) {
+    if !is_secret_mask(submitted, stored) {
+        *stored = submitted.trim().to_string();
+    }
+}
+
+/// 密钥读入（设置页「检查」按钮）：空或掩码 → 回落到已存的值。
+pub fn resolve_secret_input(submitted: Option<&str>, stored: &str) -> String {
+    match submitted {
+        Some(v) if !v.trim().is_empty() && !is_secret_mask(v, stored) => v.trim().to_string(),
+        _ => stored.to_string(),
+    }
+}
+
+/// 设置页看到的配置快照：整份 `Config` + `plugins` 换成生效配置。
+///
+/// 整份序列化是刻意的 —— 手挑字段的版本每加一个配置段就会漏一个。`plugins`
+/// 单独替换：通用表里只有用户显式写过的插件，默认值归插件所有，宿主在出口处
+/// 替前端补齐；`notes` 不是插件配置，保持具名。
+pub fn ui_config_json(
+    config: &Config,
+    plugins: serde_json::Map<String, serde_json::Value>,
+    secrets: SecretPolicy,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(config).unwrap_or(serde_json::Value::Null);
+    let Some(obj) = value.as_object_mut() else {
+        return value;
+    };
+    let mut plugins = plugins;
+    plugins.insert(
+        "notes".into(),
+        serde_json::json!({ "template": config.plugins.notes.template }),
+    );
+    obj.insert("plugins".into(), serde_json::Value::Object(plugins));
+    if secrets == SecretPolicy::Mask {
+        mask_config_secrets(obj);
+    }
+    value
+}
+
+/// 打码 LLM `api_key` / 阿里云 AccessKey Secret / server token。
+///
+/// AccessKey ID 与 AppKey 是标识不是凭据（单独签不出 token），保持明文 ——
+/// 设置页要显示它们，「检查」按钮也要拿它们去验签。
+fn mask_config_secrets(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    fn mask_in_place(field: Option<&mut serde_json::Value>) {
+        if let Some(v) = field {
+            *v = serde_json::Value::String(mask_secret(v.as_str().unwrap_or_default()));
+        }
+    }
+    if let Some(providers) = obj
+        .get_mut("llm")
+        .and_then(|llm| llm.get_mut("providers"))
+        .and_then(|p| p.as_object_mut())
+    {
+        for provider in providers.values_mut() {
+            mask_in_place(provider.get_mut("api_key"));
+        }
+    }
+    mask_in_place(obj.get_mut("asr").and_then(|a| a.get_mut("aliyun_access_key_secret")));
+    mask_in_place(obj.get_mut("server").and_then(|s| s.get_mut("token")));
+}
+
+/// 把设置页提交的更新应用到配置：逐字段合并，未提交的键保持不变。
+///
+/// 提交的形状见 `web/src/sections/SettingsSection.tsx` 的 `buildSnapshot()`
+/// —— 那里发什么，这里就得收什么，少收一段就是一次静默覆盖。
+pub fn apply_updates(c: &mut Config, updates: &serde_json::Value) {
+    if let Some(llm) = updates.get("llm") {
+        if let Some(default) = llm.get("default").and_then(|v| v.as_str()) {
+            c.llm.default = default.to_string();
+        }
+        if let Some(providers) = llm.get("providers").and_then(|v| v.as_object()) {
+            for (name, p) in providers {
+                let entry = c.llm.providers.entry(name.clone()).or_default();
+                if let Some(k) = p.get("api_key").and_then(|v| v.as_str()) {
+                    apply_secret(&mut entry.api_key, k);
+                }
+                if let Some(m) = p.get("model").and_then(|v| v.as_str()) {
+                    entry.model = m.to_string();
+                }
+                if let Some(b) = p.get("base_url").and_then(|v| v.as_str()) {
+                    entry.base_url = Some(b.to_string());
+                }
+            }
+        }
+    }
+    if let Some(plugins) = updates.get("plugins") {
+        // 通用表：逐插件逐键合并，宿主不认识具体插件的配置结构。
+        c.plugins.apply_updates(plugins);
+    }
+    if let Some(kb) = updates.get("knowledge_base") {
+        if let Some(e) = kb.get("enabled").and_then(|v| v.as_bool()) {
+            c.knowledge_base.enabled = e;
+        }
+        if let Some(f) = kb.get("folder").and_then(|v| v.as_str()) {
+            c.knowledge_base.folder = f.to_string();
+        }
+    }
+    if let Some(asr) = updates.get("asr") {
+        if let Some(e) = asr.get("engine_en").or_else(|| asr.get("client_engine")).and_then(|v| v.as_str()) {
+            c.asr.engine_en = e.to_string();
+        }
+        if let Some(e) = asr.get("engine_zh").or_else(|| asr.get("user_engine")).and_then(|v| v.as_str()) {
+            c.asr.engine_zh = e.to_string();
+        }
+        if let Some(b) = asr.get("backend").and_then(|v| v.as_str()) {
+            c.asr.backend = b.to_string();
+        }
+        if let Some(v) = asr.get("punct_enabled").and_then(|v| v.as_bool()) {
+            c.asr.punct_enabled = v;
+        }
+        if let Some(v) = asr.get("asr_mode").and_then(|v| v.as_str()) {
+            c.asr.asr_mode = v.to_string();
+        }
+        if let Some(v) = asr.get("aliyun_access_key_id").and_then(|v| v.as_str()) {
+            c.asr.aliyun_access_key_id = v.trim().to_string();
+        }
+        if let Some(v) = asr.get("aliyun_access_key_secret").and_then(|v| v.as_str()) {
+            apply_secret(&mut c.asr.aliyun_access_key_secret, v);
+        }
+        if let Some(v) = asr.get("aliyun_app_key").and_then(|v| v.as_str()) {
+            c.asr.aliyun_app_key = v.trim().to_string();
+        }
+        if let Some(t) = asr.get("terminology") {
+            if let Some(v) = t.get("enabled").and_then(|v| v.as_bool()) { c.asr.terminology.enabled = v; }
+            if let Some(v) = t.get("hotword_score").and_then(|v| v.as_f64()) { c.asr.terminology.hotword_score = (v as f32).clamp(0.0, 10.0); }
+            if let Some(v) = t.get("terms").and_then(|v| v.as_array()) {
+                c.asr.terminology.terms = v.iter().filter_map(|x| x.as_str()).map(str::to_string).collect();
+            }
+            if let Some(v) = t.get("corrections").and_then(|v| v.as_object()) {
+                c.asr.terminology.corrections = v.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect();
+            }
+        }
+    }
+    if let Some(audio) = updates.get("audio") {
+        // 采集来源：麦克风 / 系统音频回环。SideNav 的就地切换也走这里
+        // （App.tsx 直接 saveConfig({audio:{audio_source}})），两条路同一个键。
+        if let Some(v) = audio.get("audio_source").and_then(|v| v.as_str()) {
+            c.audio.audio_source = if v == "loopback" { "loopback".to_string() } else { "mic".to_string() };
+        }
+        if let Some(v) = audio.get("input_gain_db").and_then(|v| v.as_f64()) {
+            c.audio.input_gain_db = (v as f32).clamp(0.0, 24.0);
+        }
+        if let Some(vad) = audio.get("vad") {
+            if let Some(p) = vad.get("preset").and_then(|v| v.as_str()) {
+                c.audio.vad.preset = match p {
+                    "sensitive" => VadPreset::Sensitive,
+                    "strict" => VadPreset::Strict,
+                    _ => VadPreset::Standard,
+                };
+            }
+            if let Some(t) = vad.get("threshold").and_then(|v| v.as_f64()) {
+                c.audio.vad.threshold = Some(t as f32);
+            }
+        }
+        if let Some(d) = audio.get("denoise") {
+            if let Some(e) = d.get("enabled").and_then(|v| v.as_bool()) {
+                c.audio.denoise.enabled = e;
+            }
+            if let Some(g) = d.get("gate_threshold").and_then(|v| v.as_f64()) {
+                c.audio.denoise.gate_threshold = g as f32;
+            }
+            if let Some(h) = d.get("highpass").and_then(|v| v.as_bool()) {
+                c.audio.denoise.highpass = h;
+            }
+        }
+        if let Some(e) = audio.get("endpoint") {
+            if let Some(v) = e.get("enabled").and_then(|v| v.as_bool()) { c.audio.endpoint.enabled = v; }
+            if let Some(v) = e.get("stable_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.stable_ms = v.max(100); }
+            if let Some(v) = e.get("quiet_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.quiet_ms = v.max(100); }
+            if let Some(v) = e.get("force_quiet_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.force_quiet_ms = v.max(200); }
+            if let Some(v) = e.get("quiet_rms").and_then(|v| v.as_f64()) { c.audio.endpoint.quiet_rms = (v as f32).clamp(0.0, 0.5); }
+            if let Some(v) = e.get("min_segment_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.min_segment_ms = v; }
+        }
+        // 最短提交时长（ms）：0/null = 不限制
+        if let Some(m) = audio.get("min_segment_ms") {
+            if let Some(v) = m.as_u64() {
+                c.audio.min_segment_ms = if v == 0 { None } else { Some(v) };
+            } else if m.is_null() {
+                c.audio.min_segment_ms = None;
+            }
+        }
+    }
+    if let Some(rec) = updates.get("recording") {
+        if let Some(e) = rec.get("enabled").and_then(|v| v.as_bool()) {
+            c.recording.enabled = e;
+        }
+        if let Some(d) = rec.get("dir").and_then(|v| v.as_str()) {
+            c.recording.dir = d.to_string();
+        }
+        if let Some(cs) = rec.get("clean_silence").and_then(|v| v.as_bool()) {
+            c.recording.clean_silence = cs;
+        }
+    }
+    // quality：null → 恢复默认；否则按字段更新
+    match updates.get("quality") {
+        Some(serde_json::Value::Null) => {
+            c.quality = QualityConfig::default();
+        }
+        Some(q) => {
+            if let Some(a) = q.get("auto_detect").and_then(|v| v.as_bool()) {
+                c.quality.auto_detect = a;
+            }
+            if let Some(t) = q.get("text_noise_threshold").and_then(|v| v.as_f64()) {
+                c.quality.text_noise_threshold = t as f32;
+            }
+            if let Some(v) = q.get("min_speech_ratio").and_then(|v| v.as_f64()) {
+                c.quality.min_speech_ratio = v as f32;
+            }
+            if let Some(v) = q.get("max_speech_ratio").and_then(|v| v.as_f64()) {
+                c.quality.max_speech_ratio = v as f32;
+            }
+            if let Some(v) = q.get("silence_rms").and_then(|v| v.as_f64()) {
+                c.quality.silence_rms = v as f32;
+            }
+            if let Some(v) = q.get("high_rms").and_then(|v| v.as_f64()) {
+                c.quality.high_rms = v as f32;
+            }
+        }
+        None => {}
+    }
+    // 会议结束 Webhook（借鉴 Call.md workflow-webhook）
+    if let Some(w) = updates.get("webhooks") {
+        if let Some(e) = w.get("enabled").and_then(|v| v.as_bool()) {
+            c.webhooks.enabled = e;
+        }
+        if let Some(urls) = w.get("urls").and_then(|v| v.as_array()) {
+            c.webhooks.urls = urls
+                .iter()
+                .filter_map(|u| u.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+    if let Some(net) = updates.get("network") {
+        if let Some(p) = net.get("proxy").and_then(|v| v.as_str()) {
+            c.network.proxy = p.trim().to_string();
+        }
+    }
+    // 场景模式
+    if let Some(scene) = updates.get("scene") {
+        if let Some(m) = scene.get("mode").and_then(|v| v.as_str()) {
+            c.scene.mode = match m {
+                "dictation" => SceneMode::Dictation,
+                "conversation" => SceneMode::Conversation,
+                "translation" | "bilingual" => SceneMode::Bilingual,
+                "live_translation" => SceneMode::LiveTranslation,
+                "meeting" => SceneMode::Meeting,
+                "lecture" => SceneMode::Lecture,
+                "custom" => SceneMode::Custom,
+                _ => SceneMode::Conversation,
+            };
+        }
+        if let Some(cu) = scene.get("custom") {
+            apply_scene_params(&mut c.scene.custom, cu);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1785,5 +2087,181 @@ knob = 42
         terminology.corrections.insert("拓思者".into(), "TalkSage".into());
         assert!(terminology.normalized_terms().is_empty());
         assert_eq!(terminology.correct("拓思者"), "拓思者");
+    }
+}
+
+/// 设置页配置面：快照出口与更新入口的行为锁。
+///
+/// 这一组测试守的是同一件事 —— 设置页读到什么就该能原样写回什么。
+/// 破了它，用户的表现就是「打开设置页点一下保存，配置被清空」。
+#[cfg(test)]
+mod config_plane_tests {
+    use super::*;
+
+    fn plugins_stub() -> serde_json::Map<String, serde_json::Value> {
+        serde_json::Map::new()
+    }
+
+    fn masked(cfg: &Config) -> serde_json::Value {
+        ui_config_json(cfg, plugins_stub(), SecretPolicy::Mask)
+    }
+
+    #[test]
+    fn snapshot_carries_every_top_level_config_section() {
+        // 手挑字段的快照每加一个配置段就漏一个（scene / recording / quality /
+        // network 都漏过）。这里直接对着 Config 的序列化结果比键集合：
+        // 新增配置段却没进快照 —— 也就是设置页读不到 —— 会当场红。
+        let cfg = Config::default();
+        let full = serde_json::to_value(&cfg).unwrap();
+        let snapshot = masked(&cfg);
+        for key in full.as_object().unwrap().keys() {
+            assert!(
+                snapshot.get(key).is_some(),
+                "快照缺少配置段 `{key}`：设置页会拿默认值当真值，保存时覆盖用户配置"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_masks_credentials_but_keeps_identifiers() {
+        let mut cfg = Config::default();
+        cfg.llm.providers.insert(
+            "deepseek".into(),
+            LlmProviderConfig { base_url: None, model: "deepseek-chat".into(), api_key: "sk-1234567890abcdef".into() },
+        );
+        cfg.asr.aliyun_access_key_id = "LTAI5tSomeKeyId".into();
+        cfg.asr.aliyun_access_key_secret = "verySecretValue123".into();
+        cfg.asr.aliyun_app_key = "app-key-plain".into();
+        cfg.server.token = "server-token-value".into();
+
+        let v = masked(&cfg);
+        let body = v.to_string();
+        for secret in ["sk-1234567890abcdef", "verySecretValue123", "server-token-value"] {
+            assert!(!body.contains(secret), "密钥明文出现在 headless 快照里: {secret}");
+        }
+        // 标识不是凭据：设置页要显示，「检查」按钮要拿去验签。
+        assert_eq!(v["asr"]["aliyun_access_key_id"], "LTAI5tSomeKeyId");
+        assert_eq!(v["asr"]["aliyun_app_key"], "app-key-plain");
+    }
+
+    #[test]
+    fn desktop_snapshot_keeps_secrets_readable() {
+        // 桌面端走 IPC：同进程同用户，输入框里本来就该显示真值。
+        let mut cfg = Config::default();
+        cfg.asr.aliyun_access_key_secret = "verySecretValue123".into();
+        let v = ui_config_json(&cfg, plugins_stub(), SecretPolicy::Reveal);
+        assert_eq!(v["asr"]["aliyun_access_key_secret"], "verySecretValue123");
+    }
+
+    #[test]
+    fn masked_secret_written_back_unchanged_keeps_the_stored_value() {
+        // 设置页拿到掩码 → 用户改了别的 tab → 保存时把掩码原样提交回来。
+        // 这一步一旦按字面写入，用户的 key 就没了。
+        let mut cfg = Config::default();
+        cfg.llm.providers.insert(
+            "deepseek".into(),
+            LlmProviderConfig { base_url: None, model: "deepseek-chat".into(), api_key: "sk-1234567890abcdef".into() },
+        );
+        cfg.asr.aliyun_access_key_secret = "verySecretValue123".into();
+
+        let snapshot = masked(&cfg);
+        let updates = serde_json::json!({
+            "llm": { "default": "deepseek", "providers": { "deepseek": { "api_key": snapshot["llm"]["providers"]["deepseek"]["api_key"] } } },
+            "asr": { "aliyun_access_key_secret": snapshot["asr"]["aliyun_access_key_secret"] },
+        });
+        apply_updates(&mut cfg, &updates);
+
+        assert_eq!(cfg.llm.providers["deepseek"].api_key, "sk-1234567890abcdef");
+        assert_eq!(cfg.asr.aliyun_access_key_secret, "verySecretValue123");
+    }
+
+    #[test]
+    fn a_real_new_secret_replaces_and_an_empty_one_clears() {
+        let mut cfg = Config::default();
+        cfg.llm.providers.insert(
+            "deepseek".into(),
+            LlmProviderConfig { base_url: None, model: "deepseek-chat".into(), api_key: "sk-old".into() },
+        );
+
+        apply_updates(&mut cfg, &serde_json::json!({
+            "llm": { "providers": { "deepseek": { "api_key": "sk-brand-new-key" } } }
+        }));
+        assert_eq!(cfg.llm.providers["deepseek"].api_key, "sk-brand-new-key");
+
+        // 清空必须仍然可行：空串是「用户主动删掉」，不是「没读到」。
+        apply_updates(&mut cfg, &serde_json::json!({
+            "llm": { "providers": { "deepseek": { "api_key": "" } } }
+        }));
+        assert_eq!(cfg.llm.providers["deepseek"].api_key, "");
+    }
+
+    #[test]
+    fn short_secrets_are_masked_whole() {
+        assert_eq!(mask_secret(""), "");
+        assert_eq!(mask_secret("   "), "");
+        assert_eq!(mask_secret("short"), "••••••••");
+        assert!(mask_secret("sk-1234567890abcdef").starts_with("sk-"));
+        assert!(mask_secret("sk-1234567890abcdef").ends_with("cdef"));
+    }
+
+    #[test]
+    fn secret_input_falls_back_to_stored_for_empty_or_masked() {
+        let stored = "sk-1234567890abcdef";
+        assert_eq!(resolve_secret_input(None, stored), stored);
+        assert_eq!(resolve_secret_input(Some(""), stored), stored);
+        assert_eq!(resolve_secret_input(Some(&mask_secret(stored)), stored), stored);
+        // 用户真的改了 → 用新值（「检查」按钮要验的是输入框里的那把 key）。
+        assert_eq!(resolve_secret_input(Some("sk-typed-by-user"), stored), "sk-typed-by-user");
+    }
+
+    #[test]
+    fn updates_cover_the_sections_the_settings_page_submits() {
+        // recording / quality / network / audio_source 曾经只有桌面端认（或两边都不认），
+        // headless 保存后一切照旧 —— 用户改完设置以为生效了。
+        let mut cfg = Config::default();
+        apply_updates(&mut cfg, &serde_json::json!({
+            "audio": { "audio_source": "loopback" },
+            "recording": { "enabled": false, "dir": "D:/rec", "clean_silence": true },
+            "quality": { "auto_detect": false, "silence_rms": 0.02 },
+            "network": { "proxy": "  http://127.0.0.1:7890  " },
+            "webhooks": { "enabled": true, "urls": ["https://example.com/hook", "  "] },
+        }));
+        assert_eq!(cfg.audio.audio_source, "loopback");
+        assert!(!cfg.recording.enabled);
+        assert_eq!(cfg.recording.dir, "D:/rec");
+        assert!(cfg.recording.clean_silence);
+        assert!(!cfg.quality.auto_detect);
+        assert_eq!(cfg.quality.silence_rms, 0.02);
+        assert_eq!(cfg.network.proxy, "http://127.0.0.1:7890");
+        assert_eq!(cfg.webhooks.urls, vec!["https://example.com/hook".to_string()]);
+    }
+
+    #[test]
+    fn quality_null_restores_defaults() {
+        let mut cfg = Config::default();
+        cfg.quality.silence_rms = 0.42;
+        apply_updates(&mut cfg, &serde_json::json!({ "quality": serde_json::Value::Null }));
+        assert_eq!(cfg.quality.silence_rms, QualityConfig::default().silence_rms);
+    }
+
+    #[test]
+    fn snapshot_round_trip_changes_nothing() {
+        // 设置页最常见的一次操作：打开、什么都不改、点保存。
+        // 快照原样写回后配置必须逐字节相同 —— 这是整个配置面的验收条件。
+        let mut cfg = Config::default();
+        cfg.llm.providers.insert(
+            "deepseek".into(),
+            LlmProviderConfig { base_url: Some("https://api.deepseek.com/v1".into()), model: "deepseek-chat".into(), api_key: "sk-1234567890abcdef".into() },
+        );
+        cfg.asr.aliyun_access_key_secret = "verySecretValue123".into();
+        cfg.scene.mode = SceneMode::Meeting;
+        cfg.recording.dir = "D:/rec".into();
+        cfg.network.proxy = "http://127.0.0.1:7890".into();
+        cfg.webhooks.urls = vec!["https://example.com/hook".into()];
+
+        let before = toml::to_string(&cfg).unwrap();
+        let snapshot = masked(&cfg);
+        apply_updates(&mut cfg, &snapshot);
+        assert_eq!(toml::to_string(&cfg).unwrap(), before);
     }
 }
