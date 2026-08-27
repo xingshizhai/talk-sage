@@ -406,10 +406,11 @@ export interface AsrRuntimeStatus {
 export interface UpdateCheckResult {
   available: boolean;
   /** 更新源是否已配置（公钥/端点）；false = 在线升级尚未启用。 */
-  configured?: boolean;
+  configured: boolean;
   current_version: string;
-  latest_version?: string | null;
-  message?: string;
+  /** 仅在 available 为 true 时出现（见 src-tauri/src/updater.rs）。 */
+  latest_version?: string;
+  message: string;
 }
 
 /** 离线升级结果。 */
@@ -509,18 +510,4 @@ export interface AppApi {
   installOfflineUpgrade(path: string): Promise<OfflineUpgradeResult>;
   /** 传输载体标识（调试用）。 */
   readonly transport: "ipc" | "http";
-}
-
-export interface UpdateCheckResult {
-  available: boolean;
-  configured: boolean;
-  current_version: string;
-  latest_version?: string;
-  message: string;
-}
-
-export interface OfflineUpgradeResult {
-  ok: boolean;
-  version: string;
-  message: string;
 }
