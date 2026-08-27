@@ -841,7 +841,7 @@ mod tests {
             let cancel = std::sync::Arc::new(AtomicBool::new(false));
             // 预先置位取消标志：下载线程首个循环就应检测到并清理 .part
             cancel.store(true, Ordering::Relaxed);
-            let result = download_file(&format!("http://{addr}/big.bin"), &target, None, Some(cancel.as_ref()));
+            let result = download_file(&format!("http://{addr}/big.bin"), &target, None, Some(cancel.as_ref()), None);
             let err = result.expect_err("取消标志已置位，应返回错误");
             assert!(
                 err.downcast_ref::<DownloadCancelled>().is_some(),
@@ -910,7 +910,7 @@ mod tests {
             let target_clone = target.clone();
             let url = format!("http://{addr}/big.bin");
             let dl = thread::spawn(move || {
-                download_file(&url, &target_clone, None, Some(cancel_clone.as_ref()))
+                download_file(&url, &target_clone, None, Some(cancel_clone.as_ref()), None)
             });
             // 等下载线程把前 1 MiB 读掉、进入卡住状态，再置位取消
             thread::sleep(Duration::from_millis(500));
@@ -947,8 +947,13 @@ mod tests {
         }
     }
 
+    /// 代理只来自应用配置，不读 env var —— 见 [`build_download_agent`]：
+    /// env 代理会连带影响本该直连的国内请求（阿里云 ASR）。
+    ///
+    /// 所以这里锁两件事：显式传入的代理必须被用上；env 里的代理必须被无视。
+    /// （这条测试原本叫 `..._uses_http_proxy_from_env`，锁的是已经废弃的旧契约。）
     #[test]
-    fn download_file_uses_http_proxy_from_env() {
+    fn download_file_uses_the_configured_proxy_and_ignores_env() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -985,6 +990,7 @@ mod tests {
         for k in keys {
             std::env::remove_var(k);
         }
+        // env 里放上一个可用的代理：正确实现应当完全无视它。
         let proxy_url = format!("http://{proxy_addr}");
         std::env::set_var("HTTP_PROXY", &proxy_url);
         std::env::set_var("http_proxy", &proxy_url);
@@ -993,8 +999,15 @@ mod tests {
             let tmp = std::env::temp_dir().join(format!("talksage-proxy-{}", std::process::id()));
             std::fs::create_dir_all(&tmp).unwrap();
             let target = tmp.join("model.bin");
-            download_file("http://download.test.invalid/model.bin", &target, None, None)
-                .expect("走代理时应下载成功");
+            // proxy=None：env 有代理也不该回退过去，只能直连 .invalid 域名 —— 必然失败。
+            // 失败前不会有任何连接落到上面那个假代理上。
+            assert!(
+                download_file("http://download.test.invalid/model.bin", &target, None, None, None).is_err(),
+                "proxy=None 时不得回退到 env var 代理"
+            );
+            // proxy=Some：走配置里的代理，拿到 body。
+            download_file("http://download.test.invalid/model.bin", &target, None, None, Some(&proxy_url))
+                .expect("走配置的代理时应下载成功");
             assert_eq!(std::fs::read(&target).unwrap(), b"onnx");
             let _ = std::fs::remove_dir_all(&tmp);
         })();
@@ -1030,7 +1043,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let target = tmp.join("model.bin");
         std::fs::write(target.with_extension("part"), b"abc").unwrap();
-        download_file(&format!("http://{addr}/model.bin"), &target, None, None).unwrap();
+        download_file(&format!("http://{addr}/model.bin"), &target, None, None, None).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"abcdef");
         server.join().unwrap();
         let _ = std::fs::remove_dir_all(tmp);

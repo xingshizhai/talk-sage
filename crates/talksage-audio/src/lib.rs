@@ -438,6 +438,12 @@ fn collect_and_send(
 mod tests {
     use super::*;
 
+    /// 采集回调会把每块的 RMS 写进电平表（AudioCapture::level）。
+    /// 分块 / 增益 / 溢出这些用例不关心电平，给一个丢弃用的实例即可。
+    fn level_sink() -> AtomicU32 {
+        AtomicU32::new(0)
+    }
+
     #[test]
     fn resampler_passthrough_same_rate() {
         let mut r = LinearResampler::new(16000, 16000);
@@ -489,7 +495,7 @@ mod tests {
         let mut pending = Vec::new();
         let mut resampler = LinearResampler::new(16000, 16000);
         let data: Vec<f32> = (0..3200).map(|i| i as f32 / 10_000.0).collect(); // 200ms @16k = 3200
-        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx);
+        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx, &level_sink());
         assert!(pending.is_empty());
         let c1 = rx.recv().unwrap();
         let c2 = rx.recv().unwrap();
@@ -507,7 +513,7 @@ mod tests {
         let mut resampler = LinearResampler::new(16000, 16000);
         // 右声道能量更高，应选择右声道而不是与左声道平均。
         let data: Vec<f32> = (0..320).flat_map(|_| [0.1, 0.2]).collect();
-        collect_and_send(&data, 2, 1.0, &mut resampler, &mut pending, 320, &tx);
+        collect_and_send(&data, 2, 1.0, &mut resampler, &mut pending, 320, &tx, &level_sink());
         assert!(pending.is_empty());
         let c = rx.recv().unwrap();
         assert_eq!(c.len(), 320);
@@ -522,7 +528,7 @@ mod tests {
         let mut resampler = LinearResampler::new(16000, 16000);
         let mut data = vec![0.1; 1600];
         data[0] = 0.8;
-        collect_and_send(&data, 1, 4.0, &mut resampler, &mut pending, 1600, &tx);
+        collect_and_send(&data, 1, 4.0, &mut resampler, &mut pending, 1600, &tx, &level_sink());
         let chunk = rx.recv().unwrap();
         assert!((chunk[1] - 0.4).abs() < 1e-5, "+12dB 应把普通样本放大约四倍");
         assert!((chunk[0] - 0.98).abs() < 1e-5, "峰值必须限幅，避免 WAV 爆音");
@@ -534,7 +540,7 @@ mod tests {
         let mut pending = Vec::new();
         let mut resampler = LinearResampler::new(16000, 16000);
         let data: Vec<f32> = (0..320).flat_map(|_| [0.2, 0.0]).collect();
-        collect_and_send(&data, 2, 1.0, &mut resampler, &mut pending, 320, &tx);
+        collect_and_send(&data, 2, 1.0, &mut resampler, &mut pending, 320, &tx, &level_sink());
         let chunk = rx.recv().unwrap();
         assert!(chunk.iter().all(|sample| (*sample - 0.2).abs() < 1e-5));
     }
@@ -545,7 +551,7 @@ mod tests {
         let mut pending = Vec::new();
         let mut resampler = LinearResampler::new(16000, 16000);
         let data: Vec<f32> = (0..1000).map(|i| i as f32).collect(); // 不足一块
-        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx);
+        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx, &level_sink());
         assert!(rx.try_recv().is_err());
         assert_eq!(pending.len(), 1000);
     }
@@ -632,7 +638,7 @@ mod tests {
         let n = (CAPTURE_QUEUE_CAP + 2) * 1600;
         let data: Vec<f32> = vec![0.1; n];
         let t0 = Instant::now();
-        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx);
+        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx, &level_sink());
         assert!(t0.elapsed() < Duration::from_millis(200), "不得阻塞: {:?}", t0.elapsed());
         assert!(tx.overruns() >= 2);
         let mut got = 0usize;
@@ -640,5 +646,19 @@ mod tests {
             got += 1;
         }
         assert_eq!(got, CAPTURE_QUEUE_CAP);
+    }
+    /// 电平表一直没有测试覆盖 —— 这正是它作为第 8 个参数加进 collect_and_send
+    /// 时，六个测试调用点集体没跟上、单测编译不过却没被发现的原因。
+    #[test]
+    fn collect_and_send_publishes_chunk_rms_to_the_level_meter() {
+        let (tx, _rx) = capture_channel();
+        let mut pending = Vec::new();
+        let mut resampler = LinearResampler::new(16000, 16000);
+        let level = AtomicU32::new(0);
+        // 恒定 0.1 的 mono 数据，整块 RMS 就是 0.1。
+        let data: Vec<f32> = vec![0.1; 1600];
+        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx, &level);
+        let rms = f32::from_bits(level.load(Ordering::Relaxed));
+        assert!((rms - 0.1).abs() < 1e-6, "电平表未更新: {rms}");
     }
 }
