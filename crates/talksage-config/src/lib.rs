@@ -304,7 +304,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             language: "zh".into(),
             client_language: "en".into(),
             translation_mode: TranslationMode::Off,
-            plugin_allowlist: ["term_explainer", "brief_retriever", "key_point_extractor"].iter().map(|s| s.to_string()).collect(),
+            plugin_allowlist: ["term_explainer", "brief_retriever", "key_point_extractor", "key_point_llm"].iter().map(|s| s.to_string()).collect(),
             speaker_mode: SpeakerMode::Off,
             noise_auto_detect: true,
         },

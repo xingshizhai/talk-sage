@@ -120,11 +120,14 @@ impl RunningListen {
     pub fn flush_key_points(&self) -> String {
         let has_llm = self.plugin_ctx.llm.is_some();
         let has_observer = self.hooks.has_key_point_llm();
+        if !has_observer && !has_llm {
+            return "LLM 未配置（请在设置→LLM 填写 API Key），插件无法激活".into();
+        }
         if !has_observer {
-            return "key_point_llm observer 未注册（插件可能已禁用）".into();
+            return "当前场景未启用「要点聚合（LLM）」插件，请在设置→场景→插件中开启".into();
         }
         if !has_llm {
-            return "LLM 未配置，无法整理要点".into();
+            return "LLM 未配置，无法整理要点（请在设置→LLM 填写 API Key）".into();
         }
         let emit = self.emit.clone();
         let ctx = self.plugin_ctx.clone();
