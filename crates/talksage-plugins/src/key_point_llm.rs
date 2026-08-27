@@ -86,13 +86,13 @@ impl KeyPointLlmObserver {
     fn call_llm(
         texts: &[String],
         llm: &Arc<dyn talksage_llm::LLMProvider>,
-    ) -> Vec<(KeyPointCategory, String)> {
+    ) -> (Vec<(KeyPointCategory, String)>, Vec<String>) {
         let prompt = build_prompt(texts);
         match llm.complete(&prompt, SYSTEM_PROMPT) {
             Ok(resp) => parse_response(&resp),
             Err(e) => {
                 log::warn!("key_point_llm: LLM 调用失败: {e}");
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         }
     }
@@ -122,7 +122,7 @@ impl SegmentObserver for KeyPointLlmObserver {
             std::mem::take(&mut g.buffer)
         };
         log::info!("key_point_llm: 手动 flush 立即处理 {} 段", texts.len());
-        let points = Self::call_llm(&texts, llm);
+        let (points, keywords) = Self::call_llm(&texts, llm);
         let ts_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -137,6 +137,14 @@ impl SegmentObserver for KeyPointLlmObserver {
                 category,
                 content,
                 ts_ms,
+            });
+        }
+        for (i, kw) in keywords.into_iter().enumerate() {
+            if kw.trim().is_empty() { continue; }
+            emit(DomainEvent::Term {
+                result_id: format!("term-kp-manual-{ts_ms}-{i}"),
+                status: talksage_core::ResultStatus::Final,
+                content: kw,
             });
         }
     }
@@ -176,7 +184,7 @@ impl SegmentObserver for KeyPointLlmObserver {
                 g.last_flush = Instant::now();
                 std::mem::take(&mut g.buffer)
             };
-            let points = Self::call_llm(&texts, llm);
+            let (points, keywords) = Self::call_llm(&texts, llm);
             let ts_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -195,6 +203,14 @@ impl SegmentObserver for KeyPointLlmObserver {
                     category,
                     content,
                     ts_ms,
+                });
+            }
+            for (i, kw) in keywords.into_iter().enumerate() {
+                if kw.trim().is_empty() { continue; }
+                events.push(DomainEvent::Term {
+                    result_id: format!("term-kp-{ts_ms}-{i}"),
+                    status: ResultStatus::Final,
+                    content: kw,
                 });
             }
             g.pending.extend(events);
@@ -241,11 +257,14 @@ impl Plugin for KeyPointLlmPlugin {
 // ── Prompt & Parser ─────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT: &str = "\
-你是专业的会议记录助理。从会议转写片段中提炼会议核心要点。\
-要点必须是实质性内容：决策、要求、行动项、待解决问题、技术方案等。\
-忽略废话、客套、寒暄、确认性应答（嗯/对/好的）、以及不完整的口语碎片。\
-相同或相近内容合并为一条。\
-只返回 JSON 数组，不加任何其他文字或 Markdown 格式。";
+你是专业的会议记录助理，专门处理**语音识别（ASR）转写结果**。\
+输入文本来自自动语音识别，可能存在以下问题：同音字/谐音字错误、方言词汇、\
+中英文混杂（英文专有名词可能被转写成中文谐音）、口语停顿词、句子不完整等。\
+请根据上下文推断说话者的真实意图，而非照字面解读可能有误的文字。\
+\n\n任务：从转写片段中提炼会议核心要点，并提取对话中的关键术语/专有名词。\
+\n要点必须是实质性内容：决策、要求、行动项、待解决问题、技术方案等。\
+\n忽略废话、客套、寒暄、确认性应答（嗯/对/好的）以及无意义的口语碎片。\
+\n只返回 JSON 数组，不加任何其他文字或 Markdown 格式。";
 
 fn build_prompt(texts: &[String]) -> String {
     let numbered = texts
@@ -256,16 +275,18 @@ fn build_prompt(texts: &[String]) -> String {
         .join("\n");
 
     format!(
-        "以下是会议转写片段（可能含口语噪音，请先理解上下文再提炼）：\n{numbered}\n\n\
-请提炼其中的核心要点，返回 JSON 数组，每个元素包含：\n\
+        "以下是语音识别转写片段（ASR 输出，可能含错字、谐音字、中英混杂、不完整句子）：\n\
+{numbered}\n\n\
+请先理解上下文推断真实含义，再提炼核心内容。返回 JSON 数组，每个元素包含：\n\
 - category: \"requirement\"（要求/需求）| \"decision\"（决策）| \"action\"（行动项）| \"question\"（待解答问题）| \"technical\"（技术方案）| \"other\"（其他重要事项）\n\
-- content: 一句话概括要点，陈述完整、主语明确、不含口语语气词，≤40字\n\n\
+- content: 一句话概括要点，用规范书面语，主语明确，≤40字；如遇 ASR 错字请纠正后再概括\n\
+- keywords: 字符串数组，提取对话中的专业术语、产品名、技术名词、人名、组织名等关键词，每项≤10字，若无则为空数组\n\n\
 要求：\n\
 1. 只保留**会议核心**：决策、明确的要求、具体的行动项、未决问题、关键技术结论；\n\
 2. 多条片段讲同一件事时合并成一条；\n\
 3. 跳过寒暄、确认应答、语气词、不完整的半句话；\n\
 4. 宁可少而精，不要多而碎。\n\n\
-示例：[{{\"category\":\"action\",\"content\":\"下周前完成 API 文档更新\"}}]\n\
+示例：[{{\"category\":\"action\",\"content\":\"下周前完成 API 文档更新\",\"keywords\":[\"API\",\"文档\"]}}]\n\
 若无实质性要点返回空数组 []"
     )
 }
@@ -274,6 +295,8 @@ fn build_prompt(texts: &[String]) -> String {
 struct RawPoint {
     category: String,
     content: String,
+    #[serde(default)]
+    keywords: Vec<String>,
 }
 
 fn parse_category(s: &str) -> KeyPointCategory {
@@ -287,17 +310,25 @@ fn parse_category(s: &str) -> KeyPointCategory {
     }
 }
 
-fn parse_response(resp: &str) -> Vec<(KeyPointCategory, String)> {
+fn parse_response(resp: &str) -> (Vec<(KeyPointCategory, String)>, Vec<String>) {
     let json_str = extract_json_array(resp);
     let Ok(points) = serde_json::from_str::<Vec<RawPoint>>(&json_str) else {
         log::warn!("key_point_llm: 无法解析 LLM 响应: {}", &resp[..resp.len().min(200)]);
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    points
-        .into_iter()
-        .filter(|p| !p.content.trim().is_empty())
-        .map(|p| (parse_category(&p.category), p.content.trim().to_string()))
-        .collect()
+    let mut kps = Vec::new();
+    let mut all_keywords: Vec<String> = Vec::new();
+    for p in points {
+        if p.content.trim().is_empty() { continue; }
+        kps.push((parse_category(&p.category), p.content.trim().to_string()));
+        for kw in p.keywords {
+            let kw = kw.trim().to_string();
+            if !kw.is_empty() && !all_keywords.contains(&kw) {
+                all_keywords.push(kw);
+            }
+        }
+    }
+    (kps, all_keywords)
 }
 
 fn extract_json_array(s: &str) -> String {
@@ -315,24 +346,36 @@ mod tests {
 
     #[test]
     fn parse_response_normal() {
-        let resp = r#"[{"category":"action","content":"下周完成 API 文档"},{"category":"decision","content":"预算不超过 20 万"}]"#;
-        let pts = parse_response(resp);
+        let resp = r#"[{"category":"action","content":"下周完成 API 文档","keywords":["API","文档"]},{"category":"decision","content":"预算不超过 20 万","keywords":[]}]"#;
+        let (pts, kws) = parse_response(resp);
         assert_eq!(pts.len(), 2);
         assert!(matches!(pts[0].0, KeyPointCategory::Action));
         assert!(matches!(pts[1].0, KeyPointCategory::Decision));
+        assert_eq!(kws, vec!["API", "文档"]);
+    }
+
+    #[test]
+    fn parse_response_no_keywords_field() {
+        // 旧格式无 keywords 字段时应正常解析
+        let resp = r#"[{"category":"action","content":"下周完成 API 文档"}]"#;
+        let (pts, kws) = parse_response(resp);
+        assert_eq!(pts.len(), 1);
+        assert!(kws.is_empty());
     }
 
     #[test]
     fn parse_response_with_surrounding_text() {
-        let resp = "好的，以下是要点：\n[{\"category\":\"question\",\"content\":\"预算如何分配？\"}]";
-        let pts = parse_response(resp);
+        let resp = "好的，以下是要点：\n[{\"category\":\"question\",\"content\":\"预算如何分配？\",\"keywords\":[]}]";
+        let (pts, _) = parse_response(resp);
         assert_eq!(pts.len(), 1);
         assert!(matches!(pts[0].0, KeyPointCategory::Question));
     }
 
     #[test]
     fn parse_response_empty_array() {
-        assert!(parse_response("[]").is_empty());
+        let (pts, kws) = parse_response("[]");
+        assert!(pts.is_empty());
+        assert!(kws.is_empty());
     }
 
     #[test]
