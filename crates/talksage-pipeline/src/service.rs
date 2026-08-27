@@ -580,6 +580,7 @@ impl TalkSageService {
             aliyun_app_key: snapshot.asr.aliyun_app_key.clone(),
             asr_route,
             tokio_handle,
+            force_segment_ms: if user_engine.is_streaming() { 0 } else { 8000 },
         })
     }
 

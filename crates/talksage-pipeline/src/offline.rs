@@ -91,6 +91,7 @@ pub fn transcribe_file(
             backend: talksage_asr::GpuBackend::None,
         },
         tokio_handle: None,
+        force_segment_ms: 0,
     };
 
     let start = Instant::now();

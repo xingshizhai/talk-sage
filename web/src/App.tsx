@@ -65,6 +65,8 @@ export default function App() {
   const [listening, setListening] = useState(false);
   const [paused, setPaused] = useState(false);
   const [status, setStatus] = useState<string>("待机");
+  const [listenStartTime, setListenStartTime] = useState<number | null>(null);
+  const [listenElapsed, setListenElapsed] = useState(0);
   // 启动默认进入「实时转写」页（不跨启动恢复导航页）
   const [navPage, setNavPage] = useState<string>("transcript");
   // 设置页有未保存改动（由 SettingsSection 上报）：离开前需要确认。
@@ -154,16 +156,17 @@ export default function App() {
       if (ev.type === "status") {
         setStatus(ev.message);
         if (ev.stage === "recording") {
-          setListening(true);
+          setListening((prev) => { if (!prev) { setListenStartTime(Date.now()); setListenElapsed(0); } return true; });
           setPaused(false);
         }
         if (ev.stage === "paused") {
-          setListening(true);
+          setListening((prev) => { if (!prev) { setListenStartTime(Date.now()); setListenElapsed(0); } return true; });
           setPaused(true);
         }
         if (ev.stage === "idle" || ev.stage === "asr_ready") {
           setListening(false);
           setPaused(false);
+          setListenStartTime(null);
         }
       }
       if (ev.type === "snapshot") {
@@ -370,6 +373,13 @@ export default function App() {
     }
   }, [listening]);
 
+  // 监听中每秒更新计时器
+  useEffect(() => {
+    if (!listenStartTime) { setListenElapsed(0); return; }
+    const id = setInterval(() => setListenElapsed(Math.floor((Date.now() - listenStartTime) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [listenStartTime]);
+
   const handleHistorySearch = useCallback(async (q: string) => {
     setDetail(null);
     if (!q.trim()) {
@@ -570,6 +580,7 @@ export default function App() {
         await api.stopListen();
         setListening(false);
         setPaused(false);
+        setListenStartTime(null);
         setStatus("已停止");
       } else {
         setStatus("启动中…");
@@ -658,6 +669,7 @@ export default function App() {
         ]);
         setListening(false);
         setPaused(false);
+        setListenStartTime(null);
       }
     } finally {
       // 优先优雅销毁窗口；destroy 不触发 close-requested，不会再次进入守卫循环。
@@ -773,7 +785,7 @@ export default function App() {
               color: listening ? "var(--live)" : "var(--muted)",
             }}
           >
-            {listening ? `● ${currentSceneLabel} · 监听中` : status}
+            {listening ? `● ${currentSceneLabel} · ${String(Math.floor(listenElapsed / 60)).padStart(2, "0")}:${String(listenElapsed % 60).padStart(2, "0")}` : status}
           </span>
         </div>
 

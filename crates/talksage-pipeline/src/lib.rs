@@ -187,6 +187,9 @@ pub struct LivePipelineConfig {
     /// `Arc<dyn EventFilter>`，两条流因此共享同一个 `CrossStreamDedupFilter`
     /// 实例（内部历史共享）—— 这是跨流去重能工作的前提。
     pub hooks: talksage_plugins::HookRegistry,
+    /// 段级引擎（whisper.cpp）的最大段时长（ms）；超限强制切分，避免长段积累。
+    /// 0 = 不限制（流式引擎自动禁用此功能）。
+    pub force_segment_ms: u64,
 }
 
 /// 实时管道：持有组件并在专用线程中运行事件循环。
@@ -435,6 +438,8 @@ struct StreamWorker {
     clock: AudioClock,
     /// 会话墙钟原点（ms）；`ts_ms = origin_ms + clock.ms()`。
     origin_ms: u64,
+    /// 段级引擎的强制切分阈值（ms）；0 = 不限制。
+    force_segment_ms: u64,
 }
 
 impl StreamWorker {
@@ -601,6 +606,7 @@ impl StreamWorker {
             punct_restorer: None,
             clock: AudioClock::new(talksage_audio::TARGET_SAMPLE_RATE),
             origin_ms,
+            force_segment_ms: 0,
         })
     }
 
@@ -745,6 +751,24 @@ impl StreamWorker {
         if self.in_speech && !just_started {
             self.segment.advance_pending(chunk.len() as u64);
             self.statistics.observe_speech(&chunk);
+            // 段级引擎（whisper.cpp）：超过强制切分阈值时立即提交，避免 30s+ 积累延迟
+            if self.force_segment_ms > 0 && !self.engine.as_ref().is_some_and(|e| e.kind().is_streaming()) {
+                let elapsed_ms = AudioClock::samples_to_ms(
+                    talksage_audio::TARGET_SAMPLE_RATE,
+                    self.statistics.segment_samples(),
+                );
+                if elapsed_ms >= self.force_segment_ms {
+                    log::info!(
+                        "流[{}] 段时长 {}ms 超限（max={}ms），强制切分",
+                        self.speaker_label, elapsed_ms, self.force_segment_ms
+                    );
+                    self.vad.reset();
+                    self.pre_roll.clear();
+                    self.pre_roll_samples = 0;
+                    self.finish_speech(emit);
+                    return Ok(true);
+                }
+            }
             // 说话人音频缓冲（预处理后，限 30s，说话人识别用）
             if self.speaker.is_some() {
                 const MAX_SEG_AUDIO: usize = 480000; // 30s @16k
@@ -1163,6 +1187,8 @@ fn run_loop(
             aliyun_token_manager.clone(),
             cfg.tokio_handle.clone(),
         )?;
+        // 段级引擎（whisper.cpp）设置强制切分阈值
+        w.force_segment_ms = cfg.force_segment_ms;
         // 标点恢复独立于 ASR 类型；离线大模型和云端结果也需要统一语义分句。
         if cfg.punct_enabled {
             if let Some(models_root) = sc.model_dir.parent() {
