@@ -232,13 +232,41 @@ mod tests {
                         }
                     }
                 }
-                let req = String::from_utf8_lossy(&buf[..received]);
+                let req = String::from_utf8_lossy(&buf[..received]).into_owned();
+                // 请求体也要读干净再回包。Windows 上带着未读数据关闭 socket 会发
+                // RST 而不是 FIN，客户端此时正在读状态行，就会撞上 WSAECONNRESET
+                // （10054「远程主机强迫关闭了一个现有的连接」）—— 表现为整机满载
+                // 跑 cargo test --workspace 时这条偶发失败。
+                let header_end = buf[..received]
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map(|at| at + 4)
+                    .unwrap_or(received);
+                let content_length = req
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                let mut remaining = content_length.saturating_sub(received.saturating_sub(header_end));
+                let mut sink = [0u8; 4096];
+                while remaining > 0 {
+                    let want = remaining.min(sink.len());
+                    match stream.read(&mut sink[..want]) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => remaining -= n,
+                    }
+                }
+
                 let body = if req.contains("Authorization: Bearer sk-test") {
                     "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
                 } else {
                     "HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
                 };
                 let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+                // 显式半关闭：让对端收到 FIN，而不是靠 drop 的时机。
+                let _ = stream.shutdown(std::net::Shutdown::Write);
             }
         });
 
