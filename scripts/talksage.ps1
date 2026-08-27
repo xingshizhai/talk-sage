@@ -76,11 +76,30 @@ $env:SHERPA_ONNX_ARCHIVE_DIR = Join-Path $Root ".tools\sherpa-onnx-archives"
 # TALKSAGE_* 目录分离（v0.2+）：配置 / 数据 / 日志互不混放。
 #   优先级：外部已设 → 沿用；未设 → 脚本指定项目内目录（不入库）。
 #   直接运行 talksage.exe（不经脚本）→ 程序默认 ~/.talksage（配置与数据同目录）。
+# 同一个 PowerShell 窗口里跑过一次本脚本后，$env:TALKSAGE_*_DIR 会留在会话里。
+# 不加区分的话，下次运行会把这些残留当成「用户显式指定」继续沿用 —— 旧版布局
+# （数据与配置同在 config\）的残留因此会让会话库/录音一直写回 config\。
+# 用所有权标记记下哪几个变量是脚本设的，每次运行先清掉重算；用户自己 export 的
+# 变量没有标记，照常沿用。
+if ($env:TALKSAGE_DIRS_OWNER -eq $Root -and $env:TALKSAGE_DIRS_OWNED) {
+    foreach ($owned in $env:TALKSAGE_DIRS_OWNED.Split(",")) {
+        if ($owned) { Remove-Item "Env:TALKSAGE_${owned}_DIR" -ErrorAction SilentlyContinue }
+    }
+}
+# 旧版脚本（0.1.3 及以前）设的是 TALKSAGE_DATA_DIR=<root>\config，没有所有权标记，
+# 但值就是那时的默认值 —— 同样按残留处理，否则数据继续落在配置目录里。
+if ($env:TALKSAGE_DATA_DIR -eq (Join-Path $Root "config")) {
+    Write-Host "提示: 清除旧版布局残留 TALKSAGE_DATA_DIR=$env:TALKSAGE_DATA_DIR（数据目录已分离到 data\）" -ForegroundColor Yellow
+    Remove-Item Env:TALKSAGE_DATA_DIR -ErrorAction SilentlyContinue
+}
+$OwnedDirs = @()
+
 $DataDirExternal = -not [string]::IsNullOrWhiteSpace($env:TALKSAGE_DATA_DIR)
 if ($DataDirExternal) {
     Write-Host "提示: 沿用外部 TALKSAGE_DATA_DIR=$env:TALKSAGE_DATA_DIR（数据目录）" -ForegroundColor DarkGray
 } else {
     $env:TALKSAGE_DATA_DIR = Join-Path $Root "data"
+    $OwnedDirs += "DATA"
     Write-Host "提示: 未检测到外部 TALKSAGE_DATA_DIR，脚本使用项目内数据目录 data\" -ForegroundColor DarkGray
 }
 # 配置目录：仅当数据目录也由脚本默认时才指向项目 config\；外部数据目录
@@ -90,13 +109,18 @@ if (-not $env:TALKSAGE_CONFIG_DIR) {
         Write-Host "提示: TALKSAGE_CONFIG_DIR 未设，配置文件位于 $env:TALKSAGE_DATA_DIR\talksage.toml" -ForegroundColor DarkGray
     } else {
         $env:TALKSAGE_CONFIG_DIR = Join-Path $Root "config"
+        $OwnedDirs += "CONFIG"
         Write-Host "提示: 配置文件目录 config\（talksage.toml 与数据分离）" -ForegroundColor DarkGray
     }
 }
 if (-not $env:TALKSAGE_LOG_DIR) {
     $env:TALKSAGE_LOG_DIR = Join-Path $Root "logs"
+    $OwnedDirs += "LOG"
     Write-Host "提示: 日志目录 logs\" -ForegroundColor DarkGray
 }
+# 记下本次由脚本设定的目录，供同一会话下次运行识别并重算
+$env:TALKSAGE_DIRS_OWNER = $Root
+$env:TALKSAGE_DIRS_OWNED = ($OwnedDirs -join ",")
 $env:TALKSAGE_MODELS_DIR = Join-Path $Root "models"
 $CargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
 if (Test-Path $CargoBin) { $env:Path = "$CargoBin;" + $env:Path }
@@ -321,11 +345,12 @@ function Cmd-Build {
         if ($code -ne 0) { Write-Host "cargo 编译失败（App）" -ForegroundColor Red; return 1 }
         Write-Host "`n编译完成: $(Get-CliExe)（debug CLI）+ $(Get-DebugApp)（debug App）"
     }
-    $cfgDir = $env:TALKSAGE_DATA_DIR
+    # 配置文件跟 TALKSAGE_CONFIG_DIR 走（未设时才落在数据目录）
+    $cfgDir = if ($env:TALKSAGE_CONFIG_DIR) { $env:TALKSAGE_CONFIG_DIR } else { $env:TALKSAGE_DATA_DIR }
     if (-not (Test-Path (Join-Path $cfgDir "talksage.toml"))) {
         Write-Host "提示: 尚未初始化配置文件，运行 .\scripts\talksage.ps1 dev 会自动从模板创建:" -ForegroundColor Yellow
         Write-Host "  $cfgDir\talksage.toml" -ForegroundColor Yellow
-        Write-Host "  或设置环境变量 TALKSAGE_DATA_DIR 指向自定义配置目录后重跑" -ForegroundColor Yellow
+        Write-Host "  或设置环境变量 TALKSAGE_CONFIG_DIR 指向自定义配置目录后重跑" -ForegroundColor Yellow
     }
 }
 
@@ -376,6 +401,21 @@ function Ensure-VulkanEnv {
     }
 }
 
+# 启动桌面 App 并把脚本设置的目录变量带过去。
+# Windows PowerShell 5.1 的 Start-Process 不会传递本进程后设的 $env:*（实测：
+# TALKSAGE_DATA_DIR / CONFIG_DIR / LOG_DIR / MODELS_DIR 全部丢失，App 会退回
+# ~/.talksage 与默认模型目录）。这里直接用 ProcessStartInfo 显式带上当前环境。
+function Start-App([string]$exe) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.UseShellExecute = $false
+    $psi.WorkingDirectory = $Root
+    foreach ($kv in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
+        $psi.EnvironmentVariables[[string]$kv.Key] = [string]$kv.Value
+    }
+    [void][System.Diagnostics.Process]::Start($psi)
+}
+
 function Cmd-Dev {
     Ensure-DevData
     Ensure-VulkanEnv
@@ -402,7 +442,7 @@ function Cmd-Run {
             return 1
         }
         Write-Step "运行桌面应用（release）"
-        Start-Process $exe
+        Start-App $exe
         return
     }
     $exe = Get-DebugApp
@@ -411,7 +451,7 @@ function Cmd-Run {
         return 1
     }
     Write-Step "运行桌面应用（debug）"
-    Start-Process $exe
+    Start-App $exe
 }
 
 function Cmd-Serve {
