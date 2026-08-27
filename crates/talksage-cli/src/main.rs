@@ -1,159 +1,21 @@
 //! TalkSage v2 launcher。
 //!
 //! 结构参考 DeepSeek Harness：`dsh --profile web` 之类的启动器入口。
-//! 已实现：version / doctor / listen（实时转写，麦克风或文件输入）。
+//! 已实现：version / doctor / listen / session（list/show/search/rename/delete/export/notes/trio）。
 
 use std::process::ExitCode;
-use clap::{Parser, Subcommand};
 
 use talksage_asr::{EngineKind, EnginePool};
 use talksage_audio::AudioHub;
 use talksage_core::DomainEvent;
 use talksage_pipeline::{AudioInput, StartListen, TalkSageService};
 
-#[derive(Parser)]
-#[command(
-    name = "拓思者",
-    bin_name = "talksage",
-    version = talksage_core::VERSION,
-    about = "拓思者（TalkSage）— AI 会议助理：实时转写 · 说话人识别 · 纪要分析",
-    subcommand_required = true,
-    arg_required_else_help = true
-)]
-struct Cli {
-    /// 详细日志（等价 RUST_LOG=trace）
-    #[arg(long, global = true)]
-    verbose: bool,
-    /// 日志级别（trace/debug/info/warn/error；默认读 RUST_LOG/TALKSAGE_LOG）
-    #[arg(long, global = true, value_name = "LEVEL")]
-    log_level: Option<String>,
-    #[command(subcommand)]
-    command: Command,
-}
+mod args;
+mod session_cli;
 
-#[derive(Subcommand)]
-enum Command {
-    /// 启动桌面应用（Tauri）。开发期请使用 `pnpm tauri dev`。
-    Web,
-    /// 启动 headless 服务（多设备/团队模式，预留）。
-    Serve {
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        #[arg(long, default_value_t = 8080)]
-        port: u16,
-    },
-    /// 实时转写验证：麦克风或 wav 文件 → VAD → 流式 ASR → 事件打印。
-    Listen {
-        /// 用户流输入：mic | loopback | <wav 路径>
-        #[arg(long, default_value = "mic")]
-        input: String,
-        /// 客户流输入（英文 zipformer）：mic | loopback | <wav 路径>（可选）
-        #[arg(long)]
-        client: Option<String>,
-        /// 简报知识库文件夹（可选，启用 brief_retriever）
-        #[arg(long)]
-        kb: Option<String>,
-        /// 运行秒数（0 = 默认时长）
-        #[arg(long, default_value_t = 0)]
-        seconds: u64,
-        /// 用户流引擎（paraformer-zh | zipformer-en）
-        #[arg(long, default_value = "paraformer-zh")]
-        engine: String,
-        /// 落库到会话 SQLite（~/.talksage/sessions.db）
-        #[arg(long)]
-        save: bool,
-        /// 不保存录音（默认按配置 recording.enabled 决定）
-        #[arg(long)]
-        no_record: bool,
-        /// 运行时噪音电平阈值（0 = 关闭；0.005~0.05 常用），监听中可实时调节
-        #[arg(long, default_value_t = 0.0)]
-        noise_level: f32,
-    },
-    /// 导入音频离线转写并保存为新会话。
-    Import {
-        /// 音频文件路径（16kHz mono wav）
-        path: String,
-        /// 引擎（paraformer-zh | zipformer-en）
-        #[arg(long, default_value = "paraformer-zh")]
-        engine: String,
-        /// 说话人标签（默认 导入）
-        #[arg(long, default_value = "导入")]
-        speaker: String,
-    },
-    /// 列出最近的会话记录。
-    Sessions {
-        /// 最多显示几条（默认 20）
-        #[arg(long, default_value_t = 20)]
-        limit: u32,
-    },
-    /// 会话分析：转储某会话的原始段信息（时间戳/时长/文本），并检测疑似重复段。
-    /// 用于排查"识别内容重复"等转写质量问题。
-    Session {
-        /// 会话 id
-        id: i64,
-        /// 只检测重复段（不打印全部转写）
-        #[arg(long)]
-        dup_only: bool,
-    },
-    /// 导出会话为 Markdown 文件（含转写、要点、术语等）。
-    Export {
-        /// 会话 id（省略则导出最近一条）
-        id: Option<i64>,
-        /// 输出路径（默认：当前目录 session-<id>.md）
-        #[arg(short, long)]
-        output: Option<String>,
-    },
-    /// 静音裁剪：用 silero VAD 去掉无声音的部分，输出紧凑音频（测试素材）。
-    Trim {
-        /// 输入 wav（任意采样率，自动重采样到 16k）
-        path: String,
-        /// 输出 wav（默认 <输入>.trimmed.wav）
-        #[arg(short, long)]
-        output: Option<String>,
-        /// VAD 灵敏度预设（standard | sensitive | strict）
-        #[arg(long, default_value = "standard")]
-        preset: String,
-        /// VAD 模型路径（默认 <models>/silero-vad/silero_vad.onnx）
-        #[arg(long)]
-        model: Option<String>,
-    },
-    /// 录制原始音频（不转写）：麦克风/回环 → wav。
-    Record {
-        /// 录制秒数（0 = 手动停止）
-        #[arg(short, long, default_value_t = 30)]
-        seconds: u64,
-        /// 输出目录（默认 <data_dir>/recordings）
-        #[arg(short, long)]
-        dir: Option<String>,
-        /// 输入源：mic | loopback
-        #[arg(long, default_value = "mic")]
-        input: String,
-    },
-    /// 诊断环境：配置、目录、平台。
-    Doctor,
-    /// 固定语料转写评测：CER/WER + 端到端实时系数 + 首段 final 延迟。
-    Bench {
-        /// 语料目录（*.wav + 同名 .txt 参考文本；缺省 ./bench-corpus）
-        #[arg(short, long)]
-        dir: Option<String>,
-        /// 引擎（paraformer-zh | zipformer-en）
-        #[arg(long, default_value = "paraformer-zh")]
-        engine: String,
-        /// 只处理前 N 个文件
-        #[arg(long)]
-        limit: Option<usize>,
-    },
-    /// 对完整 wav 运行离线说话人分离，输出精确讲话者时间轴。
-    Diarize {
-        /// 输入 wav（任意采样率，自动转 16k mono）。
-        path: String,
-        /// 已知讲话者数量；省略时自动聚类。
-        #[arg(long)]
-        speakers: Option<u32>,
-    },
-    /// 打印版本。
-    Version,
-}
+use clap::Parser;
+
+use args::{Cli, Command};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -162,6 +24,9 @@ fn main() -> ExitCode {
         std::env::set_var("TALKSAGE_LOG", "trace");
     } else if let Some(level) = &cli.log_level {
         std::env::set_var("TALKSAGE_LOG", level);
+    } else if cli.json && std::env::var("TALKSAGE_LOG").is_err() && std::env::var("RUST_LOG").is_err() {
+        // JSON 输出时默认少打控制台日志；需要排障可加 --verbose / --log-level
+        std::env::set_var("TALKSAGE_LOG", "error");
     }
     let _log_guard = talksage_logging::init(None);
     log::info!("talksage {} 启动", talksage_core::VERSION);
@@ -184,9 +49,9 @@ fn main() -> ExitCode {
             noise_level,
         } => cmd_listen(&input, seconds, &engine, client.as_deref(), kb.as_deref(), save, no_record, noise_level),
         Command::Import { path, engine, speaker } => cmd_import(&path, &engine, &speaker),
-        Command::Sessions { limit } => cmd_sessions(limit),
-        Command::Session { id, dup_only } => cmd_session(id, dup_only),
-        Command::Export { id, output } => cmd_export(id, output.as_deref()),
+        Command::Sessions { limit } => session_cli::list_alias(limit, cli.json),
+        Command::Session(args) => session_cli::dispatch(args, cli.json),
+        Command::Export { id, output } => session_cli::export_alias(id, output, cli.json),
         Command::Trim {
             path,
             output,
@@ -534,83 +399,6 @@ fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
     println!("转写结果（{} 段）:", segs.len());
     for s in segs.iter() {
         println!("  [{}] {}", s.speaker_label, s.text);
-    }
-    ExitCode::SUCCESS
-}
-
-/// 会话分析：转储原始段信息（时间戳/时长/文本）+ 疑似重复段检测。
-/// 用于排查"识别内容重复"等转写质量问题。
-fn cmd_session(id: i64, dup_only: bool) -> ExitCode {
-    let data_dir = talksage_config::default_data_dir();
-    let store = match talksage_session::SessionStore::open(&data_dir.join("sessions.db").to_string_lossy()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("打开会话库失败: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let detail = match store.get_session(id) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("读取会话 #{id} 失败: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    println!("== 会话 #{id} 原始转写段 ==");
-    println!(
-        "{} 段 · 开始 {} · 结束 {:?} · 质量 {:?}",
-        detail.segments.len(),
-        detail.started_at,
-        detail.ended_at,
-        detail.meta.as_ref().map(|m| m.quality_label()),
-    );
-    // 运行环境快照：模型/场景/参数（对比不同 ASR 配置时用）
-    if let Some(ri) = detail.meta.as_ref().and_then(|m| m.runtime_info.as_ref()) {
-        println!(
-            "运行环境: v{} 场景={} 引擎={}{} VAD={} 降噪={} 最短提交={}ms 增益={}dB 说话人={} 采样率={}Hz",
-            ri.app_version,
-            ri.scene_mode,
-            ri.user_engine,
-            if ri.client_enabled { format!("+{}", ri.client_engine.as_deref().unwrap_or("?")) } else { "（单流）".into() },
-            ri.vad_preset,
-            if ri.denoise_enabled { "开" } else { "关" },
-            ri.min_segment_ms,
-            ri.input_gain_db,
-            ri.speaker_mode,
-            ri.sample_rate,
-        );
-    } else {
-        println!("运行环境: （旧会话，无配置快照）");
-    }
-    for (i, s) in detail.segments.iter().enumerate() {
-        let start_ms = s.ts_ms.saturating_sub(s.duration_ms);
-        println!(
-            "  #{:<3} [{}] start={:>8}ms end={:>8}ms dur={:>5}ms | {}",
-            i,
-            s.speaker_label,
-            start_ms,
-            s.ts_ms,
-            s.duration_ms,
-            s.text,
-        );
-    }
-    // 疑似重复段检测
-    let dups = talksage_session::find_duplicate_segments(&detail.segments);
-    if dups.is_empty() {
-        println!("\n疑似重复段: 无（同说话人相邻段相似度均 < 0.9）");
-    } else {
-        println!("\n疑似重复段（同说话人、时间窗 5s 内、相似度 ≥ 0.9）:");
-        for d in &dups {
-            println!(
-                "  #{:<3} 与 #{:<3} [{}] 相似度={:.2} 间隔={}ms",
-                d.idx_a, d.idx_b, d.speaker, d.similarity, d.gap_ms
-            );
-            println!("    A: {}", detail.segments[d.idx_a].text);
-            println!("    B: {}", detail.segments[d.idx_b].text);
-        }
-    }
-    if !dup_only {
-        println!("\n提示: 时间戳为 epoch ms；同说话人相邻段间隔小且文本相似 = VAD 把一句话切成两段重复识别。");
     }
     ExitCode::SUCCESS
 }
@@ -1052,97 +840,3 @@ fn resolve_models_dir() -> Option<std::path::PathBuf> {
     TalkSageService::resolve_models_dir()
 }
 
-fn open_store() -> Option<talksage_session::SessionStore> {
-    let db = talksage_config::default_data_dir().join("sessions.db");
-    match talksage_session::SessionStore::open(&db.to_string_lossy()) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            eprintln!("打开会话库失败: {e}（数据库: {}）", db.display());
-            None
-        }
-    }
-}
-
-fn cmd_sessions(limit: u32) -> ExitCode {
-    let Some(store) = open_store() else { return ExitCode::FAILURE };
-    let list = match store.list_sessions(limit) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("列出会话失败: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    if list.is_empty() {
-        println!("（无会话记录）");
-        return ExitCode::SUCCESS;
-    }
-    println!("{:>5}  {:<20}  {:>8}  {}", "ID", "开始时间", "时长(s)", "摘要");
-    println!("{}", "-".repeat(60));
-    for r in &list {
-        let started = chrono_fmt(r.started_at);
-        let duration = r.ended_at.map(|e| (e - r.started_at).max(0)).unwrap_or(0);
-        let quality = r.quality.as_deref().unwrap_or("-");
-        println!("{:>5}  {:<20}  {:>8}  segs={} quality={}", r.id, started, duration, r.segment_count, quality);
-    }
-    ExitCode::SUCCESS
-}
-
-fn cmd_export(id: Option<i64>, output: Option<&str>) -> ExitCode {
-    let Some(store) = open_store() else { return ExitCode::FAILURE };
-    let session_id = match id {
-        Some(i) => i,
-        None => match store.list_sessions(1) {
-            Ok(list) if !list.is_empty() => list[0].id,
-            _ => {
-                eprintln!("无会话记录");
-                return ExitCode::FAILURE;
-            }
-        },
-    };
-    let detail = match store.get_session(session_id) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("读取会话 #{session_id} 失败: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let md = talksage_session::export_markdown(&detail);
-    let path = output
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(format!("session-{session_id}.md")));
-    match std::fs::write(&path, &md) {
-        Ok(()) => {
-            println!("已导出会话 #{session_id}（{} 段）→ {}", detail.segments.len(), path.display());
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("写入 {} 失败: {e}", path.display());
-            ExitCode::FAILURE
-        }
-    }
-}
-
-fn chrono_fmt(unix_secs: i64) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
-    let Some(t) = UNIX_EPOCH.checked_add(Duration::from_secs(unix_secs as u64)) else {
-        return unix_secs.to_string();
-    };
-    let secs_today = unix_secs % 86400;
-    let h = secs_today / 3600;
-    let m = (secs_today % 3600) / 60;
-    let s = secs_today % 60;
-    let days = unix_secs / 86400;
-    let epoch_days = 719_162i64; // 1970-01-01 距离公历0001-01-01的天数
-    let z = days + epoch_days;
-    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if mo <= 2 { y + 1 } else { y };
-    let _ = t;
-    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02}")
-}

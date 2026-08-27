@@ -1,7 +1,7 @@
 //! TalkSage v2 结构化日志（tracing）。
 //!
 //! 输出：
-//! - 控制台：人类可读文本（级别着色）
+//! - 控制台：人类可读文本（级别着色），写到 **stderr**，避免污染命令 JSON/转写 stdout
 //! - 文件：`<data_dir>/logs/talksage.YYYY-MM-DD.log`，**JSON lines**（每行一个事件，AI Agent 可直接解析）
 //!   - `TALKSAGE_LOG_JSON=0` 时文件也用文本格式
 //!
@@ -60,7 +60,7 @@ pub fn init(data_dir: Option<&PathBuf>) -> LogGuard {
     if json_file {
         // 控制台文本 + 文件 JSON lines
         let console = tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stdout)
+            .with_writer(std::io::stderr)
             .with_span_events(FmtSpan::NONE);
         let file_layer = tracing_subscriber::fmt::layer()
             .json()
@@ -75,7 +75,7 @@ pub fn init(data_dir: Option<&PathBuf>) -> LogGuard {
     } else {
         // 双文本（控制台 + 文件）
         let console = tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stdout)
+            .with_writer(std::io::stderr)
             .with_span_events(FmtSpan::NONE);
         let file_layer = tracing_subscriber::fmt::layer()
             .with_span_events(FmtSpan::NONE)

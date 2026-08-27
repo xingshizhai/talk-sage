@@ -1,6 +1,6 @@
 [package]
 name = "talksage-cli"
-description = "TalkSage v2 launcher (web / serve / import / record / doctor / version)"
+description = "TalkSage v2 CLI (listen / session / import / record / doctor / version)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,9 +19,11 @@ talksage-llm = { path = "../talksage-llm" }
 talksage-knowledge = { path = "../talksage-knowledge" }
 talksage-plugins = { path = "../talksage-plugins" }
 talksage-session = { path = "../talksage-session" }
+talksage-notes = { path = "../talksage-notes" }
 talksage-server = { path = "../talksage-server" }
 talksage-logging = { path = "../talksage-logging" }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 log = "0.4"

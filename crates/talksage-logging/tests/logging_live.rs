@@ -8,6 +8,7 @@ fn init_writes_json_lines_to_log_file() {
         .join(format!("log-test-{}", std::process::id()));
     std::env::set_var("TALKSAGE_LOG_DIR", &dir);
     std::env::set_var("TALKSAGE_LOG", "debug");
+    std::env::set_var("RUST_LOG", "debug");
 
     let _guard = talksage_logging::init(None);
     log::info!("测试日志消息");
@@ -50,5 +51,6 @@ fn init_writes_json_lines_to_log_file() {
     // 清理
     std::env::remove_var("TALKSAGE_LOG_DIR");
     std::env::remove_var("TALKSAGE_LOG");
+    std::env::remove_var("RUST_LOG");
     let _ = std::fs::remove_dir_all(&dir);
 }
