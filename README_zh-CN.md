@@ -91,10 +91,9 @@ Paraformer、Zipformer 和 sherpa ONNX Whisper 已从产品模型列表移除；
 
 ```powershell
 .\scripts\talksage.ps1 env      # 环境检查
-.\scripts\talksage.ps1 build    # cargo + 前端（debug CLI）
-# 桌面 release：
-cd web
-npx tauri build --no-bundle
+.\scripts\talksage.ps1 build    # cargo + 前端（debug：CLI + 可独立运行的 debug App）
+.\scripts\talksage.ps1 build --release  # cargo + 前端（release，不打包安装器）
+.\scripts\talksage.ps1 run      # 运行桌面 debug 版；run --release 运行 release 版
 ```
 
 **macOS / Linux**
@@ -108,8 +107,9 @@ npx tauri build --no-bundle
 ### 3. 运行
 
 ```bash
-# 桌面应用（release）
-./scripts/talksage.ps1 run          # Windows
+# 桌面应用（默认 debug；加 --release 运行 release 版）
+./scripts/talksage.ps1 run              # Windows（debug）
+./scripts/talksage.ps1 run --release    # Windows（release）
 
 # CLI 实时转写（麦克风）
 cargo run -p talksage-cli -- listen --input mic

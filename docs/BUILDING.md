@@ -23,14 +23,15 @@
 # Windows
 .\scripts\talksage.ps1 env        # 环境检查（Rust/Node/模型/静态库）
 .\scripts\talksage.ps1 deps       # 下载依赖（模型 + sherpa 静态库 + 前端）
-.\scripts\talksage.ps1 build      # 全量编译（Rust + 前端）
-.\scripts\talksage.ps1 dev        # Tauri 开发模式（热更新）
-.\scripts\talksage.ps1 run        # 运行桌面 release 版
+.\scripts\talksage.ps1 build      # 全量编译（Rust + 前端，debug：CLI + 可独立运行的 debug App）
+.\scripts\talksage.ps1 build --release  # 全量编译 release（不打包安装器）
+.\scripts\talksage.ps1 dev        # Tauri 开发模式（热更新，debug）
+.\scripts\talksage.ps1 run        # 运行桌面 debug 版；run --release 运行 release 版
 .\scripts\talksage.ps1 serve      # headless 服务（浏览器访问 127.0.0.1:8080）
 .\scripts\talksage.ps1 listen     # CLI 实时转写（麦克风）
 .\scripts\talksage.ps1 import -wav 录音.wav   # 导入转写入库
 .\scripts\talksage.ps1 test       # 全量测试
-.\scripts\talksage.ps1 package    # 打包（NSIS/MSI）
+.\scripts\talksage.ps1 package    # 打包（release + NSIS/MSI）
 .\scripts\talksage.ps1 logs       # 查看最近日志
 .\scripts\talksage.ps1 clean      # 清理构建产物
 
@@ -47,9 +48,9 @@ chmod +x scripts/talksage.sh
 ./scripts/talksage.sh package
 ```
 
-> 注意：不要直接运行 `target/debug/talksage-app`。普通 `cargo build` 的 Tauri
-> debug 二进制会连接配置中的 `devUrl`，需要 Vite 开发服务器；直接执行只会得到
-> 空窗口。使用 `talksage.sh run/dev`，或通过 `talksage.sh package` 生成可独立运行的应用。
+> 注意：`tauri dev` 产出的 debug 二进制会连接配置中的 `devUrl`（需要 Vite 开发服务器），
+> 直接执行只会得到空窗口。脚本的 `build` 会额外以 `custom-protocol` feature 编译一个
+> 内嵌前端、可独立运行的 debug App；`run` 默认运行该 debug 版，`run --release` 运行 release 版。
 
 > 脚本内部命令（`python`/`npm`/`npx`/`cargo`）需在 PATH 中；代理通过 `$env:https_proxy` / `$env:http_proxy` 设置后运行即可。
 > 下面章节为手动步骤（脚本内部执行的等价操作），供定制/排障参考。

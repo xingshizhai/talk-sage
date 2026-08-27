@@ -24,10 +24,18 @@ $PSNativeCommandUseErrorActionPreference = $false
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
 
-# 定位 talksage.exe（release 优先）
-$exe = Join-Path $repo "target\release\talksage.exe"
-if (-not (Test-Path $exe)) { $exe = Join-Path $repo "target\debug\talksage.exe" }
-if (-not (Test-Path $exe)) {
+# 定位 talksage.exe（release 优先）。产物可能在 C:\wt（脚本默认 CARGO_TARGET_DIR）、
+# 外部 CARGO_TARGET_DIR 或项目 target\ 下，按优先级搜索。
+$exe = ""
+foreach ($d in @($env:CARGO_TARGET_DIR, "C:\wt", (Join-Path $repo "target"))) {
+    if (-not $d) { continue }
+    foreach ($profile in @("release", "debug")) {
+        $p = Join-Path $d "$profile\talksage.exe"
+        if (Test-Path $p) { $exe = $p; break }
+    }
+    if ($exe) { break }
+}
+if (-not $exe) {
     Write-Error "未找到 talksage.exe，请先构建: scripts\talksage.ps1 build"
     exit 1
 }

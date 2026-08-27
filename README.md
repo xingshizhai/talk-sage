@@ -94,10 +94,9 @@ The default high-accuracy path is segment-level local GPU ASR: Windows x64 uses 
 
 ```powershell
 .\scripts\talksage.ps1 env      # environment check
-.\scripts\talksage.ps1 build    # cargo + frontend (debug CLI)
-# desktop app (release):
-cd web
-npx tauri build --no-bundle
+.\scripts\talksage.ps1 build    # cargo + frontend (debug: CLI + runnable debug app)
+.\scripts\talksage.ps1 build --release  # cargo + frontend (release, no installer)
+.\scripts\talksage.ps1 run      # run desktop app (debug); add --release for release
 ```
 
 `talksage.ps1 dev / build / package` automatically detects and sets the Vulkan build environment (Vulkan SDK, LIBCLANG_PATH, a short `CARGO_TARGET_DIR=C:\wt` to avoid the Windows MAX_PATH limit with `vulkan-shaders-gen`, and static-CRT RUSTFLAGS). If your Vulkan SDK or LLVM are installed in non-default paths, copy [`scripts/talksage.local.example.ps1`](scripts/talksage.local.example.ps1) to `scripts/talksage.local.ps1` (gitignored) and set your paths there — it is sourced automatically before every command.
@@ -113,8 +112,9 @@ See [BUILDING.md](docs/BUILDING.md) for full manual steps (static sherpa-onnx li
 ### 3. Run
 
 ```bash
-# Desktop app (release build)
-./scripts/talksage.ps1 run          # Windows
+# Desktop app (debug by default; add --release for the release build)
+./scripts/talksage.ps1 run              # Windows (debug)
+./scripts/talksage.ps1 run --release    # Windows (release)
 
 # CLI live transcription (mic)
 cargo run -p talksage-cli -- listen --input mic

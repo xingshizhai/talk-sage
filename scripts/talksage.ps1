@@ -4,9 +4,11 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
 用法:
   .\scripts\talksage.ps1 env                 # 环境检查（Rust/Node/模型/静态库）
   .\scripts\talksage.ps1 deps                # 下载依赖（模型 + sherpa 静态库）
-  .\scripts\talksage.ps1 build               # 全量编译（Rust + 前端）
-  .\scripts\talksage.ps1 dev                 # Tauri 开发模式（热更新）
-  .\scripts\talksage.ps1 run                 # 运行桌面 release 版
+  .\scripts\talksage.ps1 build               # 全量编译（Rust + 前端，debug）
+  .\scripts\talksage.ps1 build --release     # 全量编译 release（不打包安装器）
+  .\scripts\talksage.ps1 dev                 # Tauri 开发模式（热更新，debug）
+  .\scripts\talksage.ps1 run                 # 运行桌面 debug 版
+  .\scripts\talksage.ps1 run --release       # 运行桌面 release 版
   .\scripts\talksage.ps1 serve [-host H] [-port P]   # headless 服务（浏览器访问）
   .\scripts\talksage.ps1 listen [-wav F] [-engine E] [-client C] [-save]  # CLI 转写
   .\scripts\talksage.ps1 import [-wav F] [-engine E]   # 导入转写入库
@@ -15,9 +17,15 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
   .\scripts\talksage.ps1 loop              # 录音测试闭环（裁剪 + 回放验证）
   .\scripts\talksage.ps1 doctor               # 环境诊断（talksage doctor）
   .\scripts\talksage.ps1 test                 # 全量测试（Rust + Vitest）
-  .\scripts\talksage.ps1 package              # 打包（NSIS/MSI）
+  .\scripts\talksage.ps1 package              # 打包（release + NSIS/MSI 安装器）
   .\scripts\talksage.ps1 logs                 # 查看最近日志
   .\scripts\talksage.ps1 clean                # 清理构建产物（target/dist/node_modules）
+
+构建模式:
+  debug   （build / run 默认; dev）: 编译快、无优化，适合开发调试；
+          build 同时产出 debug CLI（serve/listen 等命令用）和 debug App（run 用）
+  release （build --release / package; run --release）: 全量优化、运行快；
+          必须显式加 --release 才构建/运行 release 版，不做自动降级
 
 环境变量自动设置（本脚本进程内）:
   CARGO_HOME=$PWD\.cargo-home  SHERPA_ONNX_ARCHIVE_DIR=$PWD\.tools\sherpa-onnx-archives
@@ -71,8 +79,27 @@ $env:TALKSAGE_MODELS_DIR = Join-Path $Root "models"
 $CargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
 if (Test-Path $CargoBin) { $env:Path = "$CargoBin;" + $env:Path }
 
-$CliExe = Join-Path $Root "target\debug\talksage.exe"
-$ReleaseExe = Join-Path $Root "target\release\talksage-app.exe"
+# 构建产物路径解析。产物实际位置取决于最近一次构建的环境：
+#   - Ensure-VulkanEnv 默认把 CARGO_TARGET_DIR 设为 C:\wt（短路径，避免 MAX_PATH）；
+#   - 外部已设 CARGO_TARGET_DIR 时以外部值为准；
+#   - 未设且未经脚本构建（手动 cargo build）时在项目 target\ 下。
+# 因此查找产物时按优先级搜索：显式 CARGO_TARGET_DIR → C:\wt → 项目 target。
+function Get-TargetDir {
+    # 本次构建实际写入的目录（消息展示用）
+    if ($env:CARGO_TARGET_DIR) { return $env:CARGO_TARGET_DIR }
+    return Join-Path $Root "target"
+}
+function Find-Exe([string]$profile, [string]$name) {
+    foreach ($d in @($env:CARGO_TARGET_DIR, "C:\wt", (Join-Path $Root "target"))) {
+        if (-not $d) { continue }
+        $p = Join-Path $d "$profile\$name"
+        if (Test-Path $p) { return $p }
+    }
+    return Join-Path (Get-TargetDir) "$profile\$name"
+}
+function Get-CliExe     { Find-Exe "debug"   "talksage.exe" }
+function Get-DebugApp   { Find-Exe "debug"   "talksage-app.exe" }
+function Get-ReleaseApp { Find-Exe "release" "talksage-app.exe" }
 
 # 本机环境覆盖（不入库）：复制 scripts\talksage.local.example.ps1 为 talksage.local.ps1
 # 并按需修改路径，用于 Vulkan SDK / LLVM 安装到非默认位置的情况。
@@ -172,16 +199,36 @@ function Cmd-Deps {
 }
 
 function Cmd-Build {
+    $release = $Rest -contains "--release" -or $Rest -contains "-release"
     Ensure-VulkanEnv
-    Write-Step "全量编译（cargo + 前端）"
-    $code = Invoke-Native { cargo build --workspace }
-    if ($code -ne 0) { Write-Host "cargo 编译失败" -ForegroundColor Red; return 1 }
+    if ($release) {
+        Write-Step "全量编译（release + 前端，不打包安装器）"
+    } else {
+        Write-Step "全量编译（debug + 前端）"
+    }
+    # 先构建前端：tauri-build 在编译期把 web\dist 嵌入 App 二进制（缺失会编译失败）
     Write-Host "`n构建前端（web/dist）..."
     Push-Location (Join-Path $Root "web")
     $code2 = Invoke-Native { npm run build }
     Pop-Location
     if ($code2 -ne 0) { Write-Host "前端构建失败" -ForegroundColor Red; return 1 }
-    Write-Host "`n编译完成: target\debug\talksage.exe"
+
+    # 工作区编译产出 CLI（serve/listen 等命令用）；App 单独以 custom-protocol
+    # feature 编译：不开该 feature 时 tauri 处于 dev 模式，App 独立启动会去连
+    # Vite dev server（localhost:1420）导致空白窗口，无法脱离 dev 单独运行。
+    if ($release) {
+        $code = Invoke-Native { cargo build --workspace --release --exclude talksage-app }
+        if ($code -ne 0) { Write-Host "cargo 编译失败" -ForegroundColor Red; return 1 }
+        $code = Invoke-Native { cargo build -p talksage-app --release --features "tauri/custom-protocol" }
+        if ($code -ne 0) { Write-Host "cargo 编译失败（App）" -ForegroundColor Red; return 1 }
+        Write-Host "`n编译完成: $(Get-ReleaseApp)（release App）+ $(Join-Path (Get-TargetDir) 'release\talksage.exe')（release CLI）"
+    } else {
+        $code = Invoke-Native { cargo build --workspace --exclude talksage-app }
+        if ($code -ne 0) { Write-Host "cargo 编译失败" -ForegroundColor Red; return 1 }
+        $code = Invoke-Native { cargo build -p talksage-app --features "tauri/custom-protocol" }
+        if ($code -ne 0) { Write-Host "cargo 编译失败（App）" -ForegroundColor Red; return 1 }
+        Write-Host "`n编译完成: $(Get-CliExe)（debug CLI）+ $(Get-DebugApp)（debug App）"
+    }
     $cfgDir = $env:TALKSAGE_DATA_DIR
     if (-not (Test-Path (Join-Path $cfgDir "talksage.toml"))) {
         Write-Host "提示: 尚未初始化配置文件，运行 .\scripts\talksage.ps1 dev 会自动从模板创建:" -ForegroundColor Yellow
@@ -254,13 +301,25 @@ function Cmd-Run {
     # 恢复代理：应用内 HuggingFace 模型下载需要
     if ($_SavedHttpProxy)  { $env:HTTP_PROXY  = $_SavedHttpProxy }
     if ($_SavedHttpsProxy) { $env:HTTPS_PROXY = $_SavedHttpsProxy }
-    if (-not (Test-Path $ReleaseExe)) {
-        Write-Host "release 未构建，先运行: .\scripts\talksage.ps1 package（或 build 后手动构建 release）" -ForegroundColor Yellow
-        Write-Host "快速 release 构建: cd web; npx tauri build --no-bundle"
+    # 默认运行 debug 版；显式加 --release 才运行 release 版（不做自动降级）
+    $release = $Rest -contains "--release" -or $Rest -contains "-release"
+    if ($release) {
+        $exe = Get-ReleaseApp
+        if (-not (Test-Path $exe)) {
+            Write-Host "未找到 release 版（$exe），请先运行: .\scripts\talksage.ps1 build --release（或 package 打包安装器）" -ForegroundColor Yellow
+            return 1
+        }
+        Write-Step "运行桌面应用（release）"
+        Start-Process $exe
+        return
+    }
+    $exe = Get-DebugApp
+    if (-not (Test-Path $exe)) {
+        Write-Host "未找到 debug 版（$exe），请先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow
         return 1
     }
-    Write-Step "运行桌面应用（release）"
-    Start-Process $ReleaseExe
+    Write-Step "运行桌面应用（debug）"
+    Start-Process $exe
 }
 
 function Cmd-Serve {
@@ -274,9 +333,9 @@ function Cmd-Serve {
         Write-Host "缺少 web\dist，先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow
         return 1
     }
-    if (-not (Test-Path $CliExe)) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
+    if (-not (Test-Path (Get-CliExe))) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
     Write-Step "headless 服务 http://${host}:${port}"
-    $null = Invoke-Native { & $CliExe serve --host $host --port $port }
+    $null = Invoke-Native { & (Get-CliExe) serve --host $host --port $port }
 }
 
 function Cmd-Listen {
@@ -288,13 +347,13 @@ function Cmd-Listen {
         if ($Rest[$i] -eq "-client" -and $i + 1 -lt $Rest.Count) { $client = $Rest[$i + 1] }
         if ($Rest[$i] -eq "-save") { $save = $true }
     }
-    if (-not (Test-Path $CliExe)) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
+    if (-not (Test-Path (Get-CliExe))) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
     $listenArgs = @("listen", "--input", "mic", "--engine", $engine)
     if ($wav) { $listenArgs[2] = $wav }
     if ($client) { $listenArgs += @("--client", $client) }
     if ($save) { $listenArgs += "--save" }
     Write-Step "CLI 转写: $($listenArgs -join ' ')"
-    $null = Invoke-Native { & $CliExe @listenArgs }
+    $null = Invoke-Native { & (Get-CliExe) @listenArgs }
 }
 
 function Cmd-Import {
@@ -305,9 +364,9 @@ function Cmd-Import {
         if ($Rest[$i] -eq "-engine" -and $i + 1 -lt $Rest.Count) { $engine = $Rest[$i + 1] }
     }
     if (-not $wav) { Write-Host "用法: .\scripts\talksage.ps1 import -wav <文件.wav> [-engine paraformer-zh|zipformer-en]"; return 1 }
-    if (-not (Test-Path $CliExe)) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
+    if (-not (Test-Path (Get-CliExe))) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
     Write-Step "导入转写: $wav"
-    $null = Invoke-Native { & $CliExe import $wav --engine $engine }
+    $null = Invoke-Native { & (Get-CliExe) import $wav --engine $engine }
 }
 
 function Cmd-Trim {
@@ -318,10 +377,10 @@ function Cmd-Trim {
         if ($Rest[$i] -eq "-preset" -and $i + 1 -lt $Rest.Count) { $preset = $Rest[$i + 1] }
     }
     if (-not $wav) { Write-Host "用法: .\scripts\talksage.ps1 trim -wav <录音.wav> [-out <输出.wav>] [-preset standard|sensitive|strict]"; return 1 }
-    if (-not (Test-Path $CliExe)) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
+    if (-not (Test-Path (Get-CliExe))) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
     Write-Step "静音裁剪: $wav"
-    if ($out) { $null = Invoke-Native { & $CliExe trim $wav -o $out --preset $preset } }
-    else { $null = Invoke-Native { & $CliExe trim $wav --preset $preset } }
+    if ($out) { $null = Invoke-Native { & (Get-CliExe) trim $wav -o $out --preset $preset } }
+    else { $null = Invoke-Native { & (Get-CliExe) trim $wav --preset $preset } }
 }
 
 function Cmd-Record {
@@ -331,22 +390,22 @@ function Cmd-Record {
         if ($Rest[$i] -eq "-dir" -and $i + 1 -lt $Rest.Count) { $dir = $Rest[$i + 1] }
         if ($Rest[$i] -eq "-input" -and $i + 1 -lt $Rest.Count) { $input = $Rest[$i + 1] }
     }
-    if (-not (Test-Path $CliExe)) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
+    if (-not (Test-Path (Get-CliExe))) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
     Write-Step "录制音频（不转写）: ${seconds}s input=$input"
-    if ($dir) { $null = Invoke-Native { & $CliExe record --seconds $seconds --dir $dir --input $input } }
-    else { $null = Invoke-Native { & $CliExe record --seconds $seconds --input $input } }
+    if ($dir) { $null = Invoke-Native { & (Get-CliExe) record --seconds $seconds --dir $dir --input $input } }
+    else { $null = Invoke-Native { & (Get-CliExe) record --seconds $seconds --input $input } }
 }
 
 function Cmd-Loop {
     # 录音测试闭环：裁剪 → 回放验证（见 scripts/recording_loop.ps1）
-    if (-not (Test-Path $CliExe)) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
+    if (-not (Test-Path (Get-CliExe))) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
     Write-Step "录音测试闭环（裁剪 + 回放验证）"
     $null = Invoke-Native { & (Join-Path $PSScriptRoot "recording_loop.ps1") @Rest }
 }
 
 function Cmd-Doctor {
-    if (-not (Test-Path $CliExe)) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
-    $null = Invoke-Native { & $CliExe doctor }
+    if (-not (Test-Path (Get-CliExe))) { Write-Host "先运行: .\scripts\talksage.ps1 build" -ForegroundColor Yellow; return 1 }
+    $null = Invoke-Native { & (Get-CliExe) doctor }
 }
 
 function Cmd-Test {
@@ -361,7 +420,7 @@ function Cmd-Package {
     $null = Invoke-Native { npx tauri build }
     Pop-Location
     Write-Host "`n产物:"
-    Get-ChildItem (Join-Path $Root "target\release\bundle") -Recurse -File -ErrorAction SilentlyContinue |
+    Get-ChildItem (Join-Path (Get-TargetDir) "release\bundle") -Recurse -File -ErrorAction SilentlyContinue |
         Select-Object @{n='Path';e={$_.FullName.Replace($Root + '\','')}}, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
 }
 
@@ -377,9 +436,24 @@ function Cmd-Logs {
 
 function Cmd-Clean {
     Write-Step "清理构建产物"
-    foreach ($d in @("target", "web\dist", "web\node_modules", ".cargo-home", ".tools")) {
+    foreach ($d in @("web\dist", "web\node_modules", ".cargo-home", ".tools")) {
         $p = Join-Path $Root $d
         if (Test-Path $p) { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue; Write-Host "  已删 $d" }
+    }
+    $projTarget = Join-Path $Root "target"
+    $seen = @{}
+    foreach ($d in @($env:CARGO_TARGET_DIR, "C:\wt", $projTarget)) {
+        if (-not $d -or $seen.ContainsKey($d)) { continue }
+        $seen[$d] = $true
+        if ($d -eq $projTarget) {
+            if (Test-Path $d) { Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue; Write-Host "  已删 target" }
+        } else {
+            # 外部 CARGO_TARGET_DIR（如 C:\wt）可能与其他项目共用，只删 debug/release 产物目录
+            foreach ($sub in @("debug", "release")) {
+                $p = Join-Path $d $sub
+                if (Test-Path $p) { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue; Write-Host "  已删 $d\$sub" }
+            }
+        }
     }
     Write-Host "清理完成（模型 models/ 保留）。"
 }
