@@ -70,7 +70,21 @@ Paraformer、Zipformer、旧 sherpa ONNX Whisper 已从产品模型目录和产�
 
 前端通过 `DomainEvent::ModelProgress` 接收 `downloading`、`extracting`、`done`、`cancelled`、`error`。发现重启前遗留 `.part` 时显示“点击可继续”。日志进度经过节流，不能按 256 KiB 网络块逐条输出。
 
-## 开发与测试
+## 开发与 CLI
+
+程序内下载仍是最终用户的推荐入口。无界面环境可用同一套实现：
+
+```bash
+talksage models list
+talksage models download qwen3-asr
+talksage models download whisper-large-v3-turbo-metal
+talksage models remove punct --yes
+talksage models gpu
+```
+
+删除必须 `--yes`。`list` / `gpu` 支持 `--json`。完整命令见 [cli.md](cli.md)。
+
+开发、CI 和离线预置仍用脚本：
 
 ```bash
 # 当前产品模型与公共模型

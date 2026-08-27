@@ -34,7 +34,7 @@
 - **Recording & testing loop** — every session keeps raw mono PCM per input stream and exposes one main recording for playback (single-stream reuse; dual-stream stereo with microphone left/system audio right); `talksage trim` supports regression preparation
 - **Session quality assessment** — automatic noise/silence detection per session (configurable thresholds + auto background-noise calibration); noisy sessions skip downstream analysis
 - **Runtime noise control** — adjust the mic noise gate live from the left panel *while listening*, no restart
-- **History** — SQLite sessions with search, per-segment duration/RMS stats, quality badges; **each session auto-saves a runtime snapshot** (scene mode / ASR engines / VAD / denoise / min-commit / gain / speaker mode / app version) so you can compare transcription quality across models & parameters afterwards, or replay the recorded audio with the same config (visible in History detail and `talksage session <id>`)
+- **History** — SQLite sessions with search, per-segment duration/RMS stats, quality badges; **each session auto-saves a runtime snapshot** (scene mode / ASR engines / VAD / denoise / min-commit / gain / speaker mode / app version) so you can compare transcription quality across models & parameters afterwards, or re-run ASR with `talksage session replay <id>` (History detail and `talksage session show <id>`)
 - **Two carriers** — Tauri 2 desktop app (IPC) and a headless HTTP/WS server (browser access, token-protected)
 - **System tray** — Windows: minimizing hides the window into the tray (click the icon to restore); macOS: follows platform conventions with a menu-bar icon that toggles the window
 - **Fixed-corpus benchmark** — `talksage bench` streams through `*.wav` corpora (engine pool warm start, model reused in-process) and reports **CER/WER accuracy + real-time factor (RTF) + first-token latency** for regression testing (borrows WhisperLiveKit's bench)
@@ -125,8 +125,10 @@ See [BUILDING.md](docs/BUILDING.md) for full manual steps (static sherpa-onnx li
 # CLI live transcription (mic)
 cargo run -p talksage-cli -- listen --input mic
 
-# CLI from a recorded wav (no GUI needed)
+# CLI from a recorded wav (no GUI; print only)
 talksage listen --input meeting.wav
+talksage transcribe meeting.wav --save          # transcribe and save as a new session
+talksage session replay 8                       # re-transcribe a session's recording into a new session
 
 # Headless web service (browser → http://127.0.0.1:8080)
 talksage serve --host 127.0.0.1 --port 8080
@@ -149,16 +151,20 @@ curl http://127.0.0.1:8080/v1/audio/transcriptions \
 | Tune mic level / noise gate | Left panel while listening: 麦克风电平 meter + noise-gate threshold slider (live, no restart) |
 | Trim silence from a recording | `talksage trim rec.wav [-o out.wav] [--preset sensitive\|standard\|strict]` |
 | Record raw audio only | `talksage record --seconds 60 [--input loopback]` |
-| Import audio offline | `talksage import audio.wav` |
+| Offline transcription | `talksage transcribe audio.wav` (`--save` to persist); `talksage import audio.wav` is the `--save` alias |
 | Doctor / diagnostics | `talksage doctor` |
-| Session analysis | `talksage session <id>` (dump raw segments: timestamps/duration/text + duplicate-segment detection to debug repeated recognition); `--dup-only` for duplicates only |
+| Sessions | `talksage session list/show/search/rename/delete/export/notes/trio`; `talksage session <id>` is show |
+| Re-transcribe a session | `talksage session replay <id> [--engine qwen3-asr]` (saves a new session) |
+| Models | `talksage models list/download/remove/gpu` (`remove` requires `--yes`) |
+| Config | `talksage config path`; `config get [dotted.path]`; `config set <path> <value>` (secrets masked) |
+| Logs | `talksage logs [--lines 200]` |
 | Offline speaker timeline | `talksage diarize audio.wav [--speakers N]` (pyannote segmentation + WeSpeaker clustering) |
 | Fixed-corpus benchmark | `talksage bench [--dir corpus] [--engine paraformer-zh\|zipformer-en] [--limit N]` (CER/WER, RTF, first-token latency) |
 | Short-segment suppression | Settings → 音频处理 → 最短提交时长 (ms, 0 = off); or `[audio] min_segment_ms` in config |
 
 ### The recording → trim → replay loop
 
-Every listening session auto-saves raw wav per stream to `<data_dir>/recordings/`. Use them as regression material:
+Every listening session auto-saves raw wav per stream to `<data_dir>/sessions/<id>/recordings/` (`talksage record` still writes `<data_dir>/recordings/`). Use them as regression material:
 
 ```powershell
 .\scripts\recording_loop.ps1        # trim all recordings + replay through real ASR
@@ -197,7 +203,7 @@ Meeting mode enables online speaker clustering when the WeSpeaker model is insta
 | `talksage-session` | SQLite storage, compatible schema migration, quality evaluation |
 | `talksage-notes` | Minutes templates + generator |
 | `talksage-server` | axum headless service (REST + WS + SPA) |
-| `talksage-cli` | Launcher: listen / trim / record / import / serve / doctor / bench |
+| `talksage-cli` | Launcher: listen / transcribe / session / models / config / logs / serve / doctor |
 | `web/` | Tauri 2 shell + React/Vite/TS UI |
 
 ## Testing
@@ -218,6 +224,7 @@ Real-model integration tests cover Chinese/English ASR, dual-stream fairness and
 - [plugin-development.md](docs/plugin-development.md) — plugin lifecycle, implementation guide, testing checklist, and mechanism assessment
 - [BUILDING.md](docs/BUILDING.md) — build & packaging guide
 - [vulkan-gpu-build.md](docs/vulkan-gpu-build.md) — Windows Vulkan GPU build: toolchain, CRT linking, troubleshooting
+- [cli.md](docs/cli.md) — CLI: sessions, transcription, models, config, logs
 - [RECORDING.md](docs/RECORDING.md) — recording / trim / regression loop
 - [LOGGING.md](docs/LOGGING.md) — structured logging & debugging
 - [testing.md](docs/testing.md) — automated testing strategy

@@ -1,5 +1,6 @@
 # TalkSage 配置模板
 # 复制本文件为 talksage.toml 并放置于数据目录（默认 ~/.talksage/talksage.toml）
+# 也可用：talksage config path / get / set（点路径，如 asr.engine_zh）
 # 所有字段均可省略，省略时使用内置默认值。
 # 敏感字段（API Key 等）建议用环境变量覆盖：TALKSAGE_LLM_API_KEY=xxx
 

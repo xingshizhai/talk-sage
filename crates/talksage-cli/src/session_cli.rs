@@ -1,6 +1,6 @@
-//! 会话子命令：list / show / search / rename / delete / export / notes / trio。
+//! 会话子命令：list / show / search / rename / delete / export / notes / trio / replay。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::json;
@@ -51,6 +51,7 @@ fn run(action: SessionAction, json: bool, dest: ExportDest) -> ExitCode {
         SessionAction::Export { id, format, output } => cmd_export(id, format, output.as_deref(), json, dest),
         SessionAction::Notes { id, template } => cmd_notes(id, &template, json),
         SessionAction::Trio { id, name, desc } => cmd_trio(id, name.as_deref(), desc.as_deref(), json),
+        SessionAction::Replay { id, engine } => cmd_replay(id, engine.as_deref(), json),
     }
 }
 
@@ -463,6 +464,93 @@ fn cmd_trio(id: i64, name: Option<&str>, desc: Option<&str>, json: bool) -> Exit
     )
 }
 
+fn cmd_replay(id: i64, engine: Option<&str>, json: bool) -> ExitCode {
+    let store = match open_store() {
+        Ok(s) => s,
+        Err(e) => return fail(json, e),
+    };
+    let detail = match store.get_session(id) {
+        Ok(d) => d,
+        Err(e) => return fail(json, format!("读取会话 #{id} 失败: {e}")),
+    };
+    let data_dir = talksage_config::default_data_dir();
+    let wav = match resolve_replay_wav(&detail, &data_dir) {
+        Ok(p) => p,
+        Err(e) => return fail(json, e),
+    };
+    let engine = replay_engine(engine, &detail);
+    if !json {
+        println!(
+            "回放会话 #{id} → {}（引擎 {engine}，保存为新会话）",
+            wav.display()
+        );
+    }
+    crate::transcribe_cli::run(&wav.to_string_lossy(), &engine, true, "回放", json)
+}
+
+fn replay_engine(explicit: Option<&str>, detail: &talksage_session::SessionDetail) -> String {
+    if let Some(e) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        return e.to_string();
+    }
+    detail
+        .meta
+        .as_ref()
+        .and_then(|m| m.runtime_info.as_ref())
+        .map(|ri| ri.user_engine.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "qwen3-asr".into())
+}
+
+fn resolve_replay_wav(
+    detail: &talksage_session::SessionDetail,
+    data_dir: &Path,
+) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    if let Some(meta) = &detail.meta {
+        if let Some(p) = &meta.master_recording {
+            candidates.push(PathBuf::from(p));
+        }
+        for stream in &meta.streams {
+            if let Some(p) = &stream.recording {
+                candidates.push(PathBuf::from(p));
+            }
+        }
+    }
+    for p in &candidates {
+        let abs = if p.is_absolute() {
+            p.clone()
+        } else {
+            data_dir.join(p)
+        };
+        if abs.is_file() {
+            return Ok(abs);
+        }
+    }
+    let rec_dir = talksage_config::session_recordings_dir(data_dir, detail.id);
+    if rec_dir.is_dir() {
+        let mut wavs: Vec<_> = std::fs::read_dir(&rec_dir)
+            .map_err(|e| format!("读取录音目录失败: {e}"))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("wav")))
+            .collect();
+        wavs.sort();
+        if let Some(master) = wavs.iter().find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.contains("master"))
+        }) {
+            if master.is_file() {
+                return Ok(master.clone());
+            }
+        }
+        if let Some(p) = wavs.into_iter().find(|p| p.is_file()) {
+            return Ok(p);
+        }
+    }
+    Err("该会话没有可回放的录音（可能未开启录音，或录音文件缺失）".into())
+}
+
 fn chrono_fmt(unix_secs: i64) -> String {
     use std::time::{Duration, UNIX_EPOCH};
     let Some(_t) = UNIX_EPOCH.checked_add(Duration::from_secs(unix_secs as u64)) else {
@@ -537,5 +625,114 @@ mod tests {
         assert_eq!(store.get_session(id).unwrap().title.as_deref(), Some("新名"));
         store.delete_session(id).unwrap();
         assert!(store.get_session(id).is_err());
+    }
+
+    fn empty_detail(id: i64) -> talksage_session::SessionDetail {
+        talksage_session::SessionDetail {
+            id,
+            started_at: 0,
+            ended_at: None,
+            title: None,
+            segments: vec![],
+            terms: vec![],
+            translations: vec![],
+            key_points: vec![],
+            notes: None,
+            trio: None,
+            meta: None,
+        }
+    }
+
+    fn runtime(engine: &str) -> talksage_session::SessionRuntimeInfo {
+        talksage_session::SessionRuntimeInfo {
+            app_version: "0".into(),
+            scene_mode: "meeting".into(),
+            user_engine: engine.into(),
+            client_engine: None,
+            client_enabled: false,
+            vad_preset: "standard".into(),
+            vad_threshold: 0.5,
+            vad_min_silence_ms: None,
+            denoise_enabled: false,
+            min_segment_ms: 0,
+            input_gain_db: 0.0,
+            speaker_mode: "off".into(),
+            sample_rate: 16_000,
+        }
+    }
+
+    fn meta(
+        master: Option<&str>,
+        recording: Option<&str>,
+        engine: Option<&str>,
+    ) -> talksage_session::SessionMeta {
+        talksage_session::SessionMeta {
+            quality: "clean".into(),
+            skipped_analysis: false,
+            duration_ms: 0,
+            speech_ms: 0,
+            speech_ratio: 0.0,
+            avg_rms: 0.0,
+            max_rms: 0.0,
+            text_noise: 0.0,
+            master_recording: master.map(|s| s.into()),
+            streams: recording
+                .map(|p| talksage_session::StreamMeta {
+                    recording: Some(p.into()),
+                    ..Default::default()
+                })
+                .into_iter()
+                .collect(),
+            evaluated_at: 0,
+            runtime_info: engine.map(runtime),
+        }
+    }
+
+    #[test]
+    fn replay_engine_prefers_flag_then_snapshot() {
+        let mut detail = empty_detail(1);
+        detail.meta = Some(meta(None, None, Some("whisper-medium-metal")));
+        assert_eq!(replay_engine(Some("qwen3-asr"), &detail), "qwen3-asr");
+        assert_eq!(replay_engine(None, &detail), "whisper-medium-metal");
+        detail.meta = None;
+        assert_eq!(replay_engine(None, &detail), "qwen3-asr");
+    }
+
+    #[test]
+    fn resolve_replay_wav_uses_master_then_stream_then_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "talksage-replay-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let master = dir.join("master.wav");
+        let stream = dir.join("track.wav");
+        std::fs::write(&master, b"m").unwrap();
+        std::fs::write(&stream, b"s").unwrap();
+
+        let mut detail = empty_detail(7);
+        detail.meta = Some(meta(
+            Some(master.to_str().unwrap()),
+            Some(stream.to_str().unwrap()),
+            None,
+        ));
+        assert_eq!(resolve_replay_wav(&detail, &dir).unwrap(), master);
+
+        std::fs::remove_file(&master).unwrap();
+        assert_eq!(resolve_replay_wav(&detail, &dir).unwrap(), stream);
+
+        std::fs::remove_file(&stream).unwrap();
+        let rec_dir = talksage_config::session_recordings_dir(&dir, 7);
+        std::fs::create_dir_all(&rec_dir).unwrap();
+        let fallback = rec_dir.join("session-7_master.wav");
+        std::fs::write(&fallback, b"f").unwrap();
+        detail.meta = None;
+        assert_eq!(resolve_replay_wav(&detail, &dir).unwrap(), fallback);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

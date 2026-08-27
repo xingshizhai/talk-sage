@@ -1,7 +1,7 @@
 //! TalkSage v2 launcher。
 //!
 //! 结构参考 DeepSeek Harness：`dsh --profile web` 之类的启动器入口。
-//! 已实现：version / doctor / listen / session / models / transcribe。
+//! 已实现：version / doctor / listen / session / models / transcribe / config / logs。
 
 use std::process::ExitCode;
 
@@ -14,6 +14,7 @@ mod args;
 mod session_cli;
 mod models_cli;
 mod transcribe_cli;
+mod config_cli;
 
 use clap::Parser;
 
@@ -53,6 +54,8 @@ fn main() -> ExitCode {
         Command::Import { path, engine, speaker } => transcribe_cli::run(&path, &engine, true, &speaker, cli.json),
         Command::Transcribe { path, engine, save, speaker } => transcribe_cli::run(&path, &engine, save, &speaker, cli.json),
         Command::Models(args) => models_cli::dispatch(args, cli.json),
+        Command::Config(args) => config_cli::dispatch(args, cli.json),
+        Command::Logs { lines } => config_cli::logs(lines, cli.json),
         Command::Sessions { limit } => session_cli::list_alias(limit, cli.json),
         Command::Session(args) => session_cli::dispatch(args, cli.json),
         Command::Export { id, output } => session_cli::export_alias(id, output, cli.json),

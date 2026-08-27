@@ -125,7 +125,7 @@ flowchart TB
 ```
 talksage/
 ├── crates/
-│   ├── talksage-cli/          # launcher：run / serve / listen / import / bench / doctor
+│   ├── talksage-cli/          # launcher：listen / transcribe / session / models / config / logs / serve
 │   ├── talksage-core/         # DomainEvent、AudioClock、TranscriptState、DeliveryClass
 │   ├── talksage-audio/        # AudioHub / LoopbackCapture、有界采集队列、WAV
 │   ├── talksage-asr/          # SegmentEngine（流式 + 离线段级）+ EnginePool
@@ -359,7 +359,7 @@ enum DomainEvent {
 
 ## 13. 配置管理（talksage-config）
 
-分层合并（简化版 DSH patch 思想）：**内置默认 → 用户 `talksage.toml` → 环境变量 → CLI 参数**。配置域：
+分层合并（简化版 DSH patch 思想）：**内置默认 → 用户 `talksage.toml` → 环境变量 → CLI 参数**。桌面设置页与 CLI `talksage config get/set` 共用 `apply_updates`；CLI 出口密钥打码（与 headless 相同）。`talksage config path` 打印配置文件与数据/日志目录。配置域：
 
 ```toml
 [asr]
@@ -546,7 +546,8 @@ token = ""
 |---|---|
 | 桌面 / headless 监听 | `StartListen::desktop()` → `service.start` → `SessionRuntime` |
 | CLI `listen` | 同上（共用引擎池）；`--client` 才开双流，否则 `ClientCapture::Off` |
-| CLI `import` | `StartListen::import_file` → Service（不再自建 Pipeline） |
+| CLI `import` / `transcribe --save` | `StartListen::import_file` → Service（不再自建 Pipeline） |
+| CLI `session replay` | 解析会话 master 录音后走 `transcribe --save`，另存新会话 |
 | bench / OpenAI `/v1/audio/transcriptions` | `offline::transcribe_file` → `SessionRuntime` |
 
 `ClientCapture::Auto`：场景允许客户流且 Windows → 回环；非 Windows **明确降级为单流并记日志**，不改用麦克风。

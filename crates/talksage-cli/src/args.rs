@@ -90,13 +90,20 @@ pub enum Command {
     },
     /// 模型：list / download / remove / gpu。
     Models(ModelsArgs),
+    /// 配置：path / get / set。
+    Config(ConfigArgs),
+    /// 打印最近日志（默认 200 行）。
+    Logs {
+        #[arg(short, long, default_value_t = 200)]
+        lines: usize,
+    },
     /// 列出最近的会话（`session list` 的别名）。
     Sessions {
         /// 最多显示几条（默认 20）
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
-    /// 会话：list / show / search / rename / delete / export / notes / trio。
+    /// 会话：list / show / search / rename / delete / export / notes / trio / replay。
     /// 兼容旧用法：`talksage session <id>` 等同 `session show <id>`。
     Session(SessionArgs),
     /// 导出会话为 Markdown（`session export --format md` 的别名；默认写当前目录）。
@@ -184,6 +191,30 @@ pub enum ModelsAction {
 }
 
 #[derive(Args, Debug)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConfigAction {
+    /// 打印配置文件与数据目录路径。
+    Path,
+    /// 读取配置（省略路径则打印全部；密钥已打码）。
+    Get {
+        /// 点路径，如 asr.engine_zh、llm.default
+        path: Option<String>,
+    },
+    /// 写入配置项并保存到 talksage.toml。
+    Set {
+        /// 点路径，如 asr.engine_zh
+        path: String,
+        /// 值（true/false/数字/JSON，其余当字符串）
+        value: String,
+    },
+}
+
+#[derive(Args, Debug)]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct SessionArgs {
     #[command(subcommand)]
@@ -249,6 +280,13 @@ pub enum SessionAction {
         #[arg(long)]
         desc: Option<String>,
     },
+    /// 用该会话录音再转写，保存为新会话。
+    Replay {
+        id: i64,
+        /// 引擎；省略则用原会话快照中的引擎
+        #[arg(long)]
+        engine: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -287,7 +325,7 @@ impl SessionArgs {
                     dup_only: self.dup_only,
                 }),
                 None => Err(
-                    "请指定子命令（list / show / search / rename / delete / export / notes / trio）或会话 id".into(),
+                    "请指定子命令（list / show / search / rename / delete / export / notes / trio / replay）或会话 id".into(),
                 ),
             },
         }
@@ -494,6 +532,66 @@ mod tests {
                 assert_eq!(engine, "qwen3-asr");
             }
             _ => panic!("expected import"),
+        }
+    }
+
+    #[test]
+    fn config_path_get_set_parse() {
+        let path = parse(&["talksage", "config", "path"]);
+        match path.command {
+            Command::Config(args) => assert!(matches!(args.command, ConfigAction::Path)),
+            _ => panic!("expected config"),
+        }
+
+        let all = parse(&["talksage", "config", "get"]);
+        match all.command {
+            Command::Config(args) => match args.command {
+                ConfigAction::Get { path } => assert!(path.is_none()),
+                other => panic!("unexpected {other:?}"),
+            },
+            _ => panic!("expected config"),
+        }
+
+        let get = parse(&["talksage", "config", "get", "asr.engine_zh"]);
+        match get.command {
+            Command::Config(args) => match args.command {
+                ConfigAction::Get { path } => assert_eq!(path.as_deref(), Some("asr.engine_zh")),
+                other => panic!("unexpected {other:?}"),
+            },
+            _ => panic!("expected config"),
+        }
+
+        let set = parse(&["talksage", "config", "set", "asr.engine_zh", "qwen3-asr"]);
+        match set.command {
+            Command::Config(args) => match args.command {
+                ConfigAction::Set { path, value } => {
+                    assert_eq!(path, "asr.engine_zh");
+                    assert_eq!(value, "qwen3-asr");
+                }
+                other => panic!("unexpected {other:?}"),
+            },
+            _ => panic!("expected config"),
+        }
+    }
+
+    #[test]
+    fn logs_and_session_replay_parse() {
+        let logs = parse(&["talksage", "logs", "--lines", "20"]);
+        match logs.command {
+            Command::Logs { lines } => assert_eq!(lines, 20),
+            _ => panic!("expected logs"),
+        }
+
+        let replay = parse(&["talksage", "session", "replay", "8", "--engine", "qwen3-asr"]);
+        match replay.command {
+            Command::Session(args) => match args.resolve().unwrap() {
+                SessionAction::Replay { id, engine } => {
+                    assert_eq!(id, 8);
+                    assert_eq!(engine.as_deref(), Some("qwen3-asr"));
+                }
+                other => panic!("unexpected {other:?}"),
+            },
+            _ => panic!("expected session"),
         }
     }
 }

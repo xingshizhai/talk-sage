@@ -1,6 +1,6 @@
 [package]
 name = "talksage-cli"
-description = "TalkSage v2 CLI (listen / session / import / record / doctor / version)"
+description = "TalkSage v2 CLI (listen / transcribe / session / models / config / logs)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

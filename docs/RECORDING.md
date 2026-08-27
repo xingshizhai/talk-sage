@@ -5,28 +5,32 @@
 形成闭环优化路径。
 
 ```
-真实会议监听 ──► recordings/*_我.wav / *_对方.wav（原始分轨）
+真实会议监听 ──► sessions/<id>/recordings/*_我.wav / *_对方.wav
                     │
                     ├──► session-<id>_master.wav（完整会话回放）
                     │
                     ▼ talksage trim（silero VAD 去静音）
               *.trimmed.wav（紧凑测试素材）
                     │
-                    ▼ talksage listen --input（真实模型回放验证）
+                    ▼ talksage listen --input（wav 回放验证，默认不落库）
               转写结果 / 事件 → 回归断言
+                    │
+                    ▼ talksage session replay <id>（用会话 master 再转写，另存新会话）
 ```
 
 ## 1. 监听时自动录音（默认开启）
 
 - 配置：`[recording] enabled = true`（设置页「会议录音」可开关/改目录）
-- 保存位置：`<data_dir>/recordings/`（`TALKSAGE_DATA_DIR` 或 `~/.talksage`）
+- 保存位置：
+  - 会话录音：`<data_dir>/sessions/<id>/recordings/`；双流另生成 `<data_dir>/sessions/<id>/session-<id>_master.wav`
+  - `talksage record`（只录音）：`<data_dir>/recordings/`
 - 命名：`2026-08-19_15-30-22_我.wav`、`2026-08-19_15-30-22_客户.wav`
   （用户流/客户流各一条，16kHz mono PCM16，记录的是**原始**音频——预处理前，
   便于之后对比降噪/高通效果）
 - 停止监听（或文件输入结束）时自动收尾写头；文件数/占用可用 `talksage doctor` 查看
 - 历史回放：单流会话直接复用原分轨；双流会话生成 `session-<id>_master.wav`，
-  左声道为麦克风、右声道为系统音频，短分轨尾部补静音。主录音用于正常回放，
-  两条 mono 原始分轨继续保留在“原始输入分轨”折叠区域用于诊断和模型评估。
+  左声道为麦克风、右声道为系统音频，短分轨尾部补静音。主录音用于正常回放与
+  `talksage session replay`，两条 mono 原始分轨继续保留用于诊断和模型评估。
 
 ## 2. 静音裁剪（去掉没有声音的部分）
 
@@ -64,14 +68,29 @@ talksage record --seconds 30 --input loopback   # 系统回环（会议软件里
 
 每个文件输出：裁剪统计 + 回放转写文本，最后汇总表（原始/裁剪大小、压缩率）。
 
-## 5. 用录音做回归测试
+## 5. 会话再转写（replay）
+
+已落库的会话可以用 master 录音再跑一遍 ASR，结果**另存为新会话**（不覆盖原记录）：
+
+```bash
+talksage session replay 8
+talksage session replay 8 --engine whisper-large-v3-turbo-metal
+talksage --json session replay 8
+```
+
+未指定 `--engine` 时用该会话运行环境快照里的 `user_engine`，再缺省 `qwen3-asr`。录音缺失（未开录音或文件已删）会失败。与 `talksage listen --input` / `transcribe` 的区别：replay 从会话元数据解析 wav，并始终 `--save`。
+
+命令一览见 [cli.md](cli.md)。
+
+## 6. 用录音做回归测试
 
 1. 把有价值且已脱敏授权的录音放入独立测试素材目录，不要混入模型目录；参考 `crates/talksage-pipeline/tests/pipeline_live.rs`
    的 `recording_saves_wav_files_for_each_stream` / `file_input_produces_status_and_segments`
    用例模式接入自动测试；
 2. `scripts\run_tests.ps1` 全量跑（Rust 单元/集成 + Vitest）；
 3. 新素材只需替换 wav 文件即可回归验证 ASR 与事件链路。
-## 6. 录音电平
+
+## 7. 录音电平
 
 麦克风采集会在录音和 ASR 前执行两步处理：
 

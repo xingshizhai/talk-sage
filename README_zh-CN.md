@@ -33,7 +33,7 @@
 - **录音与测试闭环**：每次监听按流保存原始 wav；`talksage trim` 用同一套 VAD 去掉静音；`scripts/recording_loop.ps1` 一键裁剪 + 回放验证
 - **会话质量评估**：自动判定会话为 正常/噪音/静音/待复核（阈值可配置 + 自动检测背景噪音校准）；噪音会话自动跳过要点聚合等下游分析
 - **运行时噪音控制**：监听中从左侧面板实时调节噪音电平阈值（麦克风电平表 + 滑块），无需停止或重启
-- **历史会话**：SQLite 存档，全文搜索、逐段时长/能量统计、质量徽章；**每次会话自动保存运行环境快照**（场景模式 / ASR 引擎 / VAD / 降噪 / 最短提交 / 增益 / 说话人模式 / 应用版本）——事后可对比不同模型与参数下的转写质量，或按相同配置用历史录音重放复现（历史详情与 `talksage session <id>` 均可查看）
+- **历史会话**：SQLite 存档，全文搜索、逐段时长/能量统计、质量徽章；**每次会话自动保存运行环境快照**（场景模式 / ASR 引擎 / VAD / 降噪 / 最短提交 / 增益 / 说话人模式 / 应用版本）——事后可对比不同模型与参数下的转写质量，或用 `talksage session replay <id>` 按相同/指定引擎再转写并另存新会话（历史详情与 `talksage session show <id>` 均可查看）
 - **双载体**：Tauri 2 桌面应用（IPC）与 headless HTTP/WS 服务（浏览器访问，Token 鉴权）
 - **系统托盘**：Windows 最小化即隐藏到右下角托盘（点击图标恢复）；macOS 遵循系统惯例，菜单栏常驻图标可快速显示/隐藏窗口
 - **固定语料评测**：`talksage bench` 对 `*.wav` 语料逐个跑流式转写（引擎池热启动，进程内复用模型），输出 **CER/WER 准确率 + 实时率 RTF + 首词延迟**，供模型/参数回归对比（借鉴 WhisperLiveKit bench）
@@ -120,8 +120,10 @@ Paraformer、Zipformer 和 sherpa ONNX Whisper 已从产品模型列表移除；
 # CLI 实时转写（麦克风）
 cargo run -p talksage-cli -- listen --input mic
 
-# CLI 回放 wav（无需 GUI）
+# CLI 回放 wav（无需 GUI；只打印，不落库）
 talksage listen --input meeting.wav
+talksage transcribe meeting.wav --save          # 转写并保存为新会话
+talksage session replay 8                       # 用历史会话录音再转写，另存新会话
 
 # headless Web 服务（浏览器访问 http://127.0.0.1:8080）
 talksage serve --host 127.0.0.1 --port 8080
@@ -144,15 +146,19 @@ curl http://127.0.0.1:8080/v1/audio/transcriptions \
 | 麦克风电平 / 噪音调节 | 监听中左侧面板：麦克风电平表 + 噪音电平阈值滑块（实时生效，无需重启） |
 | 录音去静音 | `talksage trim rec.wav [-o out.wav] [--preset sensitive\|standard\|strict]` |
 | 纯录音 | `talksage record --seconds 60 [--input loopback]` |
-| 离线导入 | `talksage import audio.wav` |
+| 离线转写 | `talksage transcribe audio.wav`（加 `--save` 落库）；`talksage import audio.wav` 是 `--save` 别名 |
 | 环境诊断 | `talksage doctor` |
-| 会话分析 | `talksage session <id>`（转储原始段：时间戳/时长/文本 + 疑似重复段检测，排查"识别重复"问题）；`--dup-only` 只看重复 |
+| 会话 | `talksage session list/show/search/rename/delete/export/notes/trio`；`talksage session <id>` 等同 show |
+| 会话再转写 | `talksage session replay <id> [--engine qwen3-asr]`（用该会话录音另存新会话） |
+| 模型 | `talksage models list/download/remove/gpu`（删除需 `--yes`） |
+| 配置 | `talksage config path`；`config get [点路径]`；`config set <点路径> <值>`（密钥打码） |
+| 日志 | `talksage logs [--lines 200]` |
 | 固定语料评测 | `talksage bench [--dir 语料目录] [--engine paraformer-zh\|zipformer-en] [--limit N]`（输出 CER/WER、RTF、首词延迟） |
 | 噪音短段抑制 | 设置 → 音频处理 → 最短提交时长（ms，0=不限制）；或配置 `[audio] min_segment_ms` |
 
 ### 录音 → 裁剪 → 回放闭环
 
-每次监听自动按流保存原始 wav 到 `<data_dir>/recordings/`，可直接作为回归测试素材：
+每次监听自动按流保存原始 wav 到 `<data_dir>/sessions/<id>/recordings/`（`talksage record` 仍写 `<data_dir>/recordings/`），可直接作为回归测试素材：
 
 ```powershell
 .\scripts\recording_loop.ps1        # 裁剪全部录音 + 真实 ASR 回放
@@ -185,7 +191,7 @@ AudioHub（cpal / WASAPI 回环）→ Preprocessor（降噪/高通/噪声门）
 | `talksage-session` | SQLite 存储 + 质量评估 |
 | `talksage-notes` | 纪要模板 + 生成器 |
 | `talksage-server` | axum headless 服务（REST + WS + SPA） |
-| `talksage-cli` | 启动器：listen / trim / record / import / serve / doctor / bench |
+| `talksage-cli` | 启动器：listen / transcribe / session / models / config / logs / serve / doctor |
 | `web/` | Tauri 2 壳 + React/Vite/TS 界面 |
 
 ## 自动化测试
@@ -202,6 +208,7 @@ cd web && npx vitest run       # 前端 27 用例
 
 - [architecture-v2.md](docs/architecture-v2.md) — v2 设计：双载体、共享服务、采样时钟、有界采集
 - [BUILDING.md](docs/BUILDING.md) — 编译与打包指南
+- [cli.md](docs/cli.md) — CLI：会话 / 转写 / 模型 / 配置 / 日志
 - [RECORDING.md](docs/RECORDING.md) — 录音/裁剪/回归闭环
 - [LOGGING.md](docs/LOGGING.md) — 结构化日志与排障
 - [testing.md](docs/testing.md) — 自动化测试策略
