@@ -100,6 +100,8 @@ fn zh_file_pipeline(root: &Path, wav: &Path) -> LivePipelineConfig {
             backend: talksage_asr::GpuBackend::None,
         },
         tokio_handle: None,
+        // 段级引擎的强制切分：这些用例锁的是既有行为，0 = 不限制（同 offline.rs）。
+        force_segment_ms: 0,
     }
 }
 
@@ -609,6 +611,7 @@ fn plugins_emit_term_and_translation_events() {
             backend: talksage_asr::GpuBackend::None,
         },
         tokio_handle: None,
+        force_segment_ms: 0,
     };
 
     let evs = run_and_collect(cfg);

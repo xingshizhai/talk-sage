@@ -149,6 +149,8 @@ fn zh_pipeline(root: &Path, wav: &Path, min_commit_ms: u64) -> LivePipelineConfi
             backend: talksage_asr::GpuBackend::None,
         },
         tokio_handle: None,
+        // 段级引擎的强制切分：这些用例锁的是既有行为，0 = 不限制（同 offline.rs）。
+        force_segment_ms: 0,
     }
 }
 
