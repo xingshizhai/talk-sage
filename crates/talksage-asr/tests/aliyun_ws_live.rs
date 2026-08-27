@@ -1,5 +1,10 @@
 /// 阿里云 WebSocket 实时语音识别端到端测试
 /// 运行：cargo test -p talksage-asr --test aliyun_ws_live -- --nocapture
+///
+/// 凭据取自 ALIYUN_ACCESS_ID / ALIYUN_ACCESS_SECRET / ALIYUN_APP_ID（或仓库根
+/// `.env`）；都没有时跳过，`TALKSAGE_REQUIRE_ALIYUN=1` 可把跳过变成失败。见 [`common`]。
+
+mod common;
 
 use std::sync::Arc;
 use talksage_asr::{SegmentEngine, aliyun::{TokenManager, AliyunEngine}};
@@ -13,9 +18,11 @@ fn sine_wave_samples(freq_hz: f32, duration_secs: f32, sample_rate: u32) -> Vec<
 
 #[test]
 fn aliyun_realtime_asr_connects_and_returns() {
-    let key_id = std::env::var("ALIYUN_ACCESS_ID").expect("ALIYUN_ACCESS_ID not set");
-    let key_secret = std::env::var("ALIYUN_ACCESS_SECRET").expect("ALIYUN_ACCESS_SECRET not set");
-    let app_key = std::env::var("ALIYUN_APP_ID").expect("ALIYUN_APP_ID not set");
+    let creds = match common::env_all(&["ALIYUN_ACCESS_ID", "ALIYUN_ACCESS_SECRET", "ALIYUN_APP_ID"]) {
+        Ok(v) => v,
+        Err(missing) => return common::skip(&format!("阿里云凭据未配置: {missing}")),
+    };
+    let (key_id, key_secret, app_key) = (creds[0].clone(), creds[1].clone(), creds[2].clone());
 
     // AliyunEngine 设计为在同步线程中使用，需要先建立一个 tokio runtime
     let rt = tokio::runtime::Runtime::new().unwrap();

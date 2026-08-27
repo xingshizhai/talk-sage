@@ -1,5 +1,10 @@
 /// 阿里云 Token 真实请求调试测试
 /// 运行：cargo test -p talksage-asr --test aliyun_token_live -- --nocapture
+///
+/// 凭据取自 ALIYUN_ACCESS_ID / ALIYUN_ACCESS_SECRET（或仓库根 `.env`）；
+/// 都没有时跳过，`TALKSAGE_REQUIRE_ALIYUN=1` 可把跳过变成失败。见 [`common`]。
+
+mod common;
 
 use talksage_asr::aliyun::token::{build_canonical_query, sign_hmac_sha1};
 use std::collections::BTreeMap;
@@ -7,8 +12,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[tokio::test]
 async fn fetch_token_from_aliyun() {
-    let key_id = std::env::var("ALIYUN_ACCESS_ID").expect("ALIYUN_ACCESS_ID not set");
-    let key_secret = std::env::var("ALIYUN_ACCESS_SECRET").expect("ALIYUN_ACCESS_SECRET not set");
+    let creds = match common::env_all(&["ALIYUN_ACCESS_ID", "ALIYUN_ACCESS_SECRET"]) {
+        Ok(v) => v,
+        Err(missing) => return common::skip(&format!("阿里云凭据未配置: {missing}")),
+    };
+    let (key_id, key_secret) = (creds[0].clone(), creds[1].clone());
 
     // 手动构建请求，打印完整响应
     let client = reqwest::Client::new();
