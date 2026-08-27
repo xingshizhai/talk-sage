@@ -66,6 +66,10 @@ export interface AppConfig {
     enabled: boolean;
     urls: string[];
   };
+  /** 网络代理（仅对模型下载 / LLM API / Webhook 生效；阿里云 ASR 始终直连）。 */
+  network: {
+    proxy: string;
+  };
   /** 场景模式是一组完整运行预设。 */
   scene: {
     mode: SceneMode;
@@ -261,6 +265,8 @@ export interface SessionRecord {
   id: number;
   started_at: number;
   ended_at: number | null;
+  /** 用户自定义会话名（null/未命名时界面回退到 "#id · 时间"）。 */
+  title?: string | null;
   segment_count: number;
   term_count: number;
   /** 会话质量：clean / noise / silent / low（老数据为 undefined）。 */
@@ -338,6 +344,8 @@ export interface SessionDetail {
   id: number;
   started_at: number;
   ended_at: number | null;
+  /** 用户自定义会话名（null = 未命名）。 */
+  title?: string | null;
   segments: { speaker_id: number; speaker_label: string; speaker_attribution?: SpeakerAttribution; text: string; ts_ms: number; duration_ms?: number; rms?: number }[];
   terms: string[];
   translations: string[];
@@ -383,6 +391,23 @@ export interface AsrRuntimeStatus {
   route_error?: string | null;
 }
 
+/** 在线检查更新结果（框架：只检查并返回信息，不自动安装）。 */
+export interface UpdateCheckResult {
+  available: boolean;
+  /** 更新源是否已配置（公钥/端点）；false = 在线升级尚未启用。 */
+  configured?: boolean;
+  current_version: string;
+  latest_version?: string | null;
+  message?: string;
+}
+
+/** 离线升级结果。 */
+export interface OfflineUpgradeResult {
+  ok: boolean;
+  version: string;
+  message: string;
+}
+
 /** 应用 API 表面。 */
 export interface AppApi {
   getVersion(): Promise<string>;
@@ -426,6 +451,8 @@ export interface AppApi {
   searchSessions(query: string): Promise<SegmentHit[]>;
   /** 历史：会话详情。 */
   getSession(id: number): Promise<SessionDetail>;
+  /** 历史：重命名会话；传空串 = 清除自定义名。 */
+  renameSession(id: number, title: string): Promise<void>;
   /** 历史：删除会话（含段/术语/翻译）。 */
   deleteSession(id: number): Promise<void>;
   /** 纪要：模板列表。 */
@@ -446,6 +473,8 @@ export interface AppApi {
   testLlm(opts: { provider: string; baseUrl?: string; model?: string; apiKey?: string }): Promise<void>;
   /** 验证阿里云 ASR 凭据（设置页「检查」按钮）：请求 NLS AccessToken。返回有效期秒数。 */
   testAliyunAsr(opts: { accessKeyId?: string; accessKeySecret?: string; appKey?: string }): Promise<{ ok: boolean; expire_at: number; valid_for_secs: number; app_key: string }>;
+  /** 验证代理可达性（设置页「测试」按钮）：通过配置的代理发送请求到 google.com。 */
+  testProxy(proxyUrl: string): Promise<string>;
   /** 调试：读取最近日志（尾部 N 行）。 */
   readLogs(lines?: number): Promise<string>;
   /** 订阅领域事件流，返回取消函数。 */
@@ -461,6 +490,12 @@ export interface AppApi {
   cancelFileImport(): Promise<void>;
   /** 订阅文件导入事件流（独立频道，不影响实时转写），返回取消函数。 */
   onImportEvent(handler: (ev: DomainEvent) => void): () => void;
+  /** 在线检查更新（框架：返回是否有新版本及提示，不自动安装）。 */
+  checkForUpdates(): Promise<UpdateCheckResult>;
+  /** 打开系统文件对话框，选择升级安装包（NSIS .exe / MSI）；取消时返回 null。 */
+  pickUpgradePackage(): Promise<string | null>;
+  /** 离线升级：校验安装包（版本/架构）后静默启动安装程序，应用随后退出。 */
+  installOfflineUpgrade(path: string): Promise<OfflineUpgradeResult>;
   /** 传输载体标识（调试用）。 */
   readonly transport: "ipc" | "http";
 }

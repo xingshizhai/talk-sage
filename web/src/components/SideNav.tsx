@@ -117,10 +117,16 @@ export default function SideNav({
       <div style={{ margin: "0 10px 10px", padding: "10px 11px", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
         <div style={{ fontSize: 10, letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 700, marginBottom: 7 }}>运行状态</div>
         {healthRows.map((h, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11, fontFamily: "monospace", color: "var(--text-2)", padding: "2px 0" }}>
-            <span style={{ width: 5, height: 5, borderRadius: "50%", background: h.dot }} />
-            <span>{h.label}</span>
-            <span style={{ marginLeft: "auto", color: "var(--text)" }}>{h.value}</span>
+          <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 7, fontSize: 11, fontFamily: "monospace", color: "var(--text-2)", padding: "2px 0" }}>
+            <span style={{ width: 5, height: 5, borderRadius: "50%", background: h.dot, flexShrink: 0, marginTop: 4 }} />
+            <span style={{ flexShrink: 0 }}>{h.label}</span>
+            {/* 值列：长文本（如 "Vulkan GPU (whisper.cpp)"）在 210px 侧栏内换行右对齐，不挤压标签 */}
+            <span
+              title={h.value}
+              style={{ marginLeft: "auto", minWidth: 0, color: "var(--text)", textAlign: "right", overflowWrap: "anywhere" }}
+            >
+              {h.value}
+            </span>
           </div>
         ))}
       </div>

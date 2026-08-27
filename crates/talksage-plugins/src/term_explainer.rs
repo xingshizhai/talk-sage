@@ -42,6 +42,27 @@ fn matched_user_terms(text: &str, terms: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// 判断 LLM 返回的是"无术语"兜底短语而非真实术语列表。
+/// 真实术语行含 `：` 或 `:`；兜底短语通常是一句话且不含冒号。
+fn is_no_term_response(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    // 明确的"无"类短语
+    if lower.contains("无专业术语")
+        || lower.contains("没有专业术语")
+        || lower.contains("无需解释")
+        || lower.contains("未发现")
+        || lower.contains("no term")
+        || lower.starts_with("none")
+        || lower.starts_with("无")
+        || lower.starts_with("没有")
+        || lower.starts_with("该")
+    {
+        return true;
+    }
+    // 整个响应不含冒号：不符合"术语：解释"格式，视为无效
+    !text.contains('：') && !text.contains(':')
+}
+
 // ── Plugin 状态 ──────────────────────────────────────────────────────────────
 
 pub struct TermExplainerPlugin {
@@ -87,6 +108,16 @@ impl TermExplainerPlugin {
             explained.insert(t.clone());
         }
     }
+
+    /// 发送空 Final 事件撤销骨架卡片；无骨架时返回 None。
+    fn dismiss_skeleton(&self) -> Option<DomainEvent> {
+        let result_id = self.pending_result_id.lock().unwrap().take()?;
+        Some(DomainEvent::Term {
+            result_id,
+            status: ResultStatus::Final,
+            content: String::new(),
+        })
+    }
 }
 
 // ── SegmentObserver ──────────────────────────────────────────────────────────
@@ -130,7 +161,7 @@ impl SegmentObserver for TermExplainerPlugin {
 
     fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> anyhow::Result<Option<DomainEvent>> {
         let Some(llm) = ctx.llm.as_ref() else {
-            return Ok(None);
+            return Ok(self.dismiss_skeleton());
         };
         let pinned = self.new_user_terms_in(&seg.text);
         let pinned_section = if pinned.is_empty() {
@@ -144,8 +175,10 @@ impl SegmentObserver for TermExplainerPlugin {
         );
         let content = llm.complete(&prompt, prompts::TERM_EXPLAINER_SYSTEM)?;
         let content = content.trim().to_string();
-        if content.is_empty() {
-            return Ok(None);
+        // 过滤空内容和 LLM 返回的"无术语"兜底短语（不符合"术语：解释"格式）
+        if content.is_empty() || is_no_term_response(&content) {
+            log::debug!("term_explainer: LLM 无有效术语，撤销骨架 content={content:?}");
+            return Ok(self.dismiss_skeleton());
         }
         // 标记用户词已解释；更新冷却（非用户词触发时才更新）
         if !pinned.is_empty() {

@@ -14,8 +14,21 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 
 use crate::{EngineKind, EngineOptions, SegmentEngine};
 
-const MODEL_FILE: &str = "ggml-large-v3-turbo-q5_0.bin";
 static INSTALL_LOG_HOOKS: Once = Once::new();
+
+fn model_file(kind: crate::EngineKind) -> &'static str {
+    match kind {
+        crate::EngineKind::WhisperMediumMetal => "ggml-medium-q5_0.bin",
+        _ => "ggml-large-v3-turbo-q5_0.bin",
+    }
+}
+
+fn min_model_bytes(kind: crate::EngineKind) -> u64 {
+    match kind {
+        crate::EngineKind::WhisperMediumMetal => 280 * 1024 * 1024,
+        _ => 500 * 1024 * 1024,
+    }
+}
 
 /// 后端名（日志/诊断用）。
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -29,21 +42,23 @@ pub struct WhisperMetalEngine {
     buffer: Vec<f32>,
     threads: i32,
     initial_prompt: String,
+    kind: crate::EngineKind,
 }
 
 impl WhisperMetalEngine {
-    pub fn new(model_dir: &Path, num_threads: i32, options: &EngineOptions) -> anyhow::Result<Self> {
+    pub fn new(kind: crate::EngineKind, model_dir: &Path, num_threads: i32, options: &EngineOptions) -> anyhow::Result<Self> {
         INSTALL_LOG_HOOKS.call_once(whisper_rs::install_logging_hooks);
-        let model = model_dir.join(MODEL_FILE);
+        let model = model_dir.join(model_file(kind));
         let size = model.metadata().map_err(|error| anyhow::anyhow!("whisper.cpp GPU 模型不可读 {}: {error}", model.display()))?.len();
-        if size < 500 * 1024 * 1024 {
+        if size < min_model_bytes(kind) {
             anyhow::bail!("whisper.cpp GPU 模型不完整: {} ({:.1} MiB)", model.display(), size as f64 / 1024.0 / 1024.0);
         }
 
         let mut context_params = WhisperContextParameters::default();
-        context_params.use_gpu(true).gpu_device(0).flash_attn(true);
+        // flash_attn 在 Vulkan 后端部分 GPU 上会触发慢速回退路径，先关闭
+        context_params.use_gpu(true).gpu_device(0).flash_attn(false);
         log::info!(
-            "whisper.cpp GPU 模型加载开始: model={} size_mib={:.1} whisper_cpp={} backend={} gpu_device=0 flash_attn=true",
+            "whisper.cpp GPU 模型加载开始: model={} size_mib={:.1} whisper_cpp={} backend={} gpu_device=0 flash_attn=false",
             model.display(), size as f64 / 1024.0 / 1024.0, whisper_rs::WHISPER_CPP_VERSION, BACKEND
         );
         let started = Instant::now();
@@ -59,6 +74,7 @@ impl WhisperMetalEngine {
             buffer: Vec::new(),
             threads: num_threads.max(1),
             initial_prompt: options.hotwords.join("，"),
+            kind,
         })
     }
 
@@ -118,6 +134,6 @@ impl SegmentEngine for WhisperMetalEngine {
     }
 
     fn kind(&self) -> EngineKind {
-        EngineKind::WhisperLargeV3TurboMetal
+        self.kind
     }
 }

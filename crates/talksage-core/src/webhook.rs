@@ -79,14 +79,22 @@ fn is_private_ip(ip: &IpAddr) -> bool {
     }
 }
 
-/// POST JSON payload 到 webhook（不校验 URL；超时 10s；显式禁用环境代理，走直连）。
-pub fn post_webhook(url: &str, payload: &serde_json::Value) -> Result<(), String> {
-    let agent: ureq::Agent = ureq::AgentBuilder::new()
+/// POST JSON payload 到 webhook。
+/// `proxy` 为可选 HTTP/HTTPS 代理 URL；`None` 时直连（不读取 env var）。
+pub fn post_webhook(url: &str, payload: &serde_json::Value, proxy: Option<&str>) -> Result<(), String> {
+    let mut builder = ureq::AgentBuilder::new()
         .try_proxy_from_env(false)
         .timeout_connect(Duration::from_secs(3))
         .timeout_read(Duration::from_secs(8))
-        .timeout_write(Duration::from_secs(5))
-        .build();
+        .timeout_write(Duration::from_secs(5));
+    if let Some(p) = proxy {
+        if let Ok(proxy_cfg) = ureq::Proxy::new(p) {
+            builder = builder.proxy(proxy_cfg);
+        } else {
+            log::warn!("webhook 代理地址无效，将直连: proxy={p}");
+        }
+    }
+    let agent: ureq::Agent = builder.build();
     let resp = agent
         .post(url)
         .timeout(Duration::from_secs(10))
@@ -103,11 +111,12 @@ pub fn post_webhook(url: &str, payload: &serde_json::Value) -> Result<(), String
 }
 
 /// 逐条校验并发送；返回每条结果（不因单条失败中断其余）。
-pub fn trigger_webhooks(urls: &[String], payload: &serde_json::Value) -> Vec<WebhookResult> {
+/// `proxy` 为可选代理 URL，`None` 时直连（不读取 env var）。
+pub fn trigger_webhooks(urls: &[String], payload: &serde_json::Value, proxy: Option<&str>) -> Vec<WebhookResult> {
     urls.iter()
         .map(|url| match validate_webhook_url(url) {
             Err(e) => WebhookResult { url: url.clone(), ok: false, message: e },
-            Ok(()) => match post_webhook(url, payload) {
+            Ok(()) => match post_webhook(url, payload, proxy) {
                 Ok(()) => WebhookResult { url: url.clone(), ok: true, message: "ok".into() },
                 Err(e) => WebhookResult { url: url.clone(), ok: false, message: e },
             },
@@ -170,7 +179,7 @@ mod tests {
         });
         std::thread::sleep(Duration::from_millis(50));
         let payload = serde_json::json!({ "meeting": { "id": 1 }, "content": { "summary": "hi" } });
-        let r = post_webhook(&format!("http://{addr}/hook"), &payload);
+        let r = post_webhook(&format!("http://{addr}/hook"), &payload, None);
         assert!(r.is_ok(), "post_webhook 失败: {r:?}");
         let req = handle.join().unwrap();
         assert!(req.contains("POST /hook"));

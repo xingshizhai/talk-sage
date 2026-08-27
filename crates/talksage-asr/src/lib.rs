@@ -111,6 +111,8 @@ pub enum EngineKind {
     WhisperSmall,
     /// Qwen3-ASR 0.6B（离线，段级；中英等多语言，需模型仓库开放后下载）。
     Qwen3Asr,
+    /// whisper.cpp medium Q5_0（轻量 GPU 路线，约 317 MiB）。
+    WhisperMediumMetal,
     /// whisper.cpp large-v3-turbo Q5_0（Apple Silicon Metal 路线）。
     WhisperLargeV3TurboMetal,
     /// 阿里云实时语音识别（云端流式，需配置 AccessKey）。
@@ -133,7 +135,7 @@ pub struct ModelProfile {
 
 impl EngineKind {
     /// 产品模型目录。旧流式/旧 ONNX Whisper 仍可被解析用于测试，但不再暴露给用户。
-    pub const ALL: [Self; 2] = [Self::Qwen3Asr, Self::WhisperLargeV3TurboMetal];
+    pub const ALL: [Self; 3] = [Self::Qwen3Asr, Self::WhisperMediumMetal, Self::WhisperLargeV3TurboMetal];
 
     pub fn is_product_model(self) -> bool {
         Self::ALL.contains(&self)
@@ -147,6 +149,7 @@ impl EngineKind {
             "whisper" | "whisper-base" => Some(Self::WhisperBase),
             "whisper-small" => Some(Self::WhisperSmall),
             "qwen3-asr" | "qwen3" => Some(Self::Qwen3Asr),
+            "whisper-medium-metal" | "medium-metal" => Some(Self::WhisperMediumMetal),
             "whisper-large-v3-turbo-metal" | "large-v3-turbo-metal" => Some(Self::WhisperLargeV3TurboMetal),
             "aliyun" | "aliyun-cloud" => Some(Self::AliyunCloud),
             _ => None,
@@ -161,6 +164,7 @@ impl EngineKind {
             Self::WhisperBase => "whisper-base",
             Self::WhisperSmall => "whisper-small",
             Self::Qwen3Asr => "qwen3-asr",
+            Self::WhisperMediumMetal => "whisper-medium-metal",
             Self::WhisperLargeV3TurboMetal => "whisper-large-v3-turbo-metal",
             Self::AliyunCloud => "aliyun-cloud",
         }
@@ -179,6 +183,7 @@ impl EngineKind {
             Self::WhisperBase => "sherpa-onnx-whisper-base",
             Self::WhisperSmall => "sherpa-onnx-whisper-small",
             Self::Qwen3Asr => "sherpa-onnx-qwen3-asr-0.6b",
+            Self::WhisperMediumMetal => "whisper.cpp-medium-q5_0",
             Self::WhisperLargeV3TurboMetal => "whisper.cpp-large-v3-turbo-q5_0",
             Self::AliyunCloud => "aliyun-cloud",
         }
@@ -191,6 +196,7 @@ impl EngineKind {
             Self::WhisperBase => ModelProfile { kind: self, label: "Whisper base ONNX（旧模型）", languages: "multilingual", streaming: false, speed: "balanced", description: "旧 sherpa ONNX 模型，不再提供下载", selectable: false },
             Self::WhisperSmall => ModelProfile { kind: self, label: "Whisper small ONNX（旧模型）", languages: "multilingual", streaming: false, speed: "accurate", description: "旧 sherpa ONNX 模型，不再提供下载", selectable: false },
             Self::Qwen3Asr => ModelProfile { kind: self, label: "Qwen3-ASR 0.6B int8", languages: "multilingual", streaming: false, speed: "accurate", description: "CUDA/CPU 本地高精度模型；中文与专业术语优先", selectable: true },
+            Self::WhisperMediumMetal => ModelProfile { kind: self, label: "Whisper medium Q5_0（whisper.cpp GPU，轻量）", languages: "multilingual", streaming: false, speed: "realtime", description: "whisper.cpp GPU 轻量模型（macOS Metal / Windows Vulkan），约 317 MiB；GPU 算力有限时优先选择", selectable: cfg!(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"))) },
             Self::WhisperLargeV3TurboMetal => ModelProfile { kind: self, label: "Whisper large-v3-turbo Q5_0（whisper.cpp GPU）", languages: "multilingual", streaming: false, speed: "balanced", description: "whisper.cpp GPU 段级识别（macOS Metal / Windows Vulkan），约 547 MiB；中文/中英混说鲁棒性好", selectable: cfg!(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"))) },
             Self::AliyunCloud => ModelProfile { kind: self, label: "阿里云实时语音", languages: "zh,en", streaming: true, speed: "realtime", description: "云端流式识别，需配置 AccessKey；无本地 GPU 时自动启用", selectable: true },
         }
@@ -223,6 +229,11 @@ impl EngineKind {
                     && ((has_large("encoder.onnx") && has_large("decoder.onnx"))
                         || (has_large("encoder.int8.onnx") && has_large("decoder.int8.onnx")))
                     && (has("tokenizer.json") || has_tokenizer_dir())
+            }
+            Self::WhisperMediumMetal => {
+                // medium Q5_0: 约 317 MiB，不附 SHA1 文件，只做大小检查
+                let model = dir.join("ggml-medium-q5_0.bin");
+                model.metadata().map(|m| m.len() >= 300 * 1024 * 1024).unwrap_or(false)
             }
             Self::WhisperLargeV3TurboMetal => {
                 let model = dir.join("ggml-large-v3-turbo-q5_0.bin");
@@ -311,7 +322,7 @@ impl SherpaStreamingEngine {
                     ..Default::default()
                 }
             }
-            EngineKind::WhisperBase | EngineKind::WhisperSmall | EngineKind::Qwen3Asr | EngineKind::WhisperLargeV3TurboMetal => {
+            EngineKind::WhisperBase | EngineKind::WhisperSmall | EngineKind::Qwen3Asr | EngineKind::WhisperMediumMetal | EngineKind::WhisperLargeV3TurboMetal => {
                 anyhow::bail!("{} 是离线段级引擎，请用 OfflineSegmentEngine::new", kind.display_name())
             }
             EngineKind::AliyunCloud => {
@@ -514,7 +525,7 @@ impl OfflineSegmentEngine {
                     ..Default::default()
                 }
             }
-            EngineKind::WhisperLargeV3TurboMetal => anyhow::bail!("whisper.cpp Metal 使用独立引擎工厂"),
+            EngineKind::WhisperMediumMetal | EngineKind::WhisperLargeV3TurboMetal => anyhow::bail!("whisper.cpp Metal/Vulkan 使用独立引擎工厂"),
             _ => anyhow::bail!("{} 不是离线引擎", kind.display_name()),
         };
         let config = OfflineRecognizerConfig {
@@ -564,16 +575,15 @@ pub fn create_engine(kind: EngineKind, model_dir: &Path, num_threads: i32) -> an
 }
 
 pub fn create_engine_with_options(kind: EngineKind, model_dir: &Path, num_threads: i32, options: &EngineOptions) -> anyhow::Result<Box<dyn SegmentEngine>> {
-    if kind == EngineKind::WhisperLargeV3TurboMetal {
+    if matches!(kind, EngineKind::WhisperMediumMetal | EngineKind::WhisperLargeV3TurboMetal) {
         // whisper.cpp GPU 适配器：macOS → Metal，Windows → Vulkan。
         // 两个平台都由 whisper-rs 按编译 feature 选择后端（use_gpu(true)）。
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"),
+        ))]
         {
-            return Ok(Box::new(metal::WhisperMetalEngine::new(model_dir, num_threads, options)?));
-        }
-        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"))]
-        {
-            return Ok(Box::new(metal::WhisperMetalEngine::new(model_dir, num_threads, options)?));
+            return Ok(Box::new(metal::WhisperMetalEngine::new(kind, model_dir, num_threads, options)?));
         }
         #[cfg(not(any(
             all(target_os = "macos", target_arch = "aarch64"),
@@ -643,7 +653,7 @@ mod tests {
             assert!(ids.insert(kind.display_name()), "模型 id 重复");
             assert!(matches!(profile.speed, "realtime" | "balanced" | "accurate"));
         }
-        assert_eq!(EngineKind::ALL, [EngineKind::Qwen3Asr, EngineKind::WhisperLargeV3TurboMetal]);
+        assert_eq!(EngineKind::ALL, [EngineKind::Qwen3Asr, EngineKind::WhisperMediumMetal, EngineKind::WhisperLargeV3TurboMetal]);
         assert!(EngineKind::Qwen3Asr.profile().selectable);
         assert_eq!(EngineKind::WhisperLargeV3TurboMetal.profile().selectable, cfg!(all(target_os = "macos", target_arch = "aarch64")));
         assert!(!EngineKind::ParaformerZh.is_product_model());

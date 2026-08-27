@@ -298,6 +298,34 @@ async fn export_returns_markdown_for_session() {
     assert!(md.contains("We need NPI samples by Friday."));
 }
 
+/// PATCH /session/{id}：重命名会话，空串清除自定义名。
+#[tokio::test]
+async fn patch_session_renames_and_clears_title() {
+    let state = test_state();
+    let sessions = state.sessions.clone();
+    let id = sessions.start_session(1).unwrap();
+    let router = build_router(state, &std::path::PathBuf::from("nonexistent-dist"));
+
+    let patch = |body: &'static str| {
+        router.clone().oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/session/{id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+    };
+
+    let resp = patch(r#"{"title":"周三 NPI 评审"}"#).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(sessions.get_session(id).unwrap().title.as_deref(), Some("周三 NPI 评审"));
+
+    let resp = patch(r#"{"title":""}"#).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(sessions.get_session(id).unwrap().title, None, "空串应清除自定义名");
+}
+
 // ── OpenAI 兼容 API（/v1/*）────────────────────────────────
 
 fn models_root() -> Option<std::path::PathBuf> {

@@ -7,7 +7,7 @@
 //!
 //! 录音与音频处理：wav 读写（wav）、静音裁剪（silence_trim）。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use anyhow::Result;
@@ -227,6 +227,8 @@ pub struct AudioHub {
     input_gain: f32,
     /// cpal 输入流。
     stream: Option<cpal::Stream>,
+    /// 采集线程实时 RMS（f32 bits）；在音频回调中更新，与 tick() 无关。
+    pub level: Arc<AtomicU32>,
 }
 
 impl AudioHub {
@@ -247,6 +249,7 @@ impl AudioHub {
                 tx,
                 input_gain: 10.0f32.powf(gain_db / 20.0),
                 stream: None,
+                level: Arc::new(AtomicU32::new(0.0f32.to_bits())),
             },
             rx,
         )
@@ -305,6 +308,7 @@ impl AudioHub {
         );
 
         let tx = self.tx.clone();
+        let level_atomic = self.level.clone();
         let chunk_samples = self.chunk_samples;
         let input_gain = self.input_gain;
         let mut resampler = LinearResampler::new(src_sr, TARGET_SAMPLE_RATE);
@@ -317,7 +321,7 @@ impl AudioHub {
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _| {
-                        collect_and_send(data, channels, input_gain, &mut resampler, &mut pending, chunk_samples, &tx);
+                        collect_and_send(data, channels, input_gain, &mut resampler, &mut pending, chunk_samples, &tx, &level_atomic);
                     },
                     err_fn,
                     None,
@@ -328,7 +332,7 @@ impl AudioHub {
                     &config.into(),
                     move |data: &[i16], _| {
                         let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
-                        collect_and_send(&f, channels, input_gain, &mut resampler, &mut pending, chunk_samples, &tx);
+                        collect_and_send(&f, channels, input_gain, &mut resampler, &mut pending, chunk_samples, &tx, &level_atomic);
                     },
                     err_fn,
                     None,
@@ -339,7 +343,7 @@ impl AudioHub {
                     &config.into(),
                     move |data: &[u16], _| {
                         let f: Vec<f32> = data.iter().map(|&s| (s as f32 / 32767.0) * 2.0 - 1.0).collect();
-                        collect_and_send(&f, channels, input_gain, &mut resampler, &mut pending, chunk_samples, &tx);
+                        collect_and_send(&f, channels, input_gain, &mut resampler, &mut pending, chunk_samples, &tx, &level_atomic);
                     },
                     err_fn,
                     None,
@@ -351,6 +355,11 @@ impl AudioHub {
         stream.play()?;
         self.stream = Some(stream);
         Ok(())
+    }
+
+    /// 替换电平 atomic（在 start 前调用）；让 pipeline 的电平 Arc 与采集回调共享。
+    pub fn set_level(&mut self, level: Arc<AtomicU32>) {
+        self.level = level;
     }
 
     /// 停止采集。
@@ -388,6 +397,7 @@ fn collect_and_send(
     pending: &mut Vec<f32>,
     chunk_samples: usize,
     tx: &CaptureTx,
+    level_atomic: &AtomicU32,
 ) {
     // 多声道设备（尤其无线麦接收器）常只有一个通道有信号。整段选择
     // RMS 最大的通道，避免与静音通道平均造成约 6dB 衰减或反相抵消。
@@ -408,10 +418,12 @@ fn collect_and_send(
     let amplified: Vec<f32> = mono.into_iter().map(|sample| (sample * input_gain).clamp(-0.98, 0.98)).collect();
     let resampled = resampler.process(&amplified);
     pending.extend_from_slice(&resampled);
-    // 按块切分发送
+    // 按块切分发送，并在音频回调线程更新 RMS 电平（不受 ASR 推理阻塞影响）
     let mut i = 0;
     while pending.len() - i >= chunk_samples {
         let chunk: Vec<f32> = pending[i..i + chunk_samples].to_vec();
+        let rms = (chunk.iter().map(|&x| x * x).sum::<f32>() / chunk.len() as f32).sqrt();
+        level_atomic.store(rms.to_bits(), Ordering::Relaxed);
         i += chunk_samples;
         if !tx.try_push(chunk) && tx.closed() {
             break;

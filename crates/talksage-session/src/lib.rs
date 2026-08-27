@@ -33,6 +33,7 @@ pub fn build_webhook_payload(detail: &SessionDetail) -> serde_json::Value {
     serde_json::json!({
         "meeting": {
             "id": detail.id,
+            "title": detail.title,
             "started_at": detail.started_at,
             "ended_at": detail.ended_at,
             "duration_seconds": duration_secs,
@@ -70,15 +71,17 @@ pub fn build_webhook_payload(detail: &SessionDetail) -> serde_json::Value {
 }
 
 /// 触发会议结束 webhook（配置启用时）：构建 payload 并逐条发送（SSRF 防护）。
+/// `proxy` 来自 `NetworkConfig::proxy_url()`；`None` 时直连。
 pub fn trigger_meeting_webhooks(
     detail: &SessionDetail,
     cfg: &talksage_config::WebhooksConfig,
+    proxy: Option<&str>,
 ) -> Vec<talksage_core::WebhookResult> {
     if !cfg.enabled || cfg.urls.is_empty() {
         return Vec::new();
     }
     let payload = build_webhook_payload(detail);
-    talksage_core::trigger_webhooks(&cfg.urls, &payload)
+    talksage_core::trigger_webhooks(&cfg.urls, &payload, proxy)
 }
 
 /// 疑似重复段：同一说话人相邻 final 段文本高度相似（≥0.9）且时间间隔 ≤5s——
@@ -142,7 +145,20 @@ fn scene_label(mode: &str) -> &'static str {
 /// 会话详情导出为 Markdown 单文件（转写 + 纪要 + 指标 + 质量；借鉴 Call.md markdown-export）。
 pub fn export_markdown(detail: &SessionDetail) -> String {
     let mut md = String::new();
-    md.push_str(&format!("# 会议记录 #{}（{}）\n\n", detail.id, fmt_unix(detail.started_at)));
+    // 有会话名就用会话名当标题，#id 与时间退到引用行——导出的文件才认得出是哪场会
+    match detail.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(title) => md.push_str(&format!(
+            "# {}\n\n> 会议记录 #{}（{}）\n\n",
+            title,
+            detail.id,
+            fmt_unix(detail.started_at)
+        )),
+        None => md.push_str(&format!(
+            "# 会议记录 #{}（{}）\n\n",
+            detail.id,
+            fmt_unix(detail.started_at)
+        )),
+    }
 
     // 概览与指标
     let metrics = talksage_core::compute_conversation_metrics(&detail.segments);
@@ -292,6 +308,8 @@ pub struct SessionRecord {
     pub id: i64,
     pub started_at: i64,
     pub ended_at: Option<i64>,
+    /// 用户自定义会话名（None = 未命名，界面回退到 "#id · 时间"）。
+    pub title: Option<String>,
     pub segment_count: u64,
     pub term_count: u64,
     /// 会话质量（"clean"/"noise"/"silent"/"low"，老数据为 None）。
@@ -317,6 +335,8 @@ pub struct SessionDetail {
     pub id: i64,
     pub started_at: i64,
     pub ended_at: Option<i64>,
+    /// 用户自定义会话名（None = 未命名）。
+    pub title: Option<String>,
     pub segments: Vec<TranscriptSegment>,
     pub terms: Vec<String>,
     pub translations: Vec<String>,
@@ -597,7 +617,8 @@ impl SessionStore {
                 ended_at INTEGER,
                 notes TEXT,
                 meta TEXT,
-                trio TEXT
+                trio TEXT,
+                title TEXT
             );
             CREATE TABLE IF NOT EXISTS segments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -640,8 +661,9 @@ impl SessionStore {
             CREATE INDEX IF NOT EXISTS idx_key_points_session ON key_points(session_id);
             ",
         )?;
-        // 迁移（旧库）：sessions.meta / sessions.trio / segments.duration_ms / segments.rms
+        // 迁移（旧库）：sessions.meta / sessions.trio / sessions.title / segments.duration_ms / segments.rms
         let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN meta TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN title TEXT;");
         let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN trio TEXT;");
         let _ = conn.execute_batch("ALTER TABLE segments ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0;");
         let _ = conn.execute_batch("ALTER TABLE segments ADD COLUMN rms REAL NOT NULL DEFAULT 0;");
@@ -778,6 +800,18 @@ impl SessionStore {
         Ok(())
     }
 
+    /// 重命名会话。空串（或全空白）→ 存 NULL，等于清除自定义名、回到"#id · 时间"。
+    pub fn set_session_title(&self, session_id: i64, title: &str) -> Result<()> {
+        let trimmed = title.trim();
+        let value = if trimmed.is_empty() { None } else { Some(trimmed) };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET title = ?2 WHERE id = ?1",
+            rusqlite::params![session_id, value],
+        )?;
+        Ok(())
+    }
+
     /// 保存三段式智能纪要（JSON 字符串）。
     pub fn set_trio(&self, session_id: i64, trio: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -806,7 +840,7 @@ impl SessionStore {
             "SELECT s.id, s.started_at, s.ended_at,
                     (SELECT COUNT(*) FROM segments g WHERE g.session_id = s.id),
                     (SELECT COUNT(*) FROM terms t WHERE t.session_id = s.id),
-                    s.meta
+                    s.meta, s.title
              FROM sessions s ORDER BY s.id DESC LIMIT ?1",
         )?;
         let rows = stmt
@@ -817,6 +851,7 @@ impl SessionStore {
                     id: r.get(0)?,
                     started_at: r.get(1)?,
                     ended_at: r.get(2)?,
+                    title: r.get(6)?,
                     segment_count: r.get(3)?,
                     term_count: r.get(4)?,
                     quality: meta.as_ref().map(|m| m.quality.clone()),
@@ -854,7 +889,7 @@ impl SessionStore {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT id, started_at, ended_at, notes, meta, trio FROM sessions WHERE id = ?1",
+                "SELECT id, started_at, ended_at, notes, meta, trio, title FROM sessions WHERE id = ?1",
                 [session_id],
                 |r| {
                     Ok((
@@ -864,12 +899,13 @@ impl SessionStore {
                         r.get::<_, Option<String>>(3)?,
                         r.get::<_, Option<String>>(4)?,
                         r.get::<_, Option<String>>(5)?,
+                        r.get::<_, Option<String>>(6)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| anyhow!("会话不存在: {session_id}"))?;
-        let (id, started_at, ended_at, notes, meta_raw, trio) = row;
+        let (id, started_at, ended_at, notes, meta_raw, trio, title) = row;
 
         let segments = {
             let mut stmt = conn.prepare(
@@ -938,6 +974,7 @@ impl SessionStore {
             id,
             started_at,
             ended_at,
+            title,
             segments,
             terms,
             translations,
@@ -1120,6 +1157,40 @@ mod tests {
         );
         drop(store);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// 会话命名：列表与详情都要带出名字，空串等于"取消命名"退回默认显示。
+    #[test]
+    fn rename_session_roundtrip() {
+        let s = store();
+        let id = s.start_session(1).unwrap();
+        assert_eq!(s.get_session(id).unwrap().title, None, "新会话默认未命名");
+
+        s.set_session_title(id, "  周三 NPI 评审  ").unwrap();
+        assert_eq!(s.get_session(id).unwrap().title.as_deref(), Some("周三 NPI 评审"), "应去掉首尾空白");
+        let listed = s.list_sessions(10).unwrap();
+        assert_eq!(listed[0].title.as_deref(), Some("周三 NPI 评审"), "列表也要带出会话名");
+
+        // 空串 / 纯空白 = 清除自定义名，而不是存一个空标题
+        s.set_session_title(id, "   ").unwrap();
+        assert_eq!(s.get_session(id).unwrap().title, None);
+        assert_eq!(s.list_sessions(10).unwrap()[0].title, None);
+    }
+
+    /// 命名后导出的 Markdown 以会话名作标题，未命名时保持原来的 "#id" 标题。
+    #[test]
+    fn export_markdown_uses_title_when_named() {
+        let s = store();
+        let id = s.start_session(1).unwrap();
+        s.add_segment(id, &seg(0, "我", "开场")).unwrap();
+
+        let plain = export_markdown(&s.get_session(id).unwrap());
+        assert!(plain.starts_with("# 会议记录 #"), "未命名时标题不变: {plain}");
+
+        s.set_session_title(id, "周三 NPI 评审").unwrap();
+        let named = export_markdown(&s.get_session(id).unwrap());
+        assert!(named.starts_with("# 周三 NPI 评审"), "命名后应以会话名开头: {named}");
+        assert!(named.contains(&format!("> 会议记录 #{id}")), "编号与时间退到引用行: {named}");
     }
 
     #[test]

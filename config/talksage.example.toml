@@ -179,6 +179,17 @@ folder  = ""    # Obsidian 仓库或普通 .md/.txt 文件夹（会跳过 .obsid
 enabled = false
 urls    = []    # 例：["https://n8n.example.com/webhook/talksage"]
 
+# ── 网络代理 ─────────────────────────────────────────────────────────────
+#
+# 仅对「外网请求」生效：模型下载（HuggingFace / GitHub）、LLM API、Webhook。
+# 阿里云 ASR 始终直连，不受此设置影响（国内服务走代理反而会增加延迟或被拒绝）。
+#
+# 使用场景：中国大陆网络无法直连上述服务时配置，留空则所有请求直连。
+# 格式：http://host:port 或 socks5://host:port
+
+[network]
+proxy = ""    # 例："http://127.0.0.1:7890"
+
 # ── Headless 服务器 ──────────────────────────────────────────────────────
 
 [server]

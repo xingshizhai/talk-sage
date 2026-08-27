@@ -940,12 +940,13 @@ fn cmd_doctor() -> ExitCode {
 
     let data_dir = talksage_config::default_data_dir();
     println!("data dir     : {}", data_dir.display());
-    let config_file = data_dir.join("talksage.toml");
+    let config_file = talksage_config::default_config_file(&data_dir);
     println!(
         "config file  : {} ({})",
         config_file.display(),
         if config_file.exists() { "存在" } else { "不存在（将使用内置默认）" }
     );
+    println!("log dir      : {}", talksage_logging::log_dir(None).display());
 
     let mgr = match talksage_config::ConfigManager::load(None, None) {
         Ok(m) => m,

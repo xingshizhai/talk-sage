@@ -1,8 +1,8 @@
 // 设置面板：按 Tab 归类。保存写入 talksage.toml。
 // 模型安装/删除在独立的「模型管理」页，不占用本页。
 
-import { useEffect, useState } from "react";
-import type { AppConfig, AsrModelInfo, AsrRuntimeStatus, PluginMeta, PluginStatusInfo, SceneMode, SceneParams } from "../lib/api";
+import { useEffect, useLayoutEffect, useState } from "react";
+import type { AppConfig, AsrModelInfo, AsrRuntimeStatus, OfflineUpgradeResult, PluginMeta, PluginStatusInfo, SceneMode, SceneParams, UpdateCheckResult } from "../lib/api";
 import type { PluginValues } from "../lib/plugins";
 import { analysisPluginIds, buildPluginUpdates, fieldLabel, initialPluginValues, pluginFields, pluginStatusLabel } from "../lib/plugins";
 import { knowledgeBaseSettings } from "../lib/knowledge";
@@ -15,7 +15,62 @@ const VOICE_ENROLL_SECONDS = 16;
 const VOICE_ENROLL_TEXT =
   "你好，我正在为拓思者录制声音标识。今天阳光明亮，我会清楚、自然、连续地读完这段文字。会议结束后，请帮我整理重点、时间和下一步行动。";
 
-type SettingsTab = "scene" | "asr" | "audio" | "terminology" | "plugins" | "quality" | "voice" | "llm" | "webhooks";
+type SettingsTab = "scene" | "asr" | "audio" | "terminology" | "plugins" | "quality" | "voice" | "llm" | "webhooks" | "network" | "upgrade";
+
+/** 场景清单：chip 渲染与「当前生效场景」文案共用同一份数据。 */
+const SCENE_MODES: { key: SceneMode; label: string; desc: string }[] = [
+  { key: "dictation", label: "单人听写", desc: "单麦克风、灵敏 VAD、最低资源消耗" },
+  { key: "conversation", label: "一对一会话", desc: "双人会话，按输入通道区分双方，两流使用相同语言" },
+  { key: "bilingual", label: "双语对话", desc: "双语会话：我说中文，对方说英文（或反向），双向翻译" },
+  { key: "live_translation", label: "实时翻译", desc: "说一种语言，自动翻译并显示另一种语言" },
+  { key: "meeting", label: "多人会议", desc: "两人以上，启用 WeSpeaker 在线角色识别" },
+  { key: "lecture", label: "演讲/课堂", desc: "长段单流，术语和简报增强，关闭角色识别" },
+  { key: "custom", label: "自定义", desc: "使用下方全部参数" },
+];
+
+/** 配置补丁里的字段路径 → 它属于哪个 tab。按前缀匹配，先列更具体的。 */
+const TAB_OF_PATH: { prefix: string; tab: SettingsTab }[] = [
+  { prefix: "scene.", tab: "scene" },
+  { prefix: "asr.terminology.", tab: "terminology" },
+  { prefix: "asr.", tab: "asr" },
+  { prefix: "audio.", tab: "audio" },
+  { prefix: "recording.", tab: "audio" },
+  { prefix: "plugins.", tab: "plugins" },
+  { prefix: "knowledge_base.", tab: "plugins" },
+  { prefix: "quality.", tab: "quality" },
+  { prefix: "llm.", tab: "llm" },
+  { prefix: "webhooks.", tab: "webhooks" },
+  { prefix: "network.", tab: "network" },
+];
+
+/** 嵌套配置对象拍平成「叶子路径 → JSON 值」，用于逐字段比较。数组按整体算一个叶子。 */
+function flattenLeaves(value: unknown, prefix = "", out: Record<string, string> = {}): Record<string, string> {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    for (const [k, v] of Object.entries(value)) flattenLeaves(v, prefix ? `${prefix}.${k}` : k, out);
+  } else {
+    out[prefix] = JSON.stringify(value ?? null);
+  }
+  return out;
+}
+
+/** 未保存标记：tab 与 chip 共用同一个小圆点，视觉语言保持一致。 */
+function DirtyDot({ inset }: { inset?: boolean }) {
+  return (
+    <span
+      title="有未保存的改动"
+      style={{
+        width: 6,
+        height: 6,
+        borderRadius: "50%",
+        background: "var(--brief)",
+        display: "inline-block",
+        ...(inset
+          ? { position: "absolute", top: -3, right: -3, border: "1px solid var(--surface-2)" }
+          : { marginLeft: 5, verticalAlign: "middle" }),
+      }}
+    />
+  );
+}
 
 const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "scene", label: "场景模式", desc: "听写 / 会话 / 双语 / 会议 / 课堂 / 自定义" },
@@ -27,16 +82,21 @@ const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "voice", label: "声音标识", desc: "注册主人声音，识别说话人" },
   { key: "llm", label: "LLM", desc: "默认模型与密钥" },
   { key: "webhooks", label: "Webhook", desc: "会议结束推送（n8n/Zapier/CRM）" },
+  { key: "network", label: "网络", desc: "代理服务器" },
+  { key: "upgrade", label: "升级", desc: "在线检查 / 离线安装升级包" },
 ];
 
 export default function SettingsSection({
   config,
   onSave,
   onOpenModels,
+  onDirtyChange,
 }: {
   config: AppConfig | null;
   onSave: (updates: Record<string, unknown>) => Promise<void>;
   onOpenModels: () => void;
+  /** 有未保存改动时上报给 App：离开设置页前要拦一下。 */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [tab, setTab] = useState<SettingsTab>("scene");
   // 场景模式
@@ -143,6 +203,9 @@ export default function SettingsSection({
   const [qHighRms, setQHighRms] = useState(config?.quality?.high_rms ?? 0.5);
   const [whEnabled, setWhEnabled] = useState(config?.webhooks?.enabled ?? false);
   const [whUrls, setWhUrls] = useState<string>((config?.webhooks?.urls ?? []).join("\n"));
+  const [proxy, setProxy] = useState(config?.network?.proxy ?? "");
+  const [proxyTestResult, setProxyTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [proxyTesting, setProxyTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [asrModels, setAsrModels] = useState<AsrModelInfo[]>([]);
@@ -150,6 +213,12 @@ export default function SettingsSection({
   const [enrolling, setEnrolling] = useState(false);
   const [enrollCount, setEnrollCount] = useState(0);
   const [enrollStage, setEnrollStage] = useState<"idle" | "countdown" | "recording" | "processing">("idle");
+  // 应用升级（在线检查框架 + 离线安装升级包）
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [upgradeChecking, setUpgradeChecking] = useState(false);
+  const [upgradeCheckResult, setUpgradeCheckResult] = useState<UpdateCheckResult | null>(null);
+  const [upgradeInstalling, setUpgradeInstalling] = useState(false);
+  const [upgradeInstallResult, setUpgradeInstallResult] = useState<OfflineUpgradeResult | null>(null);
 
   // 加载声纹状态 / ASR 模型 / 插件元数据。
   //
@@ -173,14 +242,17 @@ export default function SettingsSection({
       if (voice) setVoiceStatus(voice);
       if (models) setAsrModels(models);
       if (statuses) setPluginStatus(statuses);
-      if (!metas) return;
-      setPluginMeta(metas);
-      setPluginValues(initialPluginValues(metas, config?.plugins));
-      // 配置里没有 allowlist（老配置 / headless 的 /config 不返回 scene）时，
-      // 按元数据回填成「分析类插件全开」—— 与阶段 5 之前的默认行为一致。
-      if (!config?.scene?.custom?.plugin_allowlist) {
-        setSceneCustom((s) => ({ ...s, plugin_allowlist: analysisPluginIds(metas) }));
+      if (metas) {
+        setPluginMeta(metas);
+        setPluginValues(initialPluginValues(metas, config?.plugins));
+        // 配置里没有 allowlist（老配置 / headless 的 /config 不返回 scene）时，
+        // 按元数据回填成「分析类插件全开」—— 与阶段 5 之前的默认行为一致。
+        if (!config?.scene?.custom?.plugin_allowlist) {
+          setSceneCustom((s) => ({ ...s, plugin_allowlist: analysisPluginIds(metas) }));
+        }
       }
+      // 异步数据到齐（含失败兜底）：此刻的表单就是「已保存状态」，取作脏状态基线。
+      setRebaseTick((t) => t + 1);
     })();
     // 只在挂载时跑一次：config 也只在挂载时读（本组件其余 state 同一约定），
     // 设置页是从 App 的 navPage 切进来的，切进来就是一次新的挂载。
@@ -401,93 +473,147 @@ export default function SettingsSection({
     }
   }
 
+  // ── 未保存改动检测 ────────────────────────────────
+  // 整页是一个大表单：任何字段改完不点「保存设置」就切走都会静默丢失，而场景 chip
+  // 点下去立刻高亮，最容易被误以为「选了就生效」。这里用「当前快照 vs 基线快照」
+  // 逐字段比对，把结果落到 tab 圆点、场景 chip 和底部保存栏上。
+
+  /** 表单 → 配置补丁。handleSave 提交它，脏状态检测也比较它——必须是同一份数据。 */
+  function buildSnapshot(): Record<string, unknown> {
+    const corrections = Object.fromEntries(terminologyCorrections.split("\n").map((line) => {
+      const [wrong, ...right] = line.split("=>");
+      return [wrong?.trim(), right.join("=>").trim()];
+    }).filter(([wrong, right]) => wrong && right));
+    return {
+      llm: {
+        default: defaultProvider,
+        providers: {
+          [defaultProvider]: {
+            api_key: apiKey.trim(),
+          },
+        },
+      },
+      // 按元数据组装，键与值都来自 /plugins —— 组件里没有插件名
+      plugins: buildPluginUpdates(pluginMeta, pluginValues),
+      knowledge_base: {
+        enabled: kbEnabled,
+        folder: kbFolder.trim(),
+      },
+      asr: {
+        engine_en: engineEn,
+        engine_zh: engineZh,
+        backend: asrBackend,
+        punct_enabled: punctEnabled,
+        asr_mode: asrMode,
+        aliyun_access_key_id: aliyunKeyId,
+        aliyun_access_key_secret: aliyunKeySecret,
+        aliyun_app_key: aliyunAppKey,
+        terminology: {
+          enabled: terminologyEnabled,
+          hotword_score: hotwordScore,
+          terms: terminologyTerms.split("\n").map((v) => v.trim()).filter(Boolean),
+          corrections,
+        },
+      },
+      audio: {
+        audio_source: audioSource,
+        input_gain_db: inputGainDb,
+        vad: { preset: vadPreset },
+        denoise: {
+          enabled: denoiseEnabled,
+          highpass,
+        },
+        endpoint: {
+          enabled: endpointEnabled,
+          stable_ms: endpointStableMs,
+          quiet_ms: endpointQuietMs,
+          force_quiet_ms: endpointForceQuietMs,
+        },
+        min_segment_ms: minSegmentMs,
+      },
+      recording: {
+        enabled: recEnabled,
+        dir: recDir.trim(),
+      },
+      quality: {
+        auto_detect: qAutoDetect,
+        text_noise_threshold: qTextNoise,
+        min_speech_ratio: qMinRatio,
+        max_speech_ratio: qMaxRatio,
+        silence_rms: qSilenceRms,
+        high_rms: qHighRms,
+      },
+      webhooks: {
+        enabled: whEnabled,
+        urls: whUrls.split("\n").map((s) => s.trim()).filter((s) => s.length > 0),
+      },
+      network: {
+        proxy: proxy.trim(),
+      },
+      scene: {
+        mode: sceneMode,
+        custom: {
+          ...sceneCustom,
+          language: sceneMode === "custom" ? sceneCustom.language : sceneLanguage,
+          client_language: sceneMode === "custom" ? sceneCustom.client_language : sceneClientLanguage,
+        },
+      },
+    };
+  }
+
+  const snapshot = buildSnapshot();
+  // baseline = null：异步数据（插件元数据等）还没到齐，此时不判断脏不脏。
+  const [baseline, setBaseline] = useState<Record<string, unknown> | null>(null);
+  // 递增 → 下一次渲染后把当前快照定为新基线（水合完成 / 保存成功 / 恢复默认后）。
+  const [rebaseTick, setRebaseTick] = useState(0);
+  useEffect(() => {
+    if (rebaseTick === 0) return;
+    setBaseline(buildSnapshot());
+    // 基线只在 tick 变化时取一次：buildSnapshot 读的是本次渲染的表单状态。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rebaseTick]);
+
+  const dirtyPaths = (() => {
+    if (!baseline) return [] as string[];
+    const now = flattenLeaves(snapshot);
+    const base = flattenLeaves(baseline);
+    return Object.keys(now).filter((k) => now[k] !== base[k]);
+  })();
+  const dirtyCount = dirtyPaths.length;
+  const dirtyTabs = new Set<SettingsTab>(
+    dirtyPaths
+      .map((path) => TAB_OF_PATH.find((m) => path.startsWith(m.prefix))?.tab)
+      .filter((t): t is SettingsTab => !!t),
+  );
+  const sceneModeDirty = dirtyPaths.includes("scene.mode");
+  // 已生效的场景（配置里的值），与刚点选、尚未保存的 sceneMode 对照展示。
+  // 与组件顶部 sceneMode 初始化同一套归一化：旧配置里的 translation === bilingual。
+  const savedSceneMode = ((m: string) => (m === "translation" ? "bilingual" : m))(
+    (config?.scene?.mode ?? "conversation") as string,
+  );
+  const savedSceneLabel = SCENE_MODES.find((m) => m.key === savedSceneMode)?.label ?? savedSceneMode;
+  const pendingSceneLabel = SCENE_MODES.find((m) => m.key === sceneMode)?.label ?? sceneMode;
+
+  // 上报给 App：离开设置页前弹确认。卸载时清掉，避免拦截状态残留。
+  // 用 layout effect：改完立刻按 ⌘/Ctrl+Shift+L 开始监听时，拦截状态必须在下一个
+  // 事件之前就绪，异步的 useEffect 会漏掉这种紧挨着的操作。
+  useLayoutEffect(() => {
+    onDirtyChange?.(dirtyCount > 0);
+  }, [dirtyCount, onDirtyChange]);
+  useLayoutEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+
   async function handleSave() {
     setSaving(true);
     setMessage("");
     try {
-      const corrections = Object.fromEntries(terminologyCorrections.split("\n").map((line) => {
-        const [wrong, ...right] = line.split("=>");
-        return [wrong?.trim(), right.join("=>").trim()];
-      }).filter(([wrong, right]) => wrong && right));
-      const updates: Record<string, unknown> = {
-        llm: {
-          default: defaultProvider,
-          providers: {
-            [defaultProvider]: {
-              api_key: apiKey.trim(),
-            },
-          },
-        },
-        // 按元数据组装，键与值都来自 /plugins —— 组件里没有插件名
-        plugins: buildPluginUpdates(pluginMeta, pluginValues),
-        knowledge_base: {
-          enabled: kbEnabled,
-          folder: kbFolder.trim(),
-        },
-        asr: {
-          engine_en: engineEn,
-          engine_zh: engineZh,
-          backend: asrBackend,
-          punct_enabled: punctEnabled,
-          asr_mode: asrMode,
-          aliyun_access_key_id: aliyunKeyId,
-          aliyun_access_key_secret: aliyunKeySecret,
-          aliyun_app_key: aliyunAppKey,
-          terminology: {
-            enabled: terminologyEnabled,
-            hotword_score: hotwordScore,
-            terms: terminologyTerms.split("\n").map((v) => v.trim()).filter(Boolean),
-            corrections,
-          },
-        },
-        audio: {
-          audio_source: audioSource,
-          input_gain_db: inputGainDb,
-          vad: { preset: vadPreset },
-          denoise: {
-            enabled: denoiseEnabled,
-            highpass,
-          },
-          endpoint: {
-            enabled: endpointEnabled,
-            stable_ms: endpointStableMs,
-            quiet_ms: endpointQuietMs,
-            force_quiet_ms: endpointForceQuietMs,
-          },
-          min_segment_ms: minSegmentMs,
-        },
-        recording: {
-          enabled: recEnabled,
-          dir: recDir.trim(),
-        },
-        quality: {
-          auto_detect: qAutoDetect,
-          text_noise_threshold: qTextNoise,
-          min_speech_ratio: qMinRatio,
-          max_speech_ratio: qMaxRatio,
-          silence_rms: qSilenceRms,
-          high_rms: qHighRms,
-        },
-        webhooks: {
-          enabled: whEnabled,
-          urls: whUrls.split("\n").map((s) => s.trim()).filter((s) => s.length > 0),
-        },
-        scene: {
-          mode: sceneMode,
-          custom: {
-            ...sceneCustom,
-            language: sceneMode === "custom" ? sceneCustom.language : sceneLanguage,
-            client_language: sceneMode === "custom" ? sceneCustom.client_language : sceneClientLanguage,
-          },
-        },
-      };
-      await onSave(updates);
+      await onSave(snapshot);
       const [statuses, runtimeStatus] = await Promise.all([
         api.listPluginStatus(),
         api.getAsrRuntimeStatus(),
       ]);
       setPluginStatus(statuses);
       setGpuStatus(runtimeStatus);
+      setRebaseTick((t) => t + 1);
       setMessage("已保存（部分设置重启后生效）");
     } catch (e) {
       setMessage(`保存失败: ${e}`);
@@ -508,11 +634,51 @@ export default function SettingsSection({
       setQMaxRatio(0.85);
       setQSilenceRms(0.01);
       setQHighRms(0.5);
+      setRebaseTick((t) => t + 1);
       setMessage("噪音检测阈值已恢复默认");
     } catch (e) {
       setMessage(`恢复默认失败: ${e}`);
     } finally {
       setSaving(false);
+    }
+  }
+
+  // ── 应用升级 ──
+  useEffect(() => {
+    api.getVersion().then(setAppVersion).catch(() => setAppVersion("未知"));
+  }, []);
+
+  async function handleCheckUpdates() {
+    setUpgradeChecking(true);
+    setUpgradeCheckResult(null);
+    try {
+      setUpgradeCheckResult(await api.checkForUpdates());
+    } catch (e) {
+      setUpgradeCheckResult({
+        available: false,
+        current_version: appVersion ?? "",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setUpgradeChecking(false);
+    }
+  }
+
+  async function handleInstallUpgradePackage() {
+    setUpgradeInstalling(true);
+    setUpgradeInstallResult(null);
+    try {
+      const path = await api.pickUpgradePackage();
+      if (!path) return; // 用户取消
+      setUpgradeInstallResult(await api.installOfflineUpgrade(path));
+    } catch (e) {
+      setUpgradeInstallResult({
+        ok: false,
+        version: "",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setUpgradeInstalling(false);
     }
   }
 
@@ -538,6 +704,7 @@ export default function SettingsSection({
             }}
           >
             {t.label}
+            {dirtyTabs.has(t.key) && <DirtyDot />}
           </button>
         ))}
       </div>
@@ -548,37 +715,53 @@ export default function SettingsSection({
         <div>
           <h3 style={groupTitle}>场景模式</h3>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-            {(
-              [
-                { key: "dictation", label: "单人听写", desc: "单麦克风、灵敏 VAD、最低资源消耗" },
-                { key: "conversation", label: "一对一会话", desc: "双人会话，按输入通道区分双方，两流使用相同语言" },
-                { key: "bilingual", label: "双语对话", desc: "双语会话：我说中文，对方说英文（或反向），双向翻译" },
-                { key: "live_translation", label: "实时翻译", desc: "说一种语言，自动翻译并显示另一种语言" },
-                { key: "meeting", label: "多人会议", desc: "两人以上，启用 WeSpeaker 在线角色识别" },
-                { key: "lecture", label: "演讲/课堂", desc: "长段单流，术语和简报增强，关闭角色识别" },
-                { key: "custom", label: "自定义", desc: "使用下方全部参数" },
-              ] as const
-            ).map((m) => (
-              <button
-                key={m.key}
-                onClick={() => setSceneMode(m.key)}
-                title={m.desc}
-                style={{
-                  padding: "6px 14px",
-                  borderRadius: 8,
-                  border: "1px solid var(--border)",
-                  cursor: "pointer",
-                  font: "inherit",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  background: sceneMode === m.key ? "var(--me)" : "var(--surface-2)",
-                  color: sceneMode === m.key ? "#fff" : "var(--text-2)",
-                }}
-              >
-                {m.label}
-              </button>
-            ))}
+            {SCENE_MODES.map((m) => {
+              const selected = sceneMode === m.key;
+              // 已点选但没保存：虚线边框 + 角标，与"已生效"的实心 chip 区分开。
+              const pending = selected && sceneModeDirty;
+              return (
+                <button
+                  key={m.key}
+                  onClick={() => setSceneMode(m.key)}
+                  title={pending ? `${m.desc}（尚未保存）` : m.desc}
+                  style={{
+                    position: "relative",
+                    padding: "6px 14px",
+                    borderRadius: 8,
+                    border: pending ? "1px dashed var(--brief)" : "1px solid var(--border)",
+                    cursor: "pointer",
+                    font: "inherit",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    background: selected ? (pending ? "var(--surface-2)" : "var(--me)") : "var(--surface-2)",
+                    color: selected ? (pending ? "var(--brief)" : "#fff") : "var(--text-2)",
+                  }}
+                >
+                  {m.label}
+                  {pending && <DirtyDot inset />}
+                </button>
+              );
+            })}
           </div>
+
+          {/* 点了 chip 就以为生效是最常见的误解：显式对照"已生效 / 待保存" */}
+          {sceneModeDirty && (
+            <div
+              style={{
+                marginBottom: 8,
+                padding: "6px 9px",
+                borderRadius: 8,
+                border: "1px dashed var(--brief)",
+                background: "var(--surface-2)",
+                fontSize: 11,
+                lineHeight: 1.6,
+                color: "var(--text-2)",
+              }}
+            >
+              已选择「<b style={{ color: "var(--brief)" }}>{pendingSceneLabel}</b>」，需点击下方
+              <b>「保存设置」</b>才会生效 · 当前生效：<b>{savedSceneLabel}</b>
+            </div>
+          )}
 
           {/* 单语言场景：识别语言选择器 */}
           {(sceneMode === "dictation" || sceneMode === "conversation" || sceneMode === "meeting" || sceneMode === "lecture") && (
@@ -1201,6 +1384,112 @@ export default function SettingsSection({
         </div>
       )}
 
+      {/* ── 网络代理 ── */}
+      {tab === "network" && (
+        <div>
+          <h3 style={groupTitle}>代理服务器</h3>
+          <label style={labelBlock}>
+            代理地址（留空则直连）：
+            <input
+              type="text"
+              value={proxy}
+              onChange={(e) => { setProxy(e.target.value); setProxyTestResult(null); }}
+              placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
+              style={{ ...inputStyle, width: "100%", marginTop: 4, fontFamily: "monospace" }}
+            />
+          </label>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+            <button
+              disabled={proxyTesting || !proxy.trim()}
+              onClick={async () => {
+                setProxyTesting(true);
+                setProxyTestResult(null);
+                try {
+                  const msg = await api.testProxy(proxy.trim());
+                  setProxyTestResult({ ok: true, msg });
+                } catch (e: unknown) {
+                  setProxyTestResult({ ok: false, msg: e instanceof Error ? e.message : String(e) });
+                } finally {
+                  setProxyTesting(false);
+                }
+              }}
+              style={{ fontSize: 12, padding: "3px 10px", cursor: proxyTesting || !proxy.trim() ? "default" : "pointer" }}
+            >
+              {proxyTesting ? "测试中…" : "测试"}
+            </button>
+            {proxyTestResult && (
+              <span style={{ fontSize: 12, color: proxyTestResult.ok ? "var(--live)" : "var(--danger)" }}>
+                {proxyTestResult.msg}
+              </span>
+            )}
+          </div>
+          <div style={{ ...hint, marginTop: 8 }}>
+            代理仅对<b>外网请求</b>生效：模型下载（HuggingFace / GitHub）、LLM API、Webhook。
+            阿里云 ASR 始终直连，不受此设置影响（国内服务走代理会增加延迟或被拒绝）。
+            修改后需点击「保存」，下次启动下载 / 调用 API 时生效。
+          </div>
+        </div>
+      )}
+
+      {/* ── 升级 ── */}
+      {tab === "upgrade" && (
+        <div>
+          <h3 style={groupTitle}>应用升级</h3>
+          <div style={{ fontSize: 12, marginBottom: 8 }}>
+            当前版本：<b style={{ fontFamily: "monospace" }}>{appVersion ?? "…"}</b>
+            {api.transport === "http" && (
+              <span style={{ color: "var(--muted)" }}>（headless 浏览器模式不支持升级）</span>
+            )}
+          </div>
+          <div style={{ ...hint, marginBottom: 12 }}>
+            离线升级：使用 <code>talksage.ps1 package</code> 产出的安装包（NSIS .exe 或 MSI），
+            选择后应用会校验版本（需高于当前版本）并静默安装，安装完成后重新启动即可。
+            在线升级为框架预留：配置更新源与签名公钥后，「检查更新」即可在线升级。
+          </div>
+          <h3 style={{ ...groupTitle, marginTop: 10 }}>在线升级</h3>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <button
+              disabled={upgradeChecking || api.transport === "http"}
+              onClick={handleCheckUpdates}
+              style={{ fontSize: 12, padding: "3px 10px", cursor: upgradeChecking || api.transport === "http" ? "default" : "pointer" }}
+            >
+              {upgradeChecking ? "检查中…" : "检查更新"}
+            </button>
+            {upgradeCheckResult && (
+              <span
+                style={{
+                  fontSize: 12,
+                  color: upgradeCheckResult.available
+                    ? "var(--live)"
+                    : upgradeCheckResult.configured === false
+                      ? "var(--muted)"
+                      : "var(--text-2)",
+                }}
+              >
+                {upgradeCheckResult.available && upgradeCheckResult.latest_version
+                  ? `${upgradeCheckResult.message}（${upgradeCheckResult.current_version} → ${upgradeCheckResult.latest_version}）`
+                  : upgradeCheckResult.message}
+              </span>
+            )}
+          </div>
+          <h3 style={{ ...groupTitle, marginTop: 10 }}>离线升级</h3>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <button
+              disabled={upgradeInstalling || api.transport === "http"}
+              onClick={handleInstallUpgradePackage}
+              style={{ fontSize: 12, padding: "3px 10px", cursor: upgradeInstalling || api.transport === "http" ? "default" : "pointer" }}
+            >
+              {upgradeInstalling ? "安装中…" : "选择升级包并安装"}
+            </button>
+            {upgradeInstallResult && (
+              <span style={{ fontSize: 12, color: upgradeInstallResult.ok ? "var(--live)" : "var(--danger)" }}>
+                {upgradeInstallResult.message}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ── 声音标识 ── */}
       {tab === "voice" && (
         <div>
@@ -1318,16 +1607,34 @@ export default function SettingsSection({
           flexShrink: 0,
         }}
       >
-        <button onClick={handleSave} disabled={saving} style={{ fontSize: 12 }}>
-          {saving ? "保存中…" : "保存设置"}
+        {/* 有改动时高亮并报数；没改动时置灰，避免"点了以为存了"和"存了还点"两种误会 */}
+        <button
+          onClick={handleSave}
+          disabled={saving || (baseline !== null && dirtyCount === 0)}
+          style={{
+            fontSize: 12,
+            fontWeight: 600,
+            padding: "5px 12px",
+            borderRadius: 8,
+            cursor: saving || (baseline !== null && dirtyCount === 0) ? "default" : "pointer",
+            border: dirtyCount > 0 ? "1px solid var(--me)" : "1px solid var(--border)",
+            background: dirtyCount > 0 ? "var(--me)" : "var(--surface-2)",
+            color: dirtyCount > 0 ? "#fff" : "var(--muted)",
+          }}
+        >
+          {saving ? "保存中…" : dirtyCount > 0 ? `保存设置（${dirtyCount} 项未保存）` : "保存设置"}
         </button>
+        {baseline !== null && dirtyCount === 0 && !saving && !message && (
+          <span style={{ fontSize: 11, color: "var(--muted)" }}>已保存</span>
+        )}
         {tab === "quality" && (
           <button onClick={handleResetQuality} disabled={saving} style={{ fontSize: 12 }}>
             恢复噪音阈值默认
           </button>
         )}
-        {message && (
-          <span style={{ fontSize: 11, color: message.startsWith("失败") ? "var(--danger)" : "var(--live)" }}>{message}</span>
+        {/* 又有新改动后收起"已保存"提示，避免和"N 项未保存"同时出现互相打架 */}
+        {message && (dirtyCount === 0 || message.startsWith("保存失败")) && (
+          <span style={{ fontSize: 11, color: message.startsWith("保存失败") ? "var(--danger)" : "var(--live)" }}>{message}</span>
         )}
       </div>
     </div>

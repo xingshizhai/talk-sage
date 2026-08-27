@@ -53,5 +53,5 @@ dist/
 tmp/
 .DS_Store
 
-# Claude Code 工作区（隔离 worktree，不入库）
-.claude/worktrees/
+# Claude Code 工作区（隔离 worktree 与本地设置，不入库）
+.claude/

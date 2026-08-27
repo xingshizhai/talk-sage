@@ -76,6 +76,10 @@ fn sources(kind: EngineKind) -> Vec<(String, String)> {
             // 由 `download_qwen3_asr` 走归档下载。
             (String::new(), String::new()),
         ],
+        EngineKind::WhisperMediumMetal => vec![(
+            "ggml-medium-q5_0.bin".to_string(),
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin".to_string(),
+        )],
         EngineKind::WhisperLargeV3TurboMetal => vec![(
             "ggml-large-v3-turbo-q5_0.bin".to_string(),
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin".to_string(),
@@ -92,6 +96,7 @@ fn hf_repo(kind: EngineKind) -> &'static str {
         EngineKind::WhisperBase => "csukuangfj/sherpa-onnx-whisper-base",
         EngineKind::WhisperSmall => "csukuangfj/sherpa-onnx-whisper-small",
         EngineKind::Qwen3Asr => "",
+        EngineKind::WhisperMediumMetal => "",
         EngineKind::WhisperLargeV3TurboMetal => "",
         EngineKind::AliyunCloud => "",
     }
@@ -105,6 +110,7 @@ pub fn download_size_mb(kind: EngineKind) -> u64 {
         EngineKind::WhisperBase => 280,
         EngineKind::WhisperSmall => 950,
         EngineKind::Qwen3Asr => 878,
+        EngineKind::WhisperMediumMetal => 317,
         EngineKind::WhisperLargeV3TurboMetal => 547,
         EngineKind::AliyunCloud => 0, // 云端引擎：无下载
     }
@@ -168,10 +174,12 @@ pub fn punct_download_size_mb() -> u64 {
 }
 
 /// Download the punctuation model into `<models_root>/punct-ct-transformer/`.
+/// `proxy` 为可选代理 URL（同 [`download_engine`]），`None` 时直连。
 pub fn download_punct_model(
     models_root: &Path,
     cancel: Arc<AtomicBool>,
     tx: Option<std::sync::mpsc::Sender<(u64, u64)>>,
+    proxy: Option<&str>,
 ) -> anyhow::Result<()> {
     use crate::punct::PUNCT_MODEL_DIR;
     if is_punct_model_installed(models_root) {
@@ -200,15 +208,15 @@ pub fn download_punct_model(
             let _ = sender.send((received, total));
         }) as Box<ProgressFn>
     });
-    log::info!("标点恢复模型安装开始: primary={GITHUB_URL} fallback={HF_FALLBACK_URL}");
-    let primary = download_file(GITHUB_URL, &archive, progress_box.as_deref(), Some(cancel.as_ref()))
+    log::info!("标点恢复模型安装开始: proxy={} primary={GITHUB_URL} fallback={HF_FALLBACK_URL}", proxy.unwrap_or("direct"));
+    let primary = download_file(GITHUB_URL, &archive, progress_box.as_deref(), Some(cancel.as_ref()), proxy)
         .and_then(|_| extract_punct_model(&archive, &dest, Some(cancel.as_ref())));
     if let Err(primary_error) = primary {
         if primary_error.downcast_ref::<DownloadCancelled>().is_some() {
             return Err(primary_error);
         }
         log::warn!("标点模型 GitHub 主源失败，切换 Hugging Face 备用源: {primary_error}");
-        download_file(HF_FALLBACK_URL, &dest, progress_box.as_deref(), Some(cancel.as_ref()))
+        download_file(HF_FALLBACK_URL, &dest, progress_box.as_deref(), Some(cancel.as_ref()), proxy)
             .map_err(|fallback_error| anyhow::anyhow!(
                 "标点模型主源与备用源均失败；GitHub: {primary_error}；Hugging Face: {fallback_error}"
             ))?;
@@ -272,26 +280,30 @@ pub fn remove_punct_model(models_root: &Path) -> std::io::Result<()> {
 /// 进度经 `progress` 回调（received/total 字节，total 未知为 0）。
 /// `cancel` 为可选的取消标志：置位后尽快停止并清理临时文件，返回
 /// [`DownloadCancelled`]。
+/// `proxy` 为可选 HTTP/HTTPS 代理 URL（如 `http://127.0.0.1:7890`），
+/// 来自应用配置；`None` 表示直连，不读取环境变量代理。
 pub fn download_engine(
     kind: EngineKind,
     models_root: &Path,
     progress: Option<&ProgressFn>,
     cancel: Option<&AtomicBool>,
+    proxy: Option<&str>,
 ) -> anyhow::Result<()> {
     if kind.is_available(models_root) {
         log::info!("模型已安装，跳过下载: engine={} dir={}", kind.display_name(), models_root.join(kind.model_dir_name()).display());
         return Ok(()); // 已安装
     }
     log::info!(
-        "模型安装开始: engine={} expected_mb={} root={}",
+        "模型安装开始: engine={} expected_mb={} proxy={} root={}",
         kind.display_name(),
         download_size_mb(kind),
+        proxy.unwrap_or("direct"),
         models_root.display()
     );
     std::fs::create_dir_all(models_root)?;
     ensure_download_space(kind, models_root)?;
     if kind == EngineKind::Qwen3Asr {
-        let result = download_qwen3_asr(models_root, progress, cancel);
+        let result = download_qwen3_asr(models_root, progress, cancel, proxy);
         if result.is_ok() {
             log::info!("模型安装完成: engine={} dir={}", kind.display_name(), models_root.join(kind.model_dir_name()).display());
         }
@@ -305,7 +317,8 @@ pub fn download_engine(
             continue;
         }
         let target = out_dir.join(&file);
-        if kind != EngineKind::WhisperLargeV3TurboMetal
+        let is_single_bin = matches!(kind, EngineKind::WhisperMediumMetal | EngineKind::WhisperLargeV3TurboMetal);
+        if !is_single_bin
             && target.exists()
             && target.metadata().map(|m| m.len() > 0).unwrap_or(false)
         {
@@ -316,11 +329,29 @@ pub fn download_engine(
         } else {
             explicit.to_string()
         };
+        // large-v3-turbo 有已知 SHA1；medium 无官方 SHA1，跳过校验
         let expected_sha1 = (kind == EngineKind::WhisperLargeV3TurboMetal).then_some(METAL_MODEL_SHA1);
-        download_file_checked(&url, &target, progress, cancel, expected_sha1)?;
+        download_file_checked(&url, &target, progress, cancel, expected_sha1, proxy)?;
     }
     log::info!("模型安装完成: engine={} dir={}", kind.display_name(), out_dir.display());
     Ok(())
+}
+
+/// 构造一个用于外网下载的 ureq Agent。
+/// - `proxy`：可选 HTTP/HTTPS 代理 URL（来自应用配置，不读 env var）。
+/// - 始终关闭 `try_proxy_from_env`，防止 env var 代理意外影响其他请求（如阿里云 ASR）。
+fn build_download_agent(proxy: Option<&str>) -> ureq::Agent {
+    let mut builder = ureq::AgentBuilder::new()
+        .try_proxy_from_env(false)
+        .timeout_connect(std::time::Duration::from_secs(30))
+        .timeout_read(std::time::Duration::from_secs(2));
+    if let Some(p) = proxy {
+        match ureq::Proxy::new(p) {
+            Ok(proxy_cfg) => { builder = builder.proxy(proxy_cfg); }
+            Err(e) => { log::warn!("代理地址无效，将直连: proxy={p} error={e}"); }
+        }
+    }
+    builder.build()
 }
 
 /// 下载期间的峰值空间预算。Qwen 需要同时保存压缩包与 staging；单文件 Metal
@@ -383,6 +414,7 @@ fn download_qwen3_asr(
     models_root: &Path,
     progress: Option<&ProgressFn>,
     cancel: Option<&AtomicBool>,
+    proxy: Option<&str>,
 ) -> anyhow::Result<()> {
     const URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2";
     std::fs::create_dir_all(models_root)?;
@@ -398,7 +430,7 @@ fn download_qwen3_asr(
     // 归档下载到 models/<dir>.tar.bz2
     let archive = models_root.join(format!("{}.tar.bz2", EngineKind::Qwen3Asr.model_dir_name()));
     log::info!("Qwen3-ASR 归档下载: archive={}", archive.display());
-    download_file(URL, &archive, progress, cancel)?;
+    download_file(URL, &archive, progress, cancel, proxy)?;
     log::info!("Qwen3-ASR 开始解压: archive={} staging={}", archive.display(), staging.display());
     if let Err(e) = unpack_tar_bz2_strip_top(&archive, &staging, cancel) {
         let _ = std::fs::remove_dir_all(&staging);
@@ -485,13 +517,15 @@ fn unpack_tar_bz2_strip_top(
 
 /// 流式下载单个文件到目标路径（进度回调；不覆盖已存在的非空文件）。
 /// `cancel` 置位时尽快停止：删除 `.part` 临时文件并返回 [`DownloadCancelled`]。
+/// `proxy` 为可选代理 URL，`None` 时直连（不读取 env var）。
 pub fn download_file(
     url: &str,
     target: &Path,
     progress: Option<&ProgressFn>,
     cancel: Option<&AtomicBool>,
+    proxy: Option<&str>,
 ) -> anyhow::Result<()> {
-    download_file_checked(url, target, progress, cancel, None)
+    download_file_checked(url, target, progress, cancel, None, proxy)
 }
 
 fn download_file_checked(
@@ -500,6 +534,7 @@ fn download_file_checked(
     progress: Option<&ProgressFn>,
     cancel: Option<&AtomicBool>,
     expected_sha1: Option<&str>,
+    proxy: Option<&str>,
 ) -> anyhow::Result<()> {
     if target.exists() && target.metadata().map(|m| m.len() > 0).unwrap_or(false) {
         if let Some(expected) = expected_sha1 {
@@ -535,10 +570,7 @@ fn download_file_checked(
     // 正常下载时数据持续到达，read 立即返回，不触发超时。
     // 注意：不能设整体超时（ureq 的 `.timeout()` 会覆盖 timeout_read，见 stream.rs
     // "deadline 优先"逻辑），停滞保护改由读取循环里的"无进展超时"承担。
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(30))
-        .timeout_read(std::time::Duration::from_secs(2))
-        .build();
+    let agent = build_download_agent(proxy);
     let mut request = agent.get(url);
     if existing > 0 {
         request = request.set("Range", &format!("bytes={existing}-"));

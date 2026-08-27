@@ -72,6 +72,7 @@ export default function HistorySection({
   onExportText,
   onExportAudio,
   onGenerateHighlights,
+  onRenameSession,
   onDeleteSession,
   onDeleteSessions,
   notesBusy,
@@ -90,6 +91,8 @@ export default function HistorySection({
   onExportText: (id: number) => Promise<string>;
   onExportAudio: (id: number) => Promise<string>;
   onGenerateHighlights: (id: number) => Promise<string[]>;
+  /** 重命名会话；传空串 = 清除自定义名，回到 "#id · 时间"。 */
+  onRenameSession: (id: number, title: string) => void;
   onDeleteSession: (id: number) => void;
   onDeleteSessions: (ids: number[]) => void;
   notesBusy: boolean;
@@ -109,6 +112,9 @@ export default function HistorySection({
   // 导出状态消息（已保存路径 / 下载提示）
   const [exportMsg, setExportMsg] = useState("");
   const [exporting, setExporting] = useState<"markdown" | "text" | "audio" | null>(null);
+  // 重命名：正在编辑的会话 id + 输入框草稿（列表与详情页共用一套状态，同时只会开一个）
+  const [renamingId, setRenamingId] = useState<number | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
 
   /** 导出会话内容：markdown / text / audio。桌面端返回落盘路径，浏览器模式触发下载。 */
   const runExport = useCallback(
@@ -191,6 +197,19 @@ export default function HistorySection({
     return t >= start && t < nextStart;
   }
 
+  /** 进入重命名编辑态（草稿预填当前名字）。 */
+  function startRename(id: number, current: string | null | undefined) {
+    setRenamingId(id);
+    setRenameDraft(current ?? "");
+  }
+
+  /** 提交重命名：名字没变就直接收起，不打扰后端。 */
+  function commitRename(id: number, current: string | null | undefined) {
+    const next = renameDraft.trim();
+    setRenamingId(null);
+    if (next !== (current ?? "").trim()) onRenameSession(id, next);
+  }
+
   /** 删除二次确认：第一次点击进入确认态（3 秒后自动恢复），再次点击执行删除。 */
   function confirmDelete(id: number) {
     if (confirmDeleteId === id) {
@@ -201,6 +220,53 @@ export default function HistorySection({
       setTimeout(() => setConfirmDeleteId((c) => (c === id ? null : c)), 3000);
     }
   }
+
+  /** 就地重命名输入框：Enter 保存 / Esc 取消 / 失焦保存。列表与详情页共用。 */
+  function renameInput(id: number, current: string | null | undefined) {
+    return (
+      <input
+        autoFocus
+        value={renameDraft}
+        maxLength={80}
+        placeholder="给这场会话起个名字（留空恢复默认）"
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => setRenameDraft(e.target.value)}
+        onBlur={() => commitRename(id, current)}
+        onKeyDown={(e) => {
+          // 阻止冒泡：历史页外层有全局快捷键（Space 暂停等）
+          e.stopPropagation();
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commitRename(id, current);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            setRenamingId(null);
+          }
+        }}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          padding: "2px 6px",
+          fontSize: 12,
+          borderRadius: 4,
+          border: "1px solid var(--me)",
+          background: "var(--surface-2)",
+          color: "var(--text)",
+        }}
+      />
+    );
+  }
+
+  const renameBtnStyle: React.CSSProperties = {
+    fontSize: 10,
+    padding: "1px 7px",
+    borderRadius: 6,
+    cursor: "pointer",
+    border: "1px solid var(--border)",
+    background: "var(--surface-2)",
+    color: "var(--muted)",
+    flexShrink: 0,
+  };
 
   const deleteBtnStyle: React.CSSProperties = {
     fontSize: 10,
@@ -246,15 +312,29 @@ export default function HistorySection({
 
       {detail ? (
         <div>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, alignItems: "center" }}>
-            <b>
-              会话 #{detail.id} <QualityBadge quality={detail.meta?.quality} />
-            </b>
-            <button onClick={() => onSelect(-1)} style={{ fontSize: 11 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "center" }}>
+            {renamingId === detail.id ? (
+              renameInput(detail.id, detail.title)
+            ) : (
+              <>
+                <b style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {detail.title || `会话 #${detail.id}`} <QualityBadge quality={detail.meta?.quality} />
+                </b>
+                <button
+                  onClick={() => startRename(detail.id, detail.title)}
+                  title={detail.title ? "重命名（留空恢复默认）" : "给这场会话命名"}
+                  style={renameBtnStyle}
+                >
+                  重命名
+                </button>
+              </>
+            )}
+            <button onClick={() => onSelect(-1)} style={{ fontSize: 11, marginLeft: "auto", flexShrink: 0 }}>
               ← 返回
             </button>
           </div>
           <div style={{ color: "var(--muted)" }}>
+            {detail.title ? `#${detail.id} · ` : ""}
             {formatTime(detail.started_at)}（{detail.segments.length} 段）
           </div>
 
@@ -665,11 +745,29 @@ export default function HistorySection({
                   }}
                   style={{ cursor: "pointer", flexShrink: 0 }}
                 />
-                <span>
-                  #{s.id} · {formatTime(s.started_at)} <QualityBadge quality={s.quality} />
-                </span>
+                {renamingId === s.id ? (
+                  renameInput(s.id, s.title)
+                ) : (
+                  <>
+                    {/* 命名过的会话以名字为主，编号和时间退到第二行 */}
+                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {s.title ? <b>{s.title}</b> : `#${s.id} · ${formatTime(s.started_at)}`} <QualityBadge quality={s.quality} />
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        startRename(s.id, s.title);
+                      }}
+                      title={s.title ? "重命名（留空恢复默认）" : "给这场会话命名"}
+                      style={{ ...renameBtnStyle, marginLeft: "auto" }}
+                    >
+                      重命名
+                    </button>
+                  </>
+                )}
               </div>
               <div style={{ color: "var(--muted)", marginLeft: 24 }}>
+                {s.title ? `#${s.id} · ${formatTime(s.started_at)} · ` : ""}
                 {s.segment_count} 段 · {s.term_count} 术语
                 {s.duration_ms ? ` · ${Math.round(s.duration_ms / 1000)}s` : ""}
                 {s.speech_ratio !== undefined ? ` · 语音 ${Math.round(s.speech_ratio * 100)}%` : ""}

@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AppApi, AppConfig, AsrModelInfo, AsrRuntimeStatus, DomainEvent, NotesTemplate, PluginMeta, PluginStatusInfo, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./api";
+import type { AppApi, AppConfig, AsrModelInfo, AsrRuntimeStatus, DomainEvent, NotesTemplate, OfflineUpgradeResult, PluginMeta, PluginStatusInfo, SegmentHit, SessionDetail, SessionRecord, TrioSummary, UpdateCheckResult } from "./api";
 
 /** 统一 fetch 辅助（同源 /api）。 */
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -126,6 +126,10 @@ export const ipcApi: AppApi = {
     return invoke("get_session", { sessionId: id });
   },
 
+  async renameSession(id: number, title: string): Promise<void> {
+    await invoke("rename_session", { sessionId: id, title });
+  },
+
   async deleteSession(id: number): Promise<void> {
     await invoke("delete_session", { sessionId: id });
   },
@@ -175,6 +179,10 @@ export const ipcApi: AppApi = {
     });
   },
 
+  async testProxy(proxyUrl: string): Promise<string> {
+    return invoke("test_proxy", { proxyUrl });
+  },
+
   async readLogs(lines?: number): Promise<string> {
     return invoke("read_logs", { lines });
   },
@@ -212,6 +220,18 @@ export const ipcApi: AppApi = {
 
   async cancelFileImport(): Promise<void> {
     await invoke("cancel_file_import");
+  },
+
+  async checkForUpdates(): Promise<UpdateCheckResult> {
+    return invoke<UpdateCheckResult>("check_for_updates");
+  },
+
+  async pickUpgradePackage(): Promise<string | null> {
+    return invoke<string | null>("pick_upgrade_package");
+  },
+
+  async installOfflineUpgrade(path: string): Promise<OfflineUpgradeResult> {
+    return invoke<OfflineUpgradeResult>("install_offline_upgrade", { path });
   },
 
   onImportEvent(handler: (ev: DomainEvent) => void): () => void {
@@ -344,6 +364,14 @@ export const httpApi: AppApi = {
     return req<SessionDetail>(`/session/${id}`);
   },
 
+  async renameSession(id: number, title: string): Promise<void> {
+    await req(`/session/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+  },
+
   async deleteSession(id: number): Promise<void> {
     await req(`/session/${id}`, { method: "DELETE" });
   },
@@ -444,6 +472,10 @@ export const httpApi: AppApi = {
     return r;
   },
 
+  async testProxy(_proxyUrl: string): Promise<string> {
+    throw new Error("headless 模式不支持代理测试");
+  },
+
   async readLogs(_lines?: number): Promise<string> {
     const r = await req<{ logs: string }>("/logs");
     return r.logs;
@@ -477,6 +509,18 @@ export const httpApi: AppApi = {
 
   async cancelFileImport(): Promise<void> {
     // headless 无文件导入
+  },
+
+  async checkForUpdates(): Promise<UpdateCheckResult> {
+    throw new Error("headless 模式不支持在线升级检查");
+  },
+
+  async pickUpgradePackage(): Promise<string | null> {
+    throw new Error("headless 模式不支持本地安装包选择");
+  },
+
+  async installOfflineUpgrade(_path: string): Promise<OfflineUpgradeResult> {
+    throw new Error("headless 模式不支持离线升级");
   },
 
   onImportEvent(_handler: (ev: DomainEvent) => void): () => void {

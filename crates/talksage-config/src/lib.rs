@@ -21,6 +21,9 @@ pub enum ConfigError {
 }
 
 /// 用户数据根目录（`TALKSAGE_DATA_DIR` 优先，默认 `~/.talksage`）。
+///
+/// 数据目录与配置目录分离（v0.2+）：数据（sessions.db / 录音 / 导出 / 声纹 /
+/// 窗口状态 / tmp）放这里；`talksage.toml` 见 [`default_config_file`]。
 pub fn default_data_dir() -> PathBuf {
     if let Ok(d) = env::var("TALKSAGE_DATA_DIR") {
         if !d.trim().is_empty() {
@@ -28,6 +31,35 @@ pub fn default_data_dir() -> PathBuf {
         }
     }
     dirs_home().join(".talksage")
+}
+
+/// 配置文件（`talksage.toml`）路径：`TALKSAGE_CONFIG_DIR` 优先；
+/// 未设时与数据目录相同（`<data_dir>/talksage.toml`，兼容旧版单目录布局）。
+pub fn default_config_file(data_dir: &Path) -> PathBuf {
+    if let Ok(d) = env::var("TALKSAGE_CONFIG_DIR") {
+        if !d.trim().is_empty() {
+            return PathBuf::from(d).join("talksage.toml");
+        }
+    }
+    data_dir.join("talksage.toml")
+}
+
+/// 会话目录：`<data_dir>/sessions/<id>/`。
+///
+/// 一个会话的所有文件（录音分轨 / master 主录音 / 导出 md/txt）都放在这里，
+/// 便于按会话归档与清理。返回前**不创建**目录（调用方按需创建）。
+pub fn session_dir(data_dir: &Path, session_id: i64) -> PathBuf {
+    data_dir.join("sessions").join(format!("{session_id}"))
+}
+
+/// 会话录音目录：`<data_dir>/sessions/<id>/recordings/`。
+pub fn session_recordings_dir(data_dir: &Path, session_id: i64) -> PathBuf {
+    session_dir(data_dir, session_id).join("recordings")
+}
+
+/// 会话导出目录：`<data_dir>/sessions/<id>/exports/`。
+pub fn session_exports_dir(data_dir: &Path, session_id: i64) -> PathBuf {
+    session_dir(data_dir, session_id).join("exports")
 }
 
 /// 跨平台用户主目录。
@@ -451,6 +483,7 @@ pub struct Config {
     pub knowledge_base: KnowledgeBaseConfig,
     pub webhooks: WebhooksConfig,
     pub scene: SceneConfig,
+    pub network: NetworkConfig,
 }
 
 impl Default for Config {
@@ -468,7 +501,33 @@ impl Default for Config {
             knowledge_base: KnowledgeBaseConfig::default(),
             webhooks: WebhooksConfig::default(),
             scene: SceneConfig::default(),
+            network: NetworkConfig::default(),
         }
+    }
+}
+
+/// 网络代理配置。
+/// 代理仅对外网请求生效（模型下载、LLM API、Webhook）；
+/// 阿里云 ASR 等国内服务始终直连，不受此配置影响。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkConfig {
+    /// HTTP/HTTPS 代理地址（如 `http://127.0.0.1:7890`）。
+    /// 留空或不填表示直连。
+    pub proxy: String,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self { proxy: String::new() }
+    }
+}
+
+impl NetworkConfig {
+    /// 返回有效的代理 URL；空字符串时返回 `None`。
+    pub fn proxy_url(&self) -> Option<&str> {
+        let s = self.proxy.trim();
+        if s.is_empty() { None } else { Some(s) }
     }
 }
 
@@ -1027,23 +1086,29 @@ impl Default for ServerConfig {
 }
 
 /// 配置管理器：负责分层加载、运行时更新与持久化。
+///
+/// 目录分离：`data_dir`（数据：会话库/录音/导出/声纹）与 `config_file`
+/// （配置：`talksage.toml`）彼此独立，见 [`default_config_file`]。
 pub struct ConfigManager {
     data_dir: PathBuf,
+    config_file: PathBuf,
     config: std::sync::RwLock<Config>,
 }
 
 impl ConfigManager {
     /// 从默认配置 + 用户文件加载。
     ///
-    /// `file` 为 None 时使用 `<data_dir>/talksage.toml`（不存在则仅默认值）。
+    /// `file` 为 None 时使用 [`default_config_file`]（`TALKSAGE_CONFIG_DIR`
+    /// 优先，否则 `<data_dir>/talksage.toml`；不存在则仅默认值）。
     pub fn load(data_dir: Option<PathBuf>, file: Option<&Path>) -> Result<Self, ConfigError> {
         let data_dir = data_dir.unwrap_or_else(default_data_dir);
         let mut config = Config::default();
-        let path = file
+        let config_file = file
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| data_dir.join("talksage.toml"));
+            .unwrap_or_else(|| default_config_file(&data_dir));
+        let path = &config_file;
         if path.exists() {
-            let raw = std::fs::read_to_string(&path)?;
+            let raw = std::fs::read_to_string(path)?;
             let user: Config = toml::from_str(&raw)?;
             config = merge_config(config, user);
             // 双通道：log 进日志文件（server/cli 在 load 前已初始化日志）；
@@ -1054,13 +1119,13 @@ impl ConfigManager {
             log::warn!(
                 "未找到配置文件: {}；使用内置默认值运行（LLM 功能不可用）。\
                  提示: 复制 config/talksage.example.toml 到该路径并填写 API Key 等配置，\
-                 或设置环境变量 TALKSAGE_DATA_DIR 指向配置目录。",
+                 或设置环境变量 TALKSAGE_CONFIG_DIR / TALKSAGE_DATA_DIR 指向配置目录。",
                 path.display()
             );
             eprintln!(
                 "[talksage] 未找到配置文件: {}\n\
                  提示: 复制 config/talksage.example.toml 到该路径并填写 API Key 等配置，\
-                 或设置环境变量 TALKSAGE_DATA_DIR 指向配置目录。\
+                 或设置环境变量 TALKSAGE_CONFIG_DIR / TALKSAGE_DATA_DIR 指向配置目录。\
                  当前使用内置默认值运行（LLM 功能不可用）。",
                 path.display()
             );
@@ -1068,14 +1133,17 @@ impl ConfigManager {
         apply_env_overrides(&mut config);
         Ok(Self {
             data_dir,
+            config_file,
             config: std::sync::RwLock::new(config),
         })
     }
 
-    /// 直接以自定义目录构建（测试 / headless 模式用）。
+    /// 直接以自定义目录构建（测试用；配置与数据同目录，自包含，不读环境变量）。
     pub fn from_config(config: Config, data_dir: PathBuf) -> Self {
+        let config_file = data_dir.join("talksage.toml");
         Self {
             data_dir,
+            config_file,
             config: std::sync::RwLock::new(config),
         }
     }
@@ -1085,18 +1153,30 @@ impl ConfigManager {
         self.config.read().unwrap().clone()
     }
 
-    /// 数据目录（会话、录音、数据库所在）。
+    /// 数据目录（会话库、录音、导出、声纹、窗口状态所在）。
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }
 
-    /// 运行时更新配置（回调内修改），并立即持久化到 `talksage.toml`。
+    /// 配置文件路径（`talksage.toml`；可能与数据目录不同）。
+    pub fn config_file(&self) -> &Path {
+        &self.config_file
+    }
+
+    /// 配置文件所在目录。
+    pub fn config_dir(&self) -> &Path {
+        self.config_file.parent().unwrap_or(&self.data_dir)
+    }
+
+    /// 运行时更新配置（回调内修改），并立即持久化到配置文件（`talksage.toml`）。
     pub fn update<R>(&self, f: impl FnOnce(&mut Config) -> R) -> Result<R, ConfigError> {
         let mut config = self.config.write().unwrap();
         let result = f(&mut config);
         let raw = toml::to_string(&*config)?;
-        std::fs::create_dir_all(&self.data_dir)?;
-        std::fs::write(self.data_dir.join("talksage.toml"), raw)?;
+        if let Some(parent) = self.config_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&self.config_file, raw)?;
         Ok(result)
     }
 }
@@ -1175,6 +1255,7 @@ fn merge_config(default: Config, user: Config) -> Config {
             enabled: user.webhooks.enabled,
             urls: user.webhooks.urls,
         },
+        network: user.network,
         scene: SceneConfig {
             mode: user.scene.mode,
             // 自定义参数跟随用户文件（未写时用默认模板）
@@ -1269,6 +1350,25 @@ fn apply_env_overrides(cfg: &mut Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_dirs_follow_per_session_layout() {
+        let data = std::path::Path::new("/data");
+        assert_eq!(
+            session_dir(data, 7),
+            std::path::PathBuf::from("/data/sessions/7")
+        );
+        assert_eq!(
+            session_recordings_dir(data, 7),
+            std::path::PathBuf::from("/data/sessions/7/recordings")
+        );
+        assert_eq!(
+            session_exports_dir(data, 7),
+            std::path::PathBuf::from("/data/sessions/7/exports")
+        );
+        // 不同会话隔离
+        assert_ne!(session_dir(data, 7), session_dir(data, 8));
+    }
 
     /// `ConfigManager::load` 末尾会调 `apply_env_overrides` 读进程环境变量，
     /// 而 `env_overrides_win` 会 `set_var` —— 环境变量是进程全局的，Rust 测试
@@ -1369,7 +1469,8 @@ min_segment_ms = 600
     fn update_persists_and_reloads() {
         let dir = std::env::temp_dir().join(format!("talksage-cfg-update-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mgr = ConfigManager::load(Some(dir.clone()), None).unwrap();
+        let file = dir.join("talksage.toml");
+        let mgr = ConfigManager::load(Some(dir.clone()), Some(&file)).unwrap();
         mgr.update(|c| {
             c.llm.default = "kimi".into();
             c.plugins
@@ -1378,12 +1479,33 @@ min_segment_ms = 600
         .unwrap();
 
         // 重新加载同一目录，应读到更新后的值
-        let reloaded = ConfigManager::load(Some(dir.clone()), None).unwrap();
+        let reloaded = ConfigManager::load(Some(dir.clone()), Some(&file)).unwrap();
         assert_eq!(reloaded.snapshot().llm.default, "kimi");
         assert!(!reloaded.snapshot().plugins.get_bool("translator", "enabled", true));
         // 未修改字段保持默认
         assert_eq!(reloaded.snapshot().asr.engine_zh, "qwen3-asr");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn config_file_follows_config_dir_env() {
+        let _env = env_lock();
+        let cfg_dir = std::env::temp_dir().join(format!("talksage-cfg-cfgdir-{}", std::process::id()));
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        unsafe {
+            std::env::set_var("TALKSAGE_CONFIG_DIR", &cfg_dir);
+        }
+        // 数据目录与配置目录分离：配置文件落在 TALKSAGE_CONFIG_DIR，而非数据目录
+        let data_dir = std::env::temp_dir().join(format!("talksage-cfg-datadir-{}", std::process::id()));
+        let file = default_config_file(&data_dir);
+        assert_eq!(file, cfg_dir.join("talksage.toml"));
+        unsafe {
+            std::env::remove_var("TALKSAGE_CONFIG_DIR");
+        }
+        // 未设时回退到数据目录（兼容旧版）
+        let file = default_config_file(&data_dir);
+        assert_eq!(file, data_dir.join("talksage.toml"));
+        std::fs::remove_dir_all(&cfg_dir).ok();
     }
 
     #[test]
@@ -1611,7 +1733,8 @@ knob = 42
     fn scene_custom_params_persist() {
         let dir = std::env::temp_dir().join(format!("talksage-cfg-scenec-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mgr = ConfigManager::load(Some(dir.clone()), None).unwrap();
+        let file = dir.join("talksage.toml");
+        let mgr = ConfigManager::load(Some(dir.clone()), Some(&file)).unwrap();
         mgr.update(|c| {
             c.scene.mode = SceneMode::Custom;
             c.scene.custom.vad_preset = VadPreset::Strict;
@@ -1619,7 +1742,7 @@ knob = 42
             c.scene.custom.client_enabled = false;
         })
         .unwrap();
-        let reloaded = ConfigManager::load(Some(dir.clone()), None).unwrap();
+        let reloaded = ConfigManager::load(Some(dir.clone()), Some(&file)).unwrap();
         let c = reloaded.snapshot();
         assert_eq!(c.scene.mode, SceneMode::Custom);
         let p = c.scene.effective();

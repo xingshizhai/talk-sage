@@ -21,6 +21,7 @@ use talksage_pipeline::{AudioInput, ClientCapture, RunningListen, StartListen, T
 use talksage_asr::{EngineKind, EnginePool};
 use talksage_session::SessionStore;
 
+mod updater;
 mod window_state;
 
 /// 应用状态（Tauri managed state）。
@@ -80,16 +81,24 @@ fn list_plugin_status(state: tauri::State<'_, AppState>) -> Vec<talksage_plugins
     state.service.plugin_registrations()
 }
 
-/// 把配置解析后的真实录音目录加入 asset 协议只读范围。
+/// 把录音目录加入 asset 协议只读范围（会话目录布局 `<data>/sessions/`）。
 /// 录音目录来自配置 data_dir（默认 ~/.talksage，或 TALKSAGE_DATA_DIR），
 /// 它可能不属于 Tauri 的 `$DATA_DIR`（例如用户自定义目录）。
 fn allow_recording_assets(app: &tauri::AppHandle, config: &ConfigManager) -> Result<(), String> {
-    let dir = config.snapshot().recording.resolve_dir(config.data_dir());
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建录音目录失败 {}: {e}", dir.display()))?;
+    let data_dir = config.data_dir();
+    // 授权会话目录（<data>/sessions/，递归覆盖各会话的 recordings/）
+    let sessions_dir = data_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).map_err(|e| format!("创建会话目录失败 {}: {e}", sessions_dir.display()))?;
     app.asset_protocol_scope()
-        .allow_directory(&dir, false)
-        .map_err(|e| format!("授权录音播放目录失败 {}: {e}", dir.display()))?;
-    log::info!("历史录音播放目录已授权: {}", dir.display());
+        .allow_directory(&sessions_dir, true)
+        .map_err(|e| format!("授权录音播放目录失败 {}: {e}", sessions_dir.display()))?;
+    // 兼容旧布局：<data>/recordings/
+    let legacy_dir = config.snapshot().recording.resolve_dir(data_dir);
+    std::fs::create_dir_all(&legacy_dir).map_err(|e| format!("创建录音目录失败 {}: {e}", legacy_dir.display()))?;
+    app.asset_protocol_scope()
+        .allow_directory(&legacy_dir, false)
+        .map_err(|e| format!("授权录音播放目录失败 {}: {e}", legacy_dir.display()))?;
+    log::info!("历史录音播放目录已授权: {} + {}", sessions_dir.display(), legacy_dir.display());
     Ok(())
 }
 
@@ -140,6 +149,8 @@ async fn download_model(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    let proxy = state.config.snapshot().network.proxy_url().map(str::to_string);
+    log::info!("download_model: engine={engine} proxy={:?}", proxy.as_deref().unwrap_or("(直连)"));
     // punct 模型独立处理，不走 EngineKind 查表
     if engine == "punct" {
         let Some(root) = TalkSageService::resolve_models_dir() else {
@@ -175,7 +186,7 @@ async fn download_model(
                 );
             };
             emit("downloading", 0, "开始下载…");
-            let result = talksage_asr::download_punct_model(&root, cancel_flag, None);
+            let result = talksage_asr::download_punct_model(&root, cancel_flag, None, proxy.as_deref());
             match result {
                 Ok(()) => { log::info!("桌面模型下载任务完成: engine=punct"); emit("done", 100, "安装完成") },
                 Err(e) if e.downcast_ref::<talksage_asr::models::DownloadCancelled>().is_some() => { log::info!("桌面模型下载任务取消: engine=punct"); emit("cancelled", 0, "已取消") },
@@ -230,8 +241,13 @@ async fn download_model(
         // 进度闭包自持 AppHandle 克隆，避免借用 emit
         let progress_app = app.clone();
         let progress_engine = engine_id.clone();
+        // CDN 不一定返回 Content-Length；用已知预估大小兜底，避免进度条永远停在 0%
+        let fallback_bytes = talksage_asr::models::download_size_mb(kind) * 1024 * 1024;
         let progress = move |received: u64, total: u64| {
-            let percent = if total > 0 { ((received as f64 / total as f64) * 100.0) as u32 } else { 0 };
+            let effective_total = if total > 0 { total } else { fallback_bytes };
+            let percent = if effective_total > 0 {
+                ((received as f64 / effective_total as f64) * 100.0).min(99.0) as u32
+            } else { 0 };
             let _ = progress_app.emit(
                 "talksage://event",
                 DomainEvent::ModelProgress {
@@ -242,7 +258,7 @@ async fn download_model(
                 },
             );
         };
-        let result = talksage_asr::models::download_engine(kind, &root, Some(&progress), Some(&cancel_flag));
+        let result = talksage_asr::models::download_engine(kind, &root, Some(&progress), Some(&cancel_flag), proxy.as_deref());
         match result {
             Ok(()) => {
                 log::info!("桌面模型下载任务完成: engine={engine_id}");
@@ -323,12 +339,18 @@ fn save_config(
             return Err(format!("插件配置无效：{details}"));
         }
     }
+    // 记录本次保存涉及的顶层 key，方便排查配置未生效问题
+    let keys: Vec<&str> = updates.as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
+    log::info!("save_config: 收到配置更新 keys={keys:?}");
     state
         .config
         .update(|c| {
             apply_config_updates(c, &updates);
         })
         .map_err(|e| format!("保存配置失败: {e}"))?;
+    // 记录保存后实际生效的代理，验证 network 字段是否正确写入
+    let proxy_after = state.config.snapshot().network.proxy_url().map(str::to_string).unwrap_or_default();
+    log::info!("save_config: 配置已写入磁盘 proxy={proxy_after:?}");
     // 录音目录可在设置页修改，保存后同步刷新 asset scope。
     allow_recording_assets(&app, &state.config)?;
     Ok(())
@@ -487,6 +509,11 @@ fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::V
         }
         if let Some(cs) = rec.get("clean_silence").and_then(|v| v.as_bool()) {
             c.recording.clean_silence = cs;
+        }
+    }
+    if let Some(net) = updates.get("network") {
+        if let Some(p) = net.get("proxy").and_then(|v| v.as_str()) {
+            c.network.proxy = p.trim().to_string();
         }
     }
     // quality：null → 恢复默认；否则按字段更新
@@ -720,6 +747,12 @@ fn get_session(session_id: i64, state: tauri::State<'_, AppState>) -> Result<tal
     state.sessions.get_session(session_id).map_err(|e| e.to_string())
 }
 
+/// 重命名会话；空串 = 清除自定义名，列表回到 "#id · 时间"。
+#[tauri::command]
+fn rename_session(session_id: i64, title: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.sessions.set_session_title(session_id, &title).map_err(|e| e.to_string())
+}
+
 /// 删除会话（含段/术语/翻译）。
 #[tauri::command]
 fn delete_session(session_id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
@@ -806,12 +839,12 @@ fn generate_trio_notes(session_id: i64, meeting_name: Option<String>, meeting_de
 }
 
 /// 导出会话为 Markdown 单文件（转写 + 纪要 + 指标 + 质量；借鉴 Call.md markdown-export），
-/// 写入 `<data_dir>/exports/session-{id}.md` 并返回内容。
+/// 写入 `<data_dir>/sessions/{id}/exports/session-{id}.md` 并返回内容。
 #[tauri::command]
 fn export_session_markdown(session_id: i64, state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
     let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
     let content = talksage_session::export_markdown(&detail);
-    let dir = state.config.data_dir().join("exports");
+    let dir = talksage_config::session_exports_dir(state.config.data_dir(), session_id);
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建导出目录失败: {e}"))?;
     let path = dir.join(format!("session-{session_id}.md"));
     std::fs::write(&path, &content).map_err(|e| format!("写入导出文件失败: {e}"))?;
@@ -819,12 +852,12 @@ fn export_session_markdown(session_id: i64, state: tauri::State<'_, AppState>) -
 }
 
 /// 导出会话为纯文本转写（无 Markdown 标记），写入
-/// `<data_dir>/exports/session-{id}.txt` 并返回内容。
+/// `<data_dir>/sessions/{id}/exports/session-{id}.txt` 并返回内容。
 #[tauri::command]
 fn export_session_text(session_id: i64, state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
     let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
     let content = talksage_session::export_transcript_text(&detail);
-    let dir = state.config.data_dir().join("exports");
+    let dir = talksage_config::session_exports_dir(state.config.data_dir(), session_id);
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建导出目录失败: {e}"))?;
     let path = dir.join(format!("session-{session_id}.txt"));
     std::fs::write(&path, &content).map_err(|e| format!("写入导出文件失败: {e}"))?;
@@ -832,7 +865,7 @@ fn export_session_text(session_id: i64, state: tauri::State<'_, AppState>) -> Re
 }
 
 /// 导出会话完整录音（master 双声道，单流时复用分轨），复制到
-/// `<data_dir>/exports/session-{id}.wav` 并返回路径。无录音时返回可读错误。
+/// `<data_dir>/sessions/{id}/exports/session-{id}.wav` 并返回路径。无录音时返回可读错误。
 #[tauri::command]
 fn export_session_audio(session_id: i64, state: tauri::State<'_, AppState>) -> Result<String, String> {
     let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
@@ -845,7 +878,7 @@ fn export_session_audio(session_id: i64, state: tauri::State<'_, AppState>) -> R
     if !src.is_file() {
         return Err(format!("录音文件不存在: {}", src.display()));
     }
-    let dir = state.config.data_dir().join("exports");
+    let dir = talksage_config::session_exports_dir(state.config.data_dir(), session_id);
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建导出目录失败: {e}"))?;
     let dst = dir.join(format!("session-{session_id}.wav"));
     std::fs::copy(&src, &dst).map_err(|e| format!("复制录音失败: {e}"))?;
@@ -1069,15 +1102,39 @@ fn test_llm(
         .providers
         .get(&provider)
         .ok_or_else(|| format!("未知 provider: {provider}"))?;
+    let proxy = snapshot.network.proxy_url().map(str::to_string);
     let llm = talksage_llm::OpenAICompatProvider::new(
         api_key
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| cfg.api_key.clone()),
         model.unwrap_or_else(|| cfg.model.clone()),
         base_url.unwrap_or_else(|| cfg.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com/v1".to_string())),
-    );
+    ).with_proxy(proxy);
     llm.test_connection().map_err(|e| format!("LLM 检查失败: {e}"))
 }
+
+/// 代理连通性测试：向目标地址发 HEAD 请求，检查代理是否可达。
+#[tauri::command]
+fn test_proxy(proxy_url: String, _state: tauri::State<'_, AppState>) -> Result<String, String> {
+    if proxy_url.trim().is_empty() {
+        return Err("代理地址不能为空".into());
+    }
+    let proxy_cfg = ureq::Proxy::new(&proxy_url).map_err(|e| format!("代理地址格式错误: {e}"))?;
+    let agent = ureq::AgentBuilder::new()
+        .try_proxy_from_env(false)
+        .proxy(proxy_cfg)
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build();
+    match agent.head("https://www.google.com").call() {
+        Ok(resp) => Ok(format!("代理可用（HTTP {}）", resp.status())),
+        Err(e) => Err(format!("代理测试失败: {e}")),
+    }
+}
+
+// suppress unused import warning when test_proxy is the only user
+#[allow(unused_imports)]
+use std::sync::Arc as _Arc;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -1109,6 +1166,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
             config,
             sessions,
@@ -1126,6 +1184,7 @@ pub fn run() {
             download_model,
             cancel_model_download,
             remove_model,
+            test_proxy,
             save_config,
             ping,
             start_listen,
@@ -1140,6 +1199,7 @@ pub fn run() {
             list_sessions,
             search_sessions,
             get_session,
+            rename_session,
             delete_session,
             list_notes_templates,
             generate_notes,
@@ -1155,7 +1215,10 @@ pub fn run() {
             pick_audio_file,
             pick_folder,
             start_file_import,
-            cancel_file_import
+            cancel_file_import,
+            updater::check_for_updates,
+            updater::pick_upgrade_package,
+            updater::install_offline_upgrade
         ])
         .setup(move |app| {
             if let Err(e) = std::fs::create_dir_all(&data_dir) {

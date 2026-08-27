@@ -91,7 +91,10 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/asr/models/{engine}/remove", axum::routing::post(remove_model_api))
         .route("/sessions", get(list_sessions_api))
         .route("/search", get(search_api))
-        .route("/session/{id}", get(get_session_api).delete(delete_session_api))
+        .route(
+            "/session/{id}",
+            get(get_session_api).delete(delete_session_api).patch(rename_session_api),
+        )
         .route("/templates", get(list_templates_api))
         .route("/session/{id}/notes", axum::routing::post(generate_notes_api))
         .route("/session/{id}/trio-notes", axum::routing::post(generate_trio_notes_api))
@@ -332,6 +335,7 @@ async fn download_model_api(
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
+    let proxy = state.config.snapshot().network.proxy_url().map(str::to_string);
     // punct 模型独立处理，不走 EngineKind 查表
     if engine == "punct" {
         let Some(root) = resolve_models_dir() else {
@@ -364,7 +368,7 @@ async fn download_model_api(
                 });
             };
             emit("downloading", 0, "开始下载…");
-            let result = talksage_asr::download_punct_model(&root, cancel_flag, None);
+            let result = talksage_asr::download_punct_model(&root, cancel_flag, None, proxy.as_deref());
             match result {
                 Ok(()) => { log::info!("服务端模型下载任务完成: engine=punct"); emit("done", 100, "安装完成") },
                 Err(e) if e.downcast_ref::<talksage_asr::models::DownloadCancelled>().is_some() => { log::info!("服务端模型下载任务取消: engine=punct"); emit("cancelled", 0, "已取消") },
@@ -418,8 +422,12 @@ async fn download_model_api(
         // 进度闭包自持发送器克隆，避免借用 emit
         let progress_events = events.clone();
         let progress_engine = engine_id.clone();
+        let fallback_bytes = talksage_asr::models::download_size_mb(kind) * 1024 * 1024;
         let progress = move |received: u64, total: u64| {
-            let percent = if total > 0 { ((received as f64 / total as f64) * 100.0) as u32 } else { 0 };
+            let effective_total = if total > 0 { total } else { fallback_bytes };
+            let percent = if effective_total > 0 {
+                ((received as f64 / effective_total as f64) * 100.0).min(99.0) as u32
+            } else { 0 };
             let _ = progress_events.send(DomainEvent::ModelProgress {
                 engine: progress_engine.clone(),
                 stage: "downloading".into(),
@@ -427,7 +435,7 @@ async fn download_model_api(
                 message: String::new(),
             });
         };
-        let result = talksage_asr::models::download_engine(kind, &root, Some(&progress), Some(cancel_flag.as_ref()));
+        let result = talksage_asr::models::download_engine(kind, &root, Some(&progress), Some(cancel_flag.as_ref()), proxy.as_deref());
         match result {
             Ok(()) => { log::info!("服务端模型下载任务完成: engine={engine_id}"); emit("done", 100, "安装完成") },
             Err(e) if e.downcast_ref::<talksage_asr::models::DownloadCancelled>().is_some() => {
@@ -713,6 +721,28 @@ async fn get_session_api(
     }
 }
 
+#[derive(Deserialize)]
+struct RenameSessionBody {
+    /// 新会话名；空串 = 清除自定义名，回到 "#id · 时间"。
+    title: String,
+}
+
+/// 重命名会话。
+async fn rename_session_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(body): Json<RenameSessionBody>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    match state.sessions.set_session_title(id, &body.title) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
 /// 删除会话（含段/术语/翻译）。
 async fn delete_session_api(
     State(state): State<ServerState>,
@@ -948,6 +978,7 @@ async fn test_llm_api(State(state): State<ServerState>, headers: axum::http::Hea
     let Some(cfg) = snapshot.llm.providers.get(&provider) else {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("未知 provider: {provider}") }))).into_response();
     };
+    let proxy = snapshot.network.proxy_url().map(str::to_string);
     let llm = talksage_llm::OpenAICompatProvider::new(
         body.api_key
             .clone()
@@ -955,7 +986,7 @@ async fn test_llm_api(State(state): State<ServerState>, headers: axum::http::Hea
             .unwrap_or_else(|| cfg.api_key.clone()),
         body.model.clone().unwrap_or_else(|| cfg.model.clone()),
         body.base_url.clone().unwrap_or_else(|| cfg.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com/v1".to_string())),
-    );
+    ).with_proxy(proxy);
     // 网络调用放进阻塞线程池，别占 tokio worker
     match tokio::task::spawn_blocking(move || llm.test_connection()).await {
         Ok(Ok(())) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
@@ -1185,7 +1216,7 @@ struct RecordingQuery {
 async fn get_recording_api(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
-    AxumPath(filename): AxumPath<String>,
+    AxumPath(rel_path): AxumPath<String>,
     Query(query): Query<RecordingQuery>,
 ) -> impl IntoResponse {
     // HTMLAudioElement 不能附加 X-Talksage-Token，因此该只读媒体端点额外接受
@@ -1194,14 +1225,37 @@ async fn get_recording_api(
     if !token_ok(&state, &headers) && !query_token_ok {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
-    // 解析录音目录（与监听时一致）
-    let snapshot = state.config.snapshot();
-    let rec_dir = snapshot.recording.resolve_dir(state.config.data_dir());
-    // 防目录穿越：仅允许文件名（不含分隔符）
-    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+    // 防目录穿越：仅允许以下两种形态之一：
+    //   - 旧式纯文件名（<data>/recordings/<name>）
+    //   - 会话目录相对路径（sessions/<id>/recordings/<name>）
+    if rel_path.contains("..") {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "bad filename" }))).into_response();
     }
-    let path = rec_dir.join(&filename);
+    let data_dir = state.config.data_dir().to_path_buf();
+    let p = std::path::Path::new(&rel_path);
+    let components: Vec<_> = p.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    let path = match components.as_slice() {
+        // sessions/<id>/recordings/<file>（新布局）
+        [seg, id, rec, file] if seg == "sessions" && rec == "recordings" => {
+            if !id.chars().all(|c| c.is_ascii_digit()) {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "bad session id" }))).into_response();
+            }
+            data_dir.join("sessions").join(id).join("recordings").join(file)
+        }
+        // <file>：先查旧布局 <data>/recordings/<file>，再扫新布局 sessions/*/recordings/<file>
+        [file] => {
+            let legacy = data_dir.join("recordings").join(file);
+            if legacy.is_file() {
+                legacy
+            } else {
+                match find_in_session_recordings(&data_dir, file) {
+                    Some(found) => found,
+                    None => legacy, // 让后续 is_file() 判定为 not found
+                }
+            }
+        }
+        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "bad filename" }))).into_response(),
+    };
     if !path.is_file() {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "not found" }))).into_response();
     }
@@ -1217,6 +1271,23 @@ async fn get_recording_api(
             .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
+}
+
+/// 在会话目录布局（`<data>/sessions/<id>/recordings/`）中按文件名查找录音。
+/// 文件名唯一性由录音时间戳保证，跨会话不会冲突。
+fn find_in_session_recordings(data_dir: &std::path::Path, filename: &str) -> Option<std::path::PathBuf> {
+    let sessions = data_dir.join("sessions");
+    let entries = std::fs::read_dir(&sessions).ok()?;
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let candidate = entry.path().join("recordings").join(filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 async fn handle_ws(mut socket: WebSocket, state: ServerState) {

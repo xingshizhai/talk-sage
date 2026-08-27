@@ -26,6 +26,8 @@ pub struct OpenAICompatProvider {
     api_key: String,
     model: String,
     base_url: String,
+    /// 可选代理 URL（如 `http://127.0.0.1:7890`）；`None` 时直连，不读 env var。
+    proxy: Option<String>,
 }
 
 impl OpenAICompatProvider {
@@ -38,7 +40,30 @@ impl OpenAICompatProvider {
             api_key: api_key.into(),
             model: model.into(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
+            proxy: None,
         }
+    }
+
+    /// 设置 HTTP 代理 URL（如 `http://127.0.0.1:7890`）。
+    /// 无效 URL 会被忽略并记录警告。
+    pub fn with_proxy(mut self, proxy: Option<impl Into<String>>) -> Self {
+        self.proxy = proxy.map(Into::into);
+        self
+    }
+
+    fn build_agent(&self) -> ureq::Agent {
+        let mut builder = ureq::AgentBuilder::new()
+            .try_proxy_from_env(false)
+            .timeout_connect(LLM_CONNECT_TIMEOUT)
+            .timeout_read(LLM_READ_TIMEOUT)
+            .timeout_write(LLM_WRITE_TIMEOUT);
+        if let Some(p) = &self.proxy {
+            match ureq::Proxy::new(p) {
+                Ok(proxy_cfg) => { builder = builder.proxy(proxy_cfg); }
+                Err(e) => { log::warn!("LLM 代理地址无效，将直连: proxy={p} error={e}"); }
+            }
+        }
+        builder.build()
     }
 
     /// 最小化连通性测试：向配置的端点发一个 max_tokens=1 的请求，
@@ -52,11 +77,7 @@ impl OpenAICompatProvider {
             "max_tokens": 1,
             "temperature": 0.0,
         });
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(LLM_CONNECT_TIMEOUT)
-            .timeout_read(LLM_READ_TIMEOUT)
-            .timeout_write(LLM_WRITE_TIMEOUT)
-            .build();
+        let agent = self.build_agent();
         let mut req = agent
             .post(&url)
             .timeout(LLM_OVERALL_TIMEOUT)
@@ -115,11 +136,7 @@ impl LLMProvider for OpenAICompatProvider {
             "temperature": 0.3,
         });
 
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(LLM_CONNECT_TIMEOUT)
-            .timeout_read(LLM_READ_TIMEOUT)
-            .timeout_write(LLM_WRITE_TIMEOUT)
-            .build();
+        let agent = self.build_agent();
         let mut req = agent
             .post(&url)
             .timeout(LLM_OVERALL_TIMEOUT)

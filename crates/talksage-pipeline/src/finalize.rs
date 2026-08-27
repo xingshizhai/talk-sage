@@ -113,16 +113,18 @@ impl WebhookDeps for WebhookHost {
     fn push(&self, session_id: i64) -> anyhow::Result<()> {
         // 第二道闸：配置在会后现取，会话进行中改了开关也算数（与搬迁前一致）。
         // 插件自身的 enabled 只决定 finalizer 装不装，看不到 [webhooks]。
-        let wh_cfg = self.config.snapshot().webhooks;
+        let snap = self.config.snapshot();
+        let wh_cfg = snap.webhooks.clone();
         if !wh_cfg.enabled || wh_cfg.urls.is_empty() {
             return Ok(());
         }
+        let proxy = snap.network.proxy_url().map(str::to_string);
         let store = self.store.clone();
         // 独立线程：webhook 是网络 IO，不能拖住会话收尾（停止监听后 UI 要立刻可用）。
         // 代价是线程内的失败进不了 FinalizeReport —— 与搬迁前一样，只能靠日志。
         std::thread::spawn(move || {
             if let Ok(detail) = store.get_session(session_id) {
-                let results = talksage_session::trigger_meeting_webhooks(&detail, &wh_cfg);
+                let results = talksage_session::trigger_meeting_webhooks(&detail, &wh_cfg, proxy.as_deref());
                 for r in &results {
                     log::info!(
                         "webhook {}: {}（{}）",

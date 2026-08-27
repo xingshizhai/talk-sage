@@ -259,6 +259,7 @@ impl TalkSageService {
         if provider.api_key.is_empty() && name != "ollama" {
             return None;
         }
+        let proxy = snapshot.network.proxy_url().map(str::to_string);
         Some(Arc::new(OpenAICompatProvider::new(
             provider.api_key.clone(),
             provider.model.clone(),
@@ -266,7 +267,7 @@ impl TalkSageService {
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "https://api.deepseek.com/v1".to_string()),
-        )))
+        ).with_proxy(proxy)))
     }
 
     /// 探测 models/ 根目录。
@@ -417,9 +418,12 @@ impl TalkSageService {
             talksage_asr::AsrRoute::AliyunCloud => talksage_asr::GpuBackend::None,
         };
         if matches!(gpu_backend, talksage_asr::GpuBackend::Metal | talksage_asr::GpuBackend::Vulkan) {
-            user_engine_kind = EngineKind::WhisperLargeV3TurboMetal;
-            client_engine_kind = EngineKind::WhisperLargeV3TurboMetal;
-            log::info!("whisper.cpp GPU 路由已选择（{}），用户流与客户流使用 Whisper large-v3-turbo Q5_0", gpu_backend.display_name());
+            // 如果用户已明确选择某个 whisper.cpp GPU 模型，尊重其选择；否则默认 large-v3-turbo
+            if !matches!(user_engine_kind, EngineKind::WhisperMediumMetal | EngineKind::WhisperLargeV3TurboMetal) {
+                user_engine_kind = EngineKind::WhisperLargeV3TurboMetal;
+                client_engine_kind = EngineKind::WhisperLargeV3TurboMetal;
+            }
+            log::info!("whisper.cpp GPU 路由已选择（{}），用户流={} 客户流={}", gpu_backend.display_name(), user_engine_kind.display_name(), client_engine_kind.display_name());
         }
         let user_engine = req.user_engine.unwrap_or(user_engine_kind);
         let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
@@ -434,14 +438,10 @@ impl TalkSageService {
         }
 
         let want_record = req.record.unwrap_or(snapshot.recording.enabled);
+        // 只解析录音目录，不在这里创建：有会话时 start() 会按会话目录覆盖并创建，
+        // 无会话时 start() 兜底创建，避免在 data/ 下残留空的默认 recordings 目录。
         let recording_dir = if want_record {
-            let dir = snapshot.recording.resolve_dir(self.config.data_dir());
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                log::warn!("创建录音目录失败（本次不录音）: {e}");
-                None
-            } else {
-                Some(dir)
-            }
+            Some(snapshot.recording.resolve_dir(self.config.data_dir()))
         } else {
             None
         };
@@ -610,7 +610,7 @@ impl TalkSageService {
             ),
             None => (None, None),
         };
-        let cfg = self.build_live_config_with(&req, quality, webhook)?;
+        let mut cfg = self.build_live_config_with(&req, quality, webhook)?;
 
         let session_id = if let Some(store) = &sessions {
             let now = unix_secs();
@@ -618,6 +618,27 @@ impl TalkSageService {
         } else {
             None
         };
+
+        // 录音与导出按会话目录归档：<data_dir>/sessions/<id>/recordings（一次会话一个目录）。
+        // 在 session_id 创建后覆盖 recording_dir（build_live_config 阶段还不知道 id）。
+        // 无会话（不落库）时兜底创建原目录，保证录音可用。
+        if let Some(sid) = session_id {
+            if cfg.recording_dir.is_some() {
+                let rec_dir = talksage_config::session_recordings_dir(self.config.data_dir(), sid);
+                match std::fs::create_dir_all(&rec_dir) {
+                    Ok(()) => {
+                        cfg.recording_dir = Some(rec_dir);
+                        log::info!("会话 #{sid} 录音目录: {}", cfg.recording_dir.as_ref().unwrap().display());
+                    }
+                    Err(e) => log::warn!("创建会话录音目录失败（本次不录音）: {e}"),
+                }
+            }
+        } else if let Some(dir) = &cfg.recording_dir {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                log::warn!("创建录音目录失败（本次不录音）: {e}");
+                cfg.recording_dir = None;
+            }
+        }
 
         let mut session_writer = match (&sessions, session_id) {
             (Some(store), Some(sid)) => match SessionWriter::start(
@@ -722,7 +743,11 @@ fn build_master_recording(sid: i64, stats: &[talksage_session::StreamMeta]) -> O
         [] => None,
         [single] => Some(single.display().to_string()),
         [left, right, ..] => {
-            let output = left.parent()?.join(format!("session-{sid}_master.wav"));
+            // master 放在会话目录（recordings 的上一级）：<data>/sessions/<id>/master.wav
+            let output = match left.parent().and_then(|p| p.parent()) {
+                Some(dir) => dir.join(format!("session-{sid}_master.wav")),
+                None => left.with_file_name(format!("session-{sid}_master.wav")),
+            };
             match talksage_audio::wav::create_stereo_master(left, right, &output) {
                 Ok(()) => {
                     log::info!("会话 #{sid} 完整双声道录音已生成: {}", output.display());

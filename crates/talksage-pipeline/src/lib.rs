@@ -488,7 +488,7 @@ impl StreamWorker {
         } else {
             // whisper.cpp GPU 是独立 adapter，不依赖 sherpa provider。离线 bench
             // 可能构造 CPU route，但实际引擎仍必须如实记录/隔离为对应 GPU 后端。
-            let provider = if cfg.engine_kind == talksage_asr::EngineKind::WhisperLargeV3TurboMetal {
+            let provider = if matches!(cfg.engine_kind, talksage_asr::EngineKind::WhisperMediumMetal | talksage_asr::EngineKind::WhisperLargeV3TurboMetal) {
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                 { "metal" }
                 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -610,6 +610,8 @@ impl StreamWorker {
             // 麦克风模式
             InputKind::Mic => {
                 let (mut hub, rx) = AudioHub::new_with_gain(chunk_ms, self.input_gain_db);
+                // 让采集回调在音频线程直接更新 level，不经过 tick()，避免 ASR 推理阻塞时电平冻结
+                hub.set_level(self.level.clone());
                 hub.start(self.mic_device.as_deref())?;
                 self.hub = Some(hub);
                 self.rx_audio = Some(rx);

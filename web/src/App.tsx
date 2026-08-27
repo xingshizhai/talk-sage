@@ -67,6 +67,8 @@ export default function App() {
   const [status, setStatus] = useState<string>("待机");
   // 启动默认进入「实时转写」页（不跨启动恢复导航页）
   const [navPage, setNavPage] = useState<string>("transcript");
+  // 设置页有未保存改动（由 SettingsSection 上报）：离开前需要确认。
+  const [settingsDirty, setSettingsDirty] = useState(false);
   const [micRms, setMicRms] = useState(0); // 麦克风电平（Level 事件）
   const [asideCollapsed, setAsideCollapsed] = useState<boolean>(() => loadAsideCollapsed());
   const [mode, setMode] = useState<TranscriptMode>(() => loadTranscriptMode());
@@ -236,6 +238,10 @@ export default function App() {
       }
       if (ev.type === "term") {
         setTerms((prev) => {
+          // content="" 且 final 是骨架撤销信号，移除该卡片
+          if (ev.status === "final" && ev.content === "") {
+            return prev.filter((t) => t.resultId !== ev.result_id);
+          }
           const idx = prev.findIndex((t) => t.resultId === ev.result_id);
           if (idx >= 0) {
             const next = [...prev];
@@ -295,7 +301,8 @@ export default function App() {
     return () => off();
   }, []);
 
-  const currentSceneLabel = config ? SCENE_LABELS[config.scene.mode] : "加载中…";
+  // headless 的 /config 不返回 scene（浏览器模式），这里必须容缺，否则整页崩在启动阶段
+  const currentSceneLabel = config?.scene?.mode ? SCENE_LABELS[config.scene.mode] : "加载中…";
 
   const asrBackendLabel = (() => {
     if (!config) return "加载中…";
@@ -392,6 +399,22 @@ export default function App() {
       }
     },
     [templates.length],
+  );
+
+  /** 重命名会话（历史列表 / 详情页共用）。空串 = 清除自定义名。 */
+  const handleRenameSession = useCallback(
+    async (id: number, title: string) => {
+      try {
+        await api.renameSession(id, title);
+        await refreshHistory();
+        // 正开着这条会话时同步刷新详情头部，避免列表已改、详情还是旧名字
+        setDetail((d) => (d && d.id === id ? { ...d, title: title.trim() || null } : d));
+      } catch (e) {
+        console.error("重命名会话失败:", e);
+        alert(`重命名失败: ${e}`);
+      }
+    },
+    [refreshHistory],
   );
 
   const handleDeleteSession = useCallback(
@@ -533,7 +556,15 @@ export default function App() {
     setMicRms(0);
   }, []);
 
+  // 设置页是切走即卸载：有未保存改动时先确认，否则改动静默丢失（尤其是场景模式，
+  // 用户会带着旧场景开始监听还以为换了）。返回 false = 用户选择留下，中止本次动作。
+  const confirmLeaveSettings = useCallback(() => {
+    if (navPage !== "settings" || !settingsDirty) return true;
+    return window.confirm("设置有未保存的改动，离开后将丢失。确定离开？");
+  }, [navPage, settingsDirty]);
+
   const handleListen = useCallback(async () => {
+    if (!listening && !confirmLeaveSettings()) return;
     try {
       if (listening) {
         await api.stopListen();
@@ -557,7 +588,7 @@ export default function App() {
         window.alert(`启动失败：${msg}`);
       }
     }
-  }, [listening, resetLiveSession]);
+  }, [confirmLeaveSettings, listening, resetLiveSession]);
 
   const handlePause = useCallback(async () => {
     if (!listening) return;
@@ -571,6 +602,7 @@ export default function App() {
   /** 打开文件选择器，选中后开始文件导入转写。 */
   const handleFileImport = useCallback(async () => {
     if (listening || importing) return;
+    if (!confirmLeaveSettings()) return;
     const path = await api.pickAudioFile();
     if (!path) return;
     const filename = path.replace(/\\/g, "/").split("/").pop() ?? path;
@@ -594,7 +626,7 @@ export default function App() {
     } finally {
       setImporting(false);
     }
-  }, [listening, importing]);
+  }, [confirmLeaveSettings, listening, importing]);
 
   /** 取消正在进行的文件导入。 */
   const handleCancelImport = useCallback(async () => {
@@ -663,10 +695,11 @@ export default function App() {
 
   const handleNavigate = useCallback(
     (key: string) => {
+      if (key !== "settings" && !confirmLeaveSettings()) return;
       setNavPage(key);
       if (key === "history") refreshHistory();
     },
-    [refreshHistory],
+    [confirmLeaveSettings, refreshHistory],
   );
 
   const pageStyle: CSSProperties = {
@@ -913,6 +946,7 @@ export default function App() {
                 onExportText={handleExportText}
                 onExportAudio={handleExportAudio}
                 onGenerateHighlights={async (id) => api.generateHighlights(id)}
+                onRenameSession={handleRenameSession}
                 onDeleteSession={handleDeleteSession}
                 onDeleteSessions={handleDeleteSessions}
                 notesBusy={notesBusy}
@@ -939,7 +973,12 @@ export default function App() {
               <b style={{ fontSize: 13 }}>设置</b>
             </div>
             <div style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "var(--pad)", display: "flex", flexDirection: "column" }}>
-              <SettingsSection config={config} onSave={handleSaveConfig} onOpenModels={() => setNavPage("models")} />
+              <SettingsSection
+                config={config}
+                onSave={handleSaveConfig}
+                onOpenModels={() => { if (confirmLeaveSettings()) setNavPage("models"); }}
+                onDirtyChange={setSettingsDirty}
+              />
             </div>
           </section>
         )}
