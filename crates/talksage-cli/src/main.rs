@@ -1,7 +1,7 @@
 //! TalkSage v2 launcher。
 //!
 //! 结构参考 DeepSeek Harness：`dsh --profile web` 之类的启动器入口。
-//! 已实现：version / doctor / listen / session（list/show/search/rename/delete/export/notes/trio）。
+//! 已实现：version / doctor / listen / session / models / transcribe。
 
 use std::process::ExitCode;
 
@@ -12,6 +12,8 @@ use talksage_pipeline::{AudioInput, StartListen, TalkSageService};
 
 mod args;
 mod session_cli;
+mod models_cli;
+mod transcribe_cli;
 
 use clap::Parser;
 
@@ -48,7 +50,9 @@ fn main() -> ExitCode {
             no_record,
             noise_level,
         } => cmd_listen(&input, seconds, &engine, client.as_deref(), kb.as_deref(), save, no_record, noise_level),
-        Command::Import { path, engine, speaker } => cmd_import(&path, &engine, &speaker),
+        Command::Import { path, engine, speaker } => transcribe_cli::run(&path, &engine, true, &speaker, cli.json),
+        Command::Transcribe { path, engine, save, speaker } => transcribe_cli::run(&path, &engine, save, &speaker, cli.json),
+        Command::Models(args) => models_cli::dispatch(args, cli.json),
         Command::Sessions { limit } => session_cli::list_alias(limit, cli.json),
         Command::Session(args) => session_cli::dispatch(args, cli.json),
         Command::Export { id, output } => session_cli::export_alias(id, output, cli.json),
@@ -296,110 +300,6 @@ fn cmd_listen(
         Err(e) => eprintln!("停止失败: {e}"),
     }
     println!("\n已停止。");
-    ExitCode::SUCCESS
-}
-
-fn cmd_import(path: &str, engine: &str, speaker_label: &str) -> ExitCode {
-    let kind = match EngineKind::from_name(engine) {
-        Some(k) => k,
-        None => {
-            eprintln!("未知引擎: {engine}（可选 paraformer-zh | zipformer-en）");
-            return ExitCode::FAILURE;
-        }
-    };
-    let model_dir = match resolve_models_dir() {
-        Some(d) => d,
-        None => {
-            eprintln!("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）");
-            return ExitCode::FAILURE;
-        }
-    };
-    let engine_dir = model_dir.join(kind.model_dir_name());
-    let vad_model = model_dir.join("silero-vad").join("silero_vad.onnx");
-    if !vad_model.is_file() || !engine_dir.is_dir() {
-        eprintln!("模型不完整（VAD 或 ASR 模型缺失），请先运行 scripts/download_models.py");
-        return ExitCode::FAILURE;
-    }
-    let audio_path = std::path::PathBuf::from(path);
-    if !audio_path.is_file() {
-        eprintln!("文件不存在: {path}");
-        return ExitCode::FAILURE;
-    }
-
-    println!("导入转写: {path}（{engine}）…");
-    let mgr = match talksage_config::ConfigManager::load(None, None) {
-        Ok(m) => std::sync::Arc::new(m),
-        Err(e) => {
-            eprintln!("配置加载失败: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let sessions = match talksage_session::SessionStore::open(&mgr.data_dir().join("sessions.db").to_string_lossy()) {
-        Ok(s) => Some(std::sync::Arc::new(s)),
-        Err(e) => {
-            eprintln!("打开会话库失败: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let service = TalkSageService::new(mgr, sessions, EnginePool::new());
-    let segments = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let segs_for_sink = segments.clone();
-    let done_for_sink = done.clone();
-    let sink: talksage_pipeline::EventSink = std::sync::Arc::new(move |ev| {
-        match &ev {
-            DomainEvent::Segment { text, is_partial: false, speaker_id, speaker_label, speaker_attribution, ts_ms, duration_ms, rms, .. } => {
-                segs_for_sink.lock().unwrap().push(talksage_core::TranscriptSegment {
-                    speaker_id: *speaker_id,
-                    speaker_label: speaker_label.clone(),
-                    speaker_attribution: speaker_attribution.clone(),
-                    text: text.clone(),
-                    is_partial: false,
-                    ts_ms: *ts_ms,
-                    duration_ms: *duration_ms,
-                    rms: *rms,
-                });
-            }
-            DomainEvent::Status { stage: talksage_core::StatusStage::Idle, .. } => {
-                done_for_sink.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-            _ => {}
-        }
-    });
-    let running = match service.start(
-        StartListen::import_file(audio_path, kind, speaker_label.to_string()),
-        sink,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("启动失败: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-    while !done.load(std::sync::atomic::Ordering::SeqCst) && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    let sid = match service.finish(running) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("保存会话失败: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let segs = segments.lock().unwrap();
-    if segs.is_empty() {
-        eprintln!("未识别到语音内容");
-        return ExitCode::FAILURE;
-    }
-    if let Some(sid) = sid {
-        println!("\n已保存会话 #{sid}（{} 段）", segs.len());
-    }
-    println!("转写结果（{} 段）:", segs.len());
-    for s in segs.iter() {
-        println!("  [{}] {}", s.speaker_label, s.text);
-    }
     ExitCode::SUCCESS
 }
 

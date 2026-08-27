@@ -63,17 +63,33 @@ pub enum Command {
         #[arg(long, default_value_t = 0.0)]
         noise_level: f32,
     },
-    /// 导入音频离线转写并保存为新会话。
+    /// 导入音频并保存为新会话（`transcribe --save` 的别名）。
     Import {
         /// 音频文件路径（16kHz mono wav）
         path: String,
-        /// 引擎（paraformer-zh | zipformer-en）
-        #[arg(long, default_value = "paraformer-zh")]
+        /// 引擎（qwen3-asr | whisper-large-v3-turbo-metal | whisper-medium-metal | …）
+        #[arg(long, default_value = "qwen3-asr")]
         engine: String,
         /// 说话人标签（默认 导入）
         #[arg(long, default_value = "导入")]
         speaker: String,
     },
+    /// 转写音频文件；默认只打印结果，加 `--save` 才落库。
+    Transcribe {
+        /// 音频文件路径
+        path: String,
+        /// 引擎（qwen3-asr | whisper-large-v3-turbo-metal | whisper-medium-metal | …）
+        #[arg(long, default_value = "qwen3-asr")]
+        engine: String,
+        /// 保存为新会话
+        #[arg(long)]
+        save: bool,
+        /// 说话人标签（仅 `--save` 时有意义）
+        #[arg(long, default_value = "导入")]
+        speaker: String,
+    },
+    /// 模型：list / download / remove / gpu。
+    Models(ModelsArgs),
     /// 列出最近的会话（`session list` 的别名）。
     Sessions {
         /// 最多显示几条（默认 20）
@@ -141,6 +157,30 @@ pub enum Command {
     },
     /// 打印版本。
     Version,
+}
+
+#[derive(Args, Debug)]
+pub struct ModelsArgs {
+    #[command(subcommand)]
+    pub command: ModelsAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ModelsAction {
+    /// 列出产品模型安装状态。
+    List,
+    /// 下载/安装引擎（qwen3-asr / whisper-*-metal / punct）。
+    Download {
+        engine: String,
+    },
+    /// 删除已安装模型目录（需 `--yes`）。
+    Remove {
+        engine: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// 探测 GPU 与当前 ASR 路由。
+    Gpu,
 }
 
 #[derive(Args, Debug)]
@@ -388,6 +428,72 @@ mod tests {
         match c.command {
             Command::Sessions { limit } => assert_eq!(limit, 3),
             _ => panic!("expected sessions"),
+        }
+    }
+
+    #[test]
+    fn models_list_download_gpu_parse() {
+        let list = parse(&["talksage", "models", "list"]);
+        match list.command {
+            Command::Models(args) => assert!(matches!(args.command, ModelsAction::List)),
+            _ => panic!("expected models"),
+        }
+
+        let dl = parse(&["talksage", "models", "download", "qwen3-asr"]);
+        match dl.command {
+            Command::Models(args) => match args.command {
+                ModelsAction::Download { engine } => assert_eq!(engine, "qwen3-asr"),
+                other => panic!("unexpected {other:?}"),
+            },
+            _ => panic!("expected models"),
+        }
+
+        let rm = parse(&["talksage", "models", "remove", "punct", "--yes"]);
+        match rm.command {
+            Command::Models(args) => match args.command {
+                ModelsAction::Remove { engine, yes } => {
+                    assert_eq!(engine, "punct");
+                    assert!(yes);
+                }
+                other => panic!("unexpected {other:?}"),
+            },
+            _ => panic!("expected models"),
+        }
+
+        let gpu = parse(&["talksage", "--json", "models", "gpu"]);
+        assert!(gpu.json);
+        match gpu.command {
+            Command::Models(args) => assert!(matches!(args.command, ModelsAction::Gpu)),
+            _ => panic!("expected models"),
+        }
+    }
+
+    #[test]
+    fn transcribe_and_import_parse() {
+        let t = parse(&["talksage", "transcribe", "a.wav", "--engine", "qwen3-asr"]);
+        match t.command {
+            Command::Transcribe { path, engine, save, speaker } => {
+                assert_eq!(path, "a.wav");
+                assert_eq!(engine, "qwen3-asr");
+                assert!(!save);
+                assert_eq!(speaker, "导入");
+            }
+            _ => panic!("expected transcribe"),
+        }
+
+        let saved = parse(&["talksage", "transcribe", "a.wav", "--save"]);
+        match saved.command {
+            Command::Transcribe { save, .. } => assert!(save),
+            _ => panic!("expected transcribe"),
+        }
+
+        let imp = parse(&["talksage", "import", "a.wav"]);
+        match imp.command {
+            Command::Import { path, engine, .. } => {
+                assert_eq!(path, "a.wav");
+                assert_eq!(engine, "qwen3-asr");
+            }
+            _ => panic!("expected import"),
         }
     }
 }
