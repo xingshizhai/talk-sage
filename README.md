@@ -104,7 +104,11 @@ The default high-accuracy path is segment-level local GPU ASR: Windows x64 uses 
 **macOS / Linux**
 
 ```bash
-./scripts/talksage.sh build
+./scripts/talksage.sh env       # environment check
+./scripts/talksage.sh build     # cargo + frontend (debug: CLI + runnable debug app)
+./scripts/talksage.sh build --release  # cargo + frontend (release, no dmg)
+./scripts/talksage.sh run       # run desktop app (debug); add --release for release
+./scripts/talksage.sh package   # package dmg / TalkSage.app
 ```
 
 See [BUILDING.md](docs/BUILDING.md) for full manual steps (static sherpa-onnx linking, proxy notes, packaging).
@@ -115,6 +119,8 @@ See [BUILDING.md](docs/BUILDING.md) for full manual steps (static sherpa-onnx li
 # Desktop app (debug by default; add --release for the release build)
 ./scripts/talksage.ps1 run              # Windows (debug)
 ./scripts/talksage.ps1 run --release    # Windows (release)
+./scripts/talksage.sh run               # macOS / Linux (debug)
+./scripts/talksage.sh run --release     # macOS / Linux (release)
 
 # CLI live transcription (mic)
 cargo run -p talksage-cli -- listen --input mic

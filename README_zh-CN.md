@@ -99,7 +99,11 @@ Paraformer、Zipformer 和 sherpa ONNX Whisper 已从产品模型列表移除；
 **macOS / Linux**
 
 ```bash
-./scripts/talksage.sh build
+./scripts/talksage.sh env       # 环境检查
+./scripts/talksage.sh build     # cargo + 前端（debug：CLI + 可独立运行的 debug App）
+./scripts/talksage.sh build --release  # cargo + 前端（release，不打包 dmg）
+./scripts/talksage.sh run       # 运行桌面 debug 版；run --release 运行 release 版
+./scripts/talksage.sh package   # 打包 dmg / 拓思者.app
 ```
 
 完整手动步骤（sherpa 静态链接、代理说明、打包）见 [BUILDING.md](docs/BUILDING.md)。
@@ -110,6 +114,8 @@ Paraformer、Zipformer 和 sherpa ONNX Whisper 已从产品模型列表移除；
 # 桌面应用（默认 debug；加 --release 运行 release 版）
 ./scripts/talksage.ps1 run              # Windows（debug）
 ./scripts/talksage.ps1 run --release    # Windows（release）
+./scripts/talksage.sh run               # macOS / Linux（debug）
+./scripts/talksage.sh run --release     # macOS / Linux（release）
 
 # CLI 实时转写（麦克风）
 cargo run -p talksage-cli -- listen --input mic

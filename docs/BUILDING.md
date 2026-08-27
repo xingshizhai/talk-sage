@@ -35,18 +35,24 @@
 .\scripts\talksage.ps1 package    # 打包（release + NSIS/MSI）
 .\scripts\talksage.ps1 logs       # 查看最近日志
 .\scripts\talksage.ps1 clean      # 清理构建产物
+```
 
+```bash
 # macOS / Linux（首次运行）
 chmod +x scripts/talksage.sh
-./scripts/talksage.sh env       # 检查 Rust/Node/Xcode/模型
-./scripts/talksage.sh deps      # 下载当前平台的 sherpa 库、模型和前端依赖
-./scripts/talksage.sh build     # 编译 Rust workspace + React 前端
-./scripts/talksage.sh doctor    # 验证运行目录和模型
-./scripts/talksage.sh run       # 启动 Vite + macOS Tauri 应用（推荐本地运行方式）
-
-# 开发热更新 / dmg 打包
-./scripts/talksage.sh dev
-./scripts/talksage.sh package
+./scripts/talksage.sh env       # 环境检查（Rust/Node/Xcode/模型/静态库）
+./scripts/talksage.sh deps      # 下载依赖（模型 + sherpa 静态库 + 前端）
+./scripts/talksage.sh build     # 全量编译（Rust + 前端，debug：CLI + 可独立运行的 debug App）
+./scripts/talksage.sh build --release  # 全量编译 release（不打包 dmg）
+./scripts/talksage.sh dev       # Tauri 开发模式（热更新，debug）
+./scripts/talksage.sh run       # 运行桌面 debug 版；run --release 运行 release 版
+./scripts/talksage.sh serve     # headless 服务（浏览器访问 127.0.0.1:8080）
+./scripts/talksage.sh listen    # CLI 实时转写（麦克风）
+./scripts/talksage.sh import -wav 录音.wav   # 导入转写入库
+./scripts/talksage.sh test      # 全量测试
+./scripts/talksage.sh package   # 打包（release + dmg/.app + 升级签名）
+./scripts/talksage.sh logs      # 查看最近日志
+./scripts/talksage.sh clean     # 清理构建产物
 ```
 
 > 注意：`tauri dev` 产出的 debug 二进制会连接配置中的 `devUrl`（需要 Vite 开发服务器），
@@ -292,11 +298,12 @@ npx tauri build
 
 ```bash
 ./scripts/talksage.sh doctor
-./scripts/talksage.sh build
-./scripts/talksage.sh package
+./scripts/talksage.sh build --release   # 可选：先编 release CLI/App，不打 dmg
+./scripts/talksage.sh package           # tauri build → dmg / 拓思者.app + 升级签名
 ```
 
-- 日常运行：`./scripts/talksage.sh run`
+- 日常运行：`./scripts/talksage.sh run`（debug App，需先 `build`）；热更新用 `dev`
+- 真采麦克风：TCC 通常只给带 Info.plist 的 `.app` 弹授权框，请 `package` 后 `open` 产出的 `拓思者.app`
 - 全量测试：`./scripts/talksage.sh test`
 - Rust 构建产物统一位于 workspace 根 `target/`；不要为 `web/src-tauri` 另设 target 目录，否则会重复占用磁盘
 - macOS 当前支持麦克风和文件输入；系统音频回环尚未实现，不会静默改用第二路麦克风
@@ -311,18 +318,20 @@ npx tauri build
 
 应用内置两种升级方式，设置页「升级」Tab 操作：
 
-**离线升级（可用）**：选择 `talksage.ps1 package` 产出的安装包（NSIS `.exe` 或 MSI），
+**离线升级（可用）**：选择 `talksage.ps1 package` / `talksage.sh package` 产出的安装包
+（Windows：NSIS `.exe` 或 MSI；macOS：`.dmg` / `拓思者.app`），
 应用校验版本（需高于当前）与架构后静默启动安装程序并退出，安装完成重新启动即可。
 
 **在线升级（框架）**：基于标准 Tauri v2 方案 `tauri-plugin-updater`：
 
-- `talksage.ps1 package` 首次运行时自动生成 ed25519 签名密钥到 `.tools/updater/`
-  （已 gitignore），并把**公钥**写入 `web/src-tauri/tauri.conf.json` 的
-  `plugins.updater.pubkey`（幂等）；打包时经 `TAURI_SIGNING_PRIVATE_KEY_PATH`
-  + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 自动签名，安装包带 `.sig` 签名文件。
-- 产物含升级用文件：`target/release/bundle/nsis/*-setup.exe.sig`、
+- `talksage.ps1 package` / `talksage.sh package` 首次运行时自动生成 ed25519
+  签名密钥到 `.tools/updater/`（已 gitignore），并把**公钥**写入
+  `web/src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`（幂等）；打包时经
+  `TAURI_SIGNING_PRIVATE_KEY_PATH` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+  自动签名，安装包带 `.sig` 签名文件。
+- Windows 产物含升级用文件：`target/release/bundle/nsis/*-setup.exe.sig`、
   `target/release/bundle/msi/*.msi.sig`，以及 `remote` 目录下的
-  `.tar.gz` + `.tar.gz.sig`（在线升级包）。
+  `.tar.gz` + `.tar.gz.sig`（在线升级包）。macOS 对应 `bundle/macos` 与 `bundle/dmg`。
 - **尚未实现的内容**：真实更新服务器与端点。上线前需把
   `tauri.conf.json` 的 `plugins.updater.endpoints` 换成实际更新源
   （返回 JSON 的静态站点即可），检查逻辑见 `web/src-tauri/src/updater.rs`。
