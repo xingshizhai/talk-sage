@@ -17,7 +17,7 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
   .\scripts\talksage.ps1 loop              # 录音测试闭环（裁剪 + 回放验证）
   .\scripts\talksage.ps1 doctor               # 环境诊断（talksage doctor）
   .\scripts\talksage.ps1 test                 # 全量测试（Rust + Vitest）
-  .\scripts\talksage.ps1 package              # 打包（release + NSIS/MSI 安装器）
+  .\scripts\talksage.ps1 package              # 打包（release + NSIS/MSI 安装器 + 升级签名）
   .\scripts\talksage.ps1 logs                 # 查看最近日志
   .\scripts\talksage.ps1 clean                # 清理构建产物（target/dist/node_modules）
 
@@ -26,6 +26,11 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
           build 同时产出 debug CLI（serve/listen 等命令用）和 debug App（run 用）
   release （build --release / package; run --release）: 全量优化、运行快；
           必须显式加 --release 才构建/运行 release 版，不做自动降级
+
+升级:
+  在线升级框架（tauri-plugin-updater）已接入：package 自动生成签名密钥并写入
+  tauri.conf.json 公钥，安装包带 .sig 签名；在线检查需配置真实更新源端点。
+  离线升级：设置页「升级」选择安装包（NSIS .exe / MSI）即可静默安装。
 
 环境变量自动设置（本脚本进程内）:
   CARGO_HOME=$PWD\.cargo-home  SHERPA_ONNX_ARCHIVE_DIR=$PWD\.tools\sherpa-onnx-archives
@@ -413,9 +418,60 @@ function Cmd-Test {
     $null = Invoke-Native { & (Join-Path $PSScriptRoot "run_tests.ps1") }
 }
 
+# 升级签名密钥（在线升级 tauri-plugin-updater 需要 ed25519 签名密钥对）。
+# 首次 package 时自动生成到 .tools\updater\（已 gitignore），并把公钥写入
+# web\src-tauri\tauri.conf.json 的 plugins.updater.pubkey（幂等）；构建时经
+# TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) 传给 tauri build 生成 .sig 签名文件。
+function Ensure-UpdaterKeys {
+    $dir = Join-Path $Root ".tools\updater"
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    $keyPath = Join-Path $dir "talksage-update.key"
+    $pubFile = Join-Path $dir "talksage-update.key.pub"
+    $pwFile  = Join-Path $dir "key.password"
+    if (-not (Test-Path $keyPath)) {
+        # 首次生成：随机密码 + tauri signer generate（--ci 免交互）
+        $pw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+        Set-Content -Path $pwFile -Value $pw -NoNewline -Encoding UTF8
+        Write-Host "  [updater] 首次生成签名密钥: $keyPath（公钥将写入 tauri.conf.json）" -ForegroundColor DarkGray
+        Push-Location (Join-Path $Root "web")
+        $code = Invoke-Native { npx tauri signer generate -p $pw -w $keyPath --ci }
+        Pop-Location
+        if ($code -ne 0 -or -not (Test-Path $pubFile)) {
+            Write-Host "  [updater] 签名密钥生成失败（在线升级将不可用，可重跑 package 重试）" -ForegroundColor Yellow
+            return
+        }
+    }
+    # 注意：tauri bundler 读的是 TAURI_SIGNING_PRIVATE_KEY_PATH（密钥文件路径）
+    # 和 TAURI_SIGNING_PRIVATE_KEY（密钥内容字符串，二选一）；密码可选。
+    $env:TAURI_SIGNING_PRIVATE_KEY_PATH = $keyPath
+    if (Test-Path $pwFile) {
+        $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content $pwFile -Raw).Trim()
+    }
+    # 公钥写入 tauri.conf.json plugins.updater.pubkey（幂等；JSON 无注释，保持原有 key）
+    if (Test-Path $pubFile) {
+        $pub = (Get-Content $pubFile -Raw).Trim()
+        $confPath = Join-Path $Root "web\src-tauri\tauri.conf.json"
+        try {
+            $conf = Get-Content $confPath -Raw | ConvertFrom-Json
+            if (-not $conf.plugins) { $conf | Add-Member -NotePropertyName plugins -NotePropertyValue ([pscustomobject]@{}) }
+            if (-not $conf.plugins.updater) { $conf.plugins | Add-Member -NotePropertyName updater -NotePropertyValue ([pscustomobject]@{}) }
+            if ($conf.plugins.updater.pubkey -ne $pub) {
+                $conf.plugins.updater | Add-Member -NotePropertyName pubkey -NotePropertyValue $pub -Force
+                $conf | ConvertTo-Json -Depth 20 | Set-Content -Path $confPath -Encoding UTF8
+                Write-Host "  [updater] 已把签名公钥写入 web\src-tauri\tauri.conf.json" -ForegroundColor Green
+            } else {
+                Write-Host "  [updater] 签名公钥已就绪" -ForegroundColor DarkGray
+            }
+        } catch {
+            Write-Host "  [updater] 警告: 自动写入公钥失败（$($_.Exception.Message)），请手动把公钥填入 tauri.conf.json 的 plugins.updater.pubkey" -ForegroundColor Yellow
+        }
+    }
+}
+
 function Cmd-Package {
     Ensure-VulkanEnv
-    Write-Step "打包（tauri build：NSIS/MSI）"
+    Ensure-UpdaterKeys
+    Write-Step "打包（tauri build：NSIS/MSI + 升级签名）"
     Push-Location (Join-Path $Root "web")
     $null = Invoke-Native { npx tauri build }
     Pop-Location

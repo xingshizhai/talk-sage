@@ -306,6 +306,28 @@ npx tauri build
 - 安装包**不包含模型**（约 310MB）；首次运行请将 `models/` 置于可执行文件同级或 `%APPDATA%/TalkSage`，或设置 `TALKSAGE_MODELS_DIR` 指向模型目录
 - 安装包默认全功能：实时转写（需模型）、插件/纪要（需在设置页配置 LLM API Key）、headless 服务（`talksage serve`）
 
+### 6.4 应用升级（在线框架 + 离线安装）
+
+应用内置两种升级方式，设置页「升级」Tab 操作：
+
+**离线升级（可用）**：选择 `talksage.ps1 package` 产出的安装包（NSIS `.exe` 或 MSI），
+应用校验版本（需高于当前）与架构后静默启动安装程序并退出，安装完成重新启动即可。
+
+**在线升级（框架）**：基于标准 Tauri v2 方案 `tauri-plugin-updater`：
+
+- `talksage.ps1 package` 首次运行时自动生成 ed25519 签名密钥到 `.tools/updater/`
+  （已 gitignore），并把**公钥**写入 `web/src-tauri/tauri.conf.json` 的
+  `plugins.updater.pubkey`（幂等）；打包时经 `TAURI_SIGNING_PRIVATE_KEY_PATH`
+  + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 自动签名，安装包带 `.sig` 签名文件。
+- 产物含升级用文件：`target/release/bundle/nsis/*-setup.exe.sig`、
+  `target/release/bundle/msi/*.msi.sig`，以及 `remote` 目录下的
+  `.tar.gz` + `.tar.gz.sig`（在线升级包）。
+- **尚未实现的内容**：真实更新服务器与端点。上线前需把
+  `tauri.conf.json` 的 `plugins.updater.endpoints` 换成实际更新源
+  （返回 JSON 的静态站点即可），检查逻辑见 `web/src-tauri/src/updater.rs`。
+- 密钥丢失/忘记密码将无法再签名新版本（升级即失效），请妥善备份
+  `.tools/updater/`（密钥文件 + `key.password`）。
+
 ---
 
 ## 7. 环境变量参考
