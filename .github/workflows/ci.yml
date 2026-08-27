@@ -38,6 +38,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # sherpa-onnx 预编译静态库。必须在任何 cargo 命令之前，
+      # 原因见 .github/actions/sherpa-onnx-libs/action.yml 的注释。
+      - uses: ./.github/actions/sherpa-onnx-libs
+
       - name: Setup Node 20
         uses: actions/setup-node@v4
         with:
@@ -90,6 +94,10 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      # sherpa-onnx 预编译静态库。必须在任何 cargo 命令之前，
+      # 原因见 .github/actions/sherpa-onnx-libs/action.yml 的注释。
+      - uses: ./.github/actions/sherpa-onnx-libs
 
       # 模型约 340MB，按下载脚本内容做 key：清单变了才重新拉。
       - name: Cache models

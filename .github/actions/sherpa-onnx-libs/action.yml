@@ -1,0 +1,74 @@
+name: sherpa-onnx prebuilt libs
+description: >-
+  下载 sherpa-onnx 预编译静态库，并通过 SHERPA_ONNX_LIB_DIR 交给
+  sherpa-onnx-sys 的构建脚本使用。
+
+# 为什么不让构建脚本自己下载：
+#
+# sherpa-onnx-sys 的 build.rs 默认把预编译包下载解压到 target/sherpa-onnx-prebuilt/，
+# 并且**只判断 lib/ 目录存在与否**就直接复用（不检查里面有没有库文件），解压后还会
+# 删掉归档。而 target/ 正好被 Swatinem/rust-cache 存取 —— 缓存里一旦留下一个空的
+# lib/，之后每次运行都命中那条早期返回、永不重新下载，链接阶段固定报
+#   error: could not find native static library `sherpa-onnx-c-api`
+# 且不会自愈。CI 从 2026-08-24 的 run #44 起因此连续失败 55 次，而 #44 本身是个
+# 与构建无关的 UI 提交。
+#
+# SHERPA_ONNX_LIB_DIR 在 build.rs 里于那条早期返回**之前**被检查，所以自己准备库、
+# 用这个变量指过去，可以完全绕开上述缓存路径；下面还会校验库文件真的存在，
+# 缺了就当场重新下载而不是留到链接阶段才炸。
+
+runs:
+  using: composite
+  steps:
+    # 版本取自 Cargo.lock，不写死：依赖升级时下载的包自动跟着变，
+    # 否则会下到旧版本、直到链接阶段才发现对不上。
+    - name: 解析 sherpa-onnx 版本与平台包名
+      shell: bash
+      run: |
+        set -euo pipefail
+        version=$(awk '/^name = "sherpa-onnx-sys"/{f=1} f && /^version = /{gsub(/"/,"",$3); print $3; exit}' Cargo.lock)
+        [ -n "$version" ] || { echo "::error::Cargo.lock 里找不到 sherpa-onnx-sys 的版本"; exit 1; }
+        # 包名规则与 sherpa-onnx-sys/build.rs 的 archive_name() 一致（默认 static 链接）
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)   stem="sherpa-onnx-v${version}-linux-x64-static-lib" ;;
+          Linux-ARM64) stem="sherpa-onnx-v${version}-linux-aarch64-static-lib" ;;
+          macOS-ARM64) stem="sherpa-onnx-v${version}-osx-arm64-static-lib" ;;
+          macOS-X64)   stem="sherpa-onnx-v${version}-osx-x64-static-lib" ;;
+          Windows-X64) stem="sherpa-onnx-v${version}-win-x64-static-MT-Release-lib" ;;
+          *) echo "::error::没有对应的 sherpa-onnx 预编译包: ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
+        esac
+        echo "SHERPA_ONNX_VERSION=$version" >> "$GITHUB_ENV"
+        echo "SHERPA_ONNX_STEM=$stem" >> "$GITHUB_ENV"
+
+    - name: 缓存 sherpa-onnx 预编译库
+      uses: actions/cache@v4
+      with:
+        path: .sherpa-prebuilt
+        # key 里已含版本与平台，内容不会变，无需 restore-keys
+        key: ${{ env.SHERPA_ONNX_STEM }}
+
+    - name: 准备并校验 sherpa-onnx 预编译库
+      shell: bash
+      run: |
+        set -euo pipefail
+        # 判据是「库文件在不在」，而不是「目录在不在」—— 后者正是 build.rs 那条
+        # 早期返回的判据，也正是本次故障的成因。缓存命中但内容残缺时这里会重下。
+        if ! ls ".sherpa-prebuilt/${SHERPA_ONNX_STEM}/lib"/*sherpa-onnx-c-api* >/dev/null 2>&1; then
+          rm -rf ".sherpa-prebuilt/${SHERPA_ONNX_STEM}"
+          mkdir -p .sherpa-prebuilt
+          url="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_ONNX_VERSION}/${SHERPA_ONNX_STEM}.tar.bz2"
+          echo "下载 $url"
+          curl -fsSL --retry 5 --retry-all-errors -o sherpa-onnx-prebuilt.tar.bz2 "$url"
+          tar -xf sherpa-onnx-prebuilt.tar.bz2 -C .sherpa-prebuilt
+          rm -f sherpa-onnx-prebuilt.tar.bz2
+        fi
+        ls ".sherpa-prebuilt/${SHERPA_ONNX_STEM}/lib"/*sherpa-onnx-c-api* >/dev/null 2>&1 || {
+          echo "::error::预编译包里没有 sherpa-onnx-c-api"
+          ls -la ".sherpa-prebuilt/${SHERPA_ONNX_STEM}/lib" 2>/dev/null || true
+          exit 1
+        }
+        # Rust 侧读的是原生路径：Windows 上 pwd 给的是 /d/a/... 这类 msys 路径，
+        # PathBuf 认不出来，用 pwd -W 拿 D:/a/... 形式。
+        root=$(pwd -W 2>/dev/null || pwd)
+        echo "SHERPA_ONNX_LIB_DIR=${root}/.sherpa-prebuilt/${SHERPA_ONNX_STEM}/lib" >> "$GITHUB_ENV"
+        echo "sherpa-onnx 静态库: ${root}/.sherpa-prebuilt/${SHERPA_ONNX_STEM}/lib"
