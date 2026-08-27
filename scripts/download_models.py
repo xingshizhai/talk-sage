@@ -266,6 +266,24 @@ def export_sentencepiece_vocab(model: Path, output: Path) -> None:
     print(f"  generated {output.name} ({len(pieces)} pieces)")
 
 
+def _write_whisper_sha1() -> None:
+    """下载完成后写入 .sha1 校验文件，让 app 的安装检测通过（is_installed() 要求该文件存在）。"""
+    import hashlib
+    bin_path = OUT_ROOT / "whisper.cpp-large-v3-turbo-q5_0" / "ggml-large-v3-turbo-q5_0.bin"
+    sha1_path = bin_path.with_suffix(".sha1")
+    if sha1_path.exists():
+        return
+    if not bin_path.is_file():
+        return
+    print("  computing SHA1 (may take a moment)...", flush=True)
+    h = hashlib.sha1()
+    with open(bin_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    sha1_path.write_text(f"{h.hexdigest()} {bin_path.stat().st_size}\n", encoding="ascii")
+    print(f"  wrote {sha1_path.name}")
+
+
 def main() -> None:
     global opener
     args = sys.argv[1:]
@@ -291,6 +309,8 @@ def main() -> None:
                 download_diarization_model()
             if name == "qwen3-asr":
                 download_qwen3_asr_model()
+            if name == "whisper-metal":
+                _write_whisper_sha1()
             if name == "zipformer-en":
                 model_dir = OUT_ROOT / "sherpa-onnx-streaming-zipformer-en-2023-06-26"
                 bpe_model = model_dir / "bpe.model"
