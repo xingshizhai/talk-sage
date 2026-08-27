@@ -49,7 +49,11 @@ $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
 # ── 环境变量（项目内隔离，避免污染用户全局） ──────────────────
-# 清除代理环境变量，避免 Cargo 走系统代理导致 503/连接失败（.cargo-home/config.toml 已配置国内镜像）
+# 保存用户设置的代理（应用内 HuggingFace 模型下载需要走代理）
+$_SavedHttpProxy  = $env:HTTP_PROXY
+$_SavedHttpsProxy = $env:HTTPS_PROXY
+# 清除代理：避免 Cargo/国内镜像请求走代理导致 503/连接失败
+# （仅对 cargo build 生效；Cmd-Dev/Cmd-Run 启动 app 前会恢复代理）
 $env:HTTP_PROXY = ""; $env:HTTPS_PROXY = ""; $env:http_proxy = ""; $env:https_proxy = ""
 $env:CARGO_HOME = Join-Path $Root ".cargo-home"
 $env:SHERPA_ONNX_ARCHIVE_DIR = Join-Path $Root ".tools\sherpa-onnx-archives"
@@ -236,6 +240,9 @@ function Ensure-VulkanEnv {
 function Cmd-Dev {
     Ensure-DevData
     Ensure-VulkanEnv
+    # 恢复代理：应用内 HuggingFace 模型下载需要（cargo build 阶段已结束，不再有镜像冲突）
+    if ($_SavedHttpProxy)  { $env:HTTP_PROXY  = $_SavedHttpProxy }
+    if ($_SavedHttpsProxy) { $env:HTTPS_PROXY = $_SavedHttpsProxy }
     Write-Step "Tauri 开发模式"
     Push-Location (Join-Path $Root "web")
     $null = Invoke-Native { npx tauri dev }
@@ -244,6 +251,9 @@ function Cmd-Dev {
 
 function Cmd-Run {
     Ensure-DevData
+    # 恢复代理：应用内 HuggingFace 模型下载需要
+    if ($_SavedHttpProxy)  { $env:HTTP_PROXY  = $_SavedHttpProxy }
+    if ($_SavedHttpsProxy) { $env:HTTPS_PROXY = $_SavedHttpsProxy }
     if (-not (Test-Path $ReleaseExe)) {
         Write-Host "release 未构建，先运行: .\scripts\talksage.ps1 package（或 build 后手动构建 release）" -ForegroundColor Yellow
         Write-Host "快速 release 构建: cd web; npx tauri build --no-bundle"
