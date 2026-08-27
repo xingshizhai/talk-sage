@@ -44,6 +44,9 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
 
 Windows x64 Vulkan 构建环境（dev/build/package 自动配置）:
   VULKAN_SDK: 外部未设时自动探测 C:\VulkanSDK\*（最新版本）
+              vulkan-gpu 已改为 talksage-app 的显式 feature：本脚本的
+              build / dev / package 都会带 --features vulkan-gpu，
+              缺 SDK 时构建当场失败，不会静默打出无 GPU 的包。
   LIBCLANG_PATH: 外部未设时自动探测 C:\Program Files\LLVM\bin
   CARGO_TARGET_DIR: 外部未设时自动设为 C:\wt（短路径，避免 vulkan-shaders-gen MAX_PATH 崩溃）
   RUSTFLAGS: 外部未设时自动配置全静态 CRT（+crt-static + /NODEFAULTLIB）
@@ -335,13 +338,13 @@ function Cmd-Build {
     if ($release) {
         $code = Invoke-Native { cargo build --workspace --release --exclude talksage-app }
         if ($code -ne 0) { Write-Host "cargo 编译失败" -ForegroundColor Red; return 1 }
-        $code = Invoke-Native { cargo build -p talksage-app --release --features "tauri/custom-protocol" }
+        $code = Invoke-Native { cargo build -p talksage-app --release --features "tauri/custom-protocol,vulkan-gpu" }
         if ($code -ne 0) { Write-Host "cargo 编译失败（App）" -ForegroundColor Red; return 1 }
         Write-Host "`n编译完成: $(Get-ReleaseApp)（release App）+ $(Join-Path (Get-TargetDir) 'release\talksage.exe')（release CLI）"
     } else {
         $code = Invoke-Native { cargo build --workspace --exclude talksage-app }
         if ($code -ne 0) { Write-Host "cargo 编译失败" -ForegroundColor Red; return 1 }
-        $code = Invoke-Native { cargo build -p talksage-app --features "tauri/custom-protocol" }
+        $code = Invoke-Native { cargo build -p talksage-app --features "tauri/custom-protocol,vulkan-gpu" }
         if ($code -ne 0) { Write-Host "cargo 编译失败（App）" -ForegroundColor Red; return 1 }
         Write-Host "`n编译完成: $(Get-CliExe)（debug CLI）+ $(Get-DebugApp)（debug App）"
     }
@@ -424,7 +427,7 @@ function Cmd-Dev {
     if ($_SavedHttpsProxy) { $env:HTTPS_PROXY = $_SavedHttpsProxy }
     Write-Step "Tauri 开发模式"
     Push-Location (Join-Path $Root "web")
-    $null = Invoke-Native { npx tauri dev }
+    $null = Invoke-Native { npx tauri dev --features vulkan-gpu }
     Pop-Location
 }
 
@@ -600,7 +603,7 @@ function Cmd-Package {
     Ensure-UpdaterKeys
     Write-Step "打包（tauri build：NSIS/MSI + 升级签名）"
     Push-Location (Join-Path $Root "web")
-    $null = Invoke-Native { npx tauri build }
+    $null = Invoke-Native { npx tauri build --features vulkan-gpu }
     Pop-Location
     Write-Host "`n产物:"
     Get-ChildItem (Join-Path (Get-TargetDir) "release\bundle") -Recurse -File -ErrorAction SilentlyContinue |

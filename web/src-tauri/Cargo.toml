@@ -32,12 +32,19 @@ talksage-plugins = { path = "../../crates/talksage-plugins" }
 talksage-session = { path = "../../crates/talksage-session" }
 talksage-notes = { path = "../../crates/talksage-notes" }
 talksage-logging = { path = "../../crates/talksage-logging" }
-
-# Windows x64：启用 whisper.cpp Vulkan GPU 后端（同 Dictata，AMD/Intel/NVIDIA 通吃）。
-# 构建前置：VULKAN_SDK 环境变量 + LLVM/libclang（LIBCLANG_PATH，bindgen 用）。
-# macOS 走 whisper-rs Metal；其他平台无 GPU whisper 引擎（talksage-asr 无 feature）。
-[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
-talksage-asr = { path = "../../crates/talksage-asr", features = ["vulkan-gpu"] }
-
-[target.'cfg(not(all(windows, target_arch = "x86_64")))'.dependencies]
 talksage-asr = { path = "../../crates/talksage-asr" }
+
+# Windows x64 的 whisper.cpp Vulkan GPU 后端（同 Dictata，AMD/Intel/NVIDIA 通吃）。
+#
+# 刻意不设为默认特性：编译它需要 VULKAN_SDK 环境变量 + LLVM/libclang
+# （LIBCLANG_PATH，bindgen 用），CI 的 runner 上两者都没有。以前是在
+# Windows x64 上无条件启用的，结果 cargo build --workspace 在 Windows CI 上
+# 必然失败（构建脚本直接 panic: Please install Vulkan SDK）。
+#
+# 开发与打包一律走 scripts/talksage.ps1，它会带上 --features vulkan-gpu，
+# 并在此之前自动配好 VULKAN_SDK / LIBCLANG_PATH（见 Ensure-VulkanEnv）。
+# 手动 cargo build 出来的 Windows 包不含 GPU 后端，会回退 CUDA/CPU。
+#
+# macOS 走 whisper-rs Metal；其他平台无 GPU whisper 引擎。
+[features]
+vulkan-gpu = ["talksage-asr/vulkan-gpu"]

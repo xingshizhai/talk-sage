@@ -23,7 +23,7 @@ Windows 本地 ASR 此前仅 CPU / NVIDIA CUDA（sherpa-onnx），AMD/Intel 显�
 | `crates/talksage-asr/Cargo.toml` | 新增 `vulkan-gpu` feature → `whisper-rs/vulkan`；Windows x64 平台 optional whisper-rs 依赖 |
 | `crates/talksage-pipeline/src/service.rs` | Metal/Vulkan 路由统一走 Whisper large-v3-turbo |
 | `crates/talksage-pipeline/src/lib.rs` | 引擎池 provider 按平台（metal/vulkan）隔离 |
-| `web/src-tauri/Cargo.toml` | Windows x64 启用 `vulkan-gpu` feature |
+| `web/src-tauri/Cargo.toml` | 定义 `vulkan-gpu` feature（**非默认**：CI runner 没有 Vulkan SDK，默认构建必须能过；由 `talksage.ps1` 显式带 `--features vulkan-gpu`） |
 | `web/src/sections/SettingsSection.tsx` | ASR 本地推理后端加「Vulkan GPU（AMD/Intel/NVIDIA）」选项 |
 | `docs/BUILDING.md`、`scripts/talksage.ps1` | 构建前置说明与 env 检测 |
 

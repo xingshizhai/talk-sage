@@ -7,11 +7,15 @@
 **适用平台：** Windows 10/11（主推）、macOS 12+、Ubuntu 20.04+
 **构建机器要求：** 内存 8GB+（模型推理与编译需要），磁盘 10GB+（Rust 依赖 + 模型 + 产物）
 
-**Windows GPU 构建前置（whisper.cpp Vulkan 后端）：** 编译 Windows x64 二进制需要
+**Windows GPU 构建前置（whisper.cpp Vulkan 后端）：** GPU 后端是 `talksage-app` 的
+**可选 feature** `vulkan-gpu`，`scripts/talksage.ps1` 的 build / dev / package 会自动带上它。
+带该 feature 编译 Windows x64 二进制需要
 - **Vulkan SDK**（`https://vulkan.lunarg.com/`），并设置 `VULKAN_SDK` 环境变量；
 - **LLVM/libclang**（bindgen 生成 whisper.cpp FFI 绑定），设置 `LIBCLANG_PATH` 指向 `libclang.dll` 所在目录；
   或用 `WHISPER_DONT_GENERATE_BINDINGS=1` 使用预生成绑定（此时无 Vulkan 设备枚举 API，但不影响核心转写）。
 - 运行期**不需要** Vulkan SDK——显卡驱动自带 `vulkan-1.dll`；无 GPU 或未装 SDK 时自动回退 CUDA/CPU。
+- 不带该 feature 的 `cargo build` / `cargo test` 无需上述前置（CI 即以此方式编译），
+  产物不含 Vulkan 后端，运行时按 CUDA/CPU 路由。
 
 ---
 
