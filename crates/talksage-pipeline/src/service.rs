@@ -88,6 +88,10 @@ pub struct RunningListen {
     /// 本次会话的钩子表（与管道内跑的是同一批实例）。`finish()` 用它跑
     /// finalizer 链 —— 依赖已在 register 时注入，此处只能调用，不能再改。
     hooks: HookRegistry,
+    /// 事件发射器：手动 flush 时直接发射要点事件用。
+    emit: EventSink,
+    /// 插件上下文（含 LLM 句柄）：手动 flush 时直接调用 LLM 用。
+    plugin_ctx: talksage_plugins::PluginContext,
     /// 独立 SQLite writer；必须在 finalizer 之前 drain。
     session_writer: Option<SessionWriter>,
     stats: Arc<Mutex<Vec<talksage_session::StreamMeta>>>,
@@ -111,9 +115,14 @@ impl RunningListen {
         self.runtime.is_paused()
     }
 
-    /// 手动触发要点聚合：通知 key_point_llm observer 立即处理当前 buffer。
+    /// 手动触发要点聚合：在后台线程直接调用 LLM 处理当前 buffer 并发射事件。
     pub fn flush_key_points(&self) {
-        self.hooks.request_flush_key_points();
+        let emit = self.emit.clone();
+        let ctx = self.plugin_ctx.clone();
+        let hooks = self.hooks.clone();
+        std::thread::spawn(move || {
+            hooks.flush_key_points_now(&ctx, &|ev| emit(ev));
+        });
     }
 
     pub fn session_id(&self) -> Option<i64> {
@@ -671,8 +680,9 @@ impl TalkSageService {
 
         // 与管道内跑的是同一批实例（HookRegistry 克隆的是 Arc）。
         let hooks = cfg.hooks.clone();
+        let plugin_ctx = cfg.plugin_ctx.clone();
         let mut runtime = SessionRuntime::new(cfg);
-        if let Err(e) = runtime.start(sink) {
+        if let Err(e) = runtime.start(sink.clone()) {
             if let Some(writer) = &mut session_writer {
                 let _ = writer.finish();
             }
@@ -685,6 +695,8 @@ impl TalkSageService {
             runtime,
             session_id,
             hooks,
+            emit: sink,
+            plugin_ctx,
             session_writer,
             stats,
             master_recording,

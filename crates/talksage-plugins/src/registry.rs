@@ -183,6 +183,9 @@ pub trait SegmentObserver: Send + Sync {
     /// 可选：外部请求在下次 run() 时立即处理 buffer（手动触发）。
     /// 默认空实现，不支持手动 flush 的 observer 无需实现。
     fn request_flush(&self) {}
+    /// 可选：直接在调用线程内调用 LLM 处理 buffer 并通过 emit 发射结果事件。
+    /// 与 request_flush 不同，此方法同步执行，不依赖下一个 segment 触发。
+    fn flush_now(&self, _ctx: &PluginContext, _emit: &dyn Fn(DomainEvent)) {}
 }
 
 /// finalizer 的输入。会话已停、已落库，此处只读。
@@ -394,6 +397,15 @@ impl HookRegistry {
         for obs in &self.observers {
             if obs.name() == "key_point_llm" {
                 obs.request_flush();
+            }
+        }
+    }
+
+    /// 直接在当前线程调用 key_point_llm 的 flush_now()，立即 LLM 处理并发射事件。
+    pub fn flush_key_points_now(&self, ctx: &PluginContext, emit: &dyn Fn(DomainEvent)) {
+        for obs in &self.observers {
+            if obs.name() == "key_point_llm" {
+                obs.flush_now(ctx, emit);
             }
         }
     }

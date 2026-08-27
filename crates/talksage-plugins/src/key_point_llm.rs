@@ -107,6 +107,40 @@ impl SegmentObserver for KeyPointLlmObserver {
         self.manual_flush.store(true, Ordering::Relaxed);
     }
 
+    fn flush_now(&self, ctx: &PluginContext, emit: &dyn Fn(DomainEvent)) {
+        let Some(llm) = ctx.llm.as_ref() else {
+            log::warn!("key_point_llm: 手动 flush 无 LLM，跳过");
+            return;
+        };
+        let texts = {
+            let mut g = self.state.lock().unwrap();
+            if g.buffer.is_empty() {
+                log::info!("key_point_llm: 手动 flush buffer 为空，跳过");
+                return;
+            }
+            g.last_flush = Instant::now();
+            std::mem::take(&mut g.buffer)
+        };
+        log::info!("key_point_llm: 手动 flush 立即处理 {} 段", texts.len());
+        let points = Self::call_llm(&texts, llm);
+        let ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let mut g = self.state.lock().unwrap();
+        for (i, (category, content)) in points.into_iter().enumerate() {
+            if g.is_duplicate(&content) { continue; }
+            g.remember(&content);
+            emit(DomainEvent::KeyPoint {
+                result_id: format!("kp-manual-{ts_ms}-{i}"),
+                status: talksage_core::ResultStatus::Final,
+                category,
+                content,
+                ts_ms,
+            });
+        }
+    }
+
     fn should_trigger(&self, seg: &TranscriptSegment) -> bool {
         !seg.is_partial && seg.text.trim().chars().count() >= 6
     }
