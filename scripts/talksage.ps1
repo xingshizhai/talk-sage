@@ -32,12 +32,15 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
   tauri.conf.json 公钥，安装包带 .sig 签名；在线检查需配置真实更新源端点。
   离线升级：设置页「升级」选择安装包（NSIS .exe / MSI）即可静默安装。
 
-环境变量自动设置（本脚本进程内）:
-  CARGO_HOME=$PWD\.cargo-home  SHERPA_ONNX_ARCHIVE_DIR=$PWD\.tools\sherpa-onnx-archives
+环境变量自动设置（本脚本进程内）; 目录分离（v0.2+）:
+  TALKSAGE_CONFIG_DIR=$PWD\config   配置目录（只放 talksage.toml；模板 config\talksage.example.toml 入库）
+  TALKSAGE_DATA_DIR=$PWD\data       数据目录（sessions.db / recordings / exports / voiceprints / window.json / tmp）
+  TALKSAGE_LOG_DIR=$PWD\logs        日志目录（talksage.YYYY-MM-DD.log）
   TALKSAGE_MODELS_DIR=$PWD\models
-  TALKSAGE_DATA_DIR: 外部已设（命令行/系统环境变量）则沿用；未设时脚本显式指定
-    项目内 config\（配置 + 数据目录）。直接运行 talksage.exe（不经脚本）时程序默认 ~/.talksage。
-    首次使用：.\scripts\talksage.ps1 dev 会自动从 config\talksage.example.toml 初始化 config\talksage.toml
+  外部已设的 TALKSAGE_* 一律沿用；未设才用项目内默认。
+  直接运行 talksage.exe（不经脚本）→ 程序默认 ~/.talksage（配置与数据同目录，兼容旧版）。
+  首次使用：.\scripts\talksage.ps1 dev 会自动从模板初始化 config\talksage.toml，
+  并把旧版遗留的 config\ 内数据（sessions.db/录音/日志等）迁移到 data\ / logs\。
 
 Windows x64 Vulkan 构建环境（dev/build/package 自动配置）:
   VULKAN_SDK: 外部未设时自动探测 C:\VulkanSDK\*（最新版本）
@@ -70,19 +73,103 @@ $_SavedHttpsProxy = $env:HTTPS_PROXY
 $env:HTTP_PROXY = ""; $env:HTTPS_PROXY = ""; $env:http_proxy = ""; $env:https_proxy = ""
 $env:CARGO_HOME = Join-Path $Root ".cargo-home"
 $env:SHERPA_ONNX_ARCHIVE_DIR = Join-Path $Root ".tools\sherpa-onnx-archives"
-# TALKSAGE_DATA_DIR 优先级:
-#   1) 外部已设（命令行/系统环境变量）→ 沿用；
-#   2) 未设 → 脚本显式指定项目内 config/（开发配置与数据隔离，不入库）；
-#   3) 直接运行 talksage.exe（不经脚本）→ 程序默认 ~/.talksage。
-if (-not $env:TALKSAGE_DATA_DIR) {
-    $env:TALKSAGE_DATA_DIR = Join-Path $Root "config"
-    Write-Host "提示: 未检测到外部 TALKSAGE_DATA_DIR，脚本使用项目内配置目录 config\" -ForegroundColor DarkGray
+# TALKSAGE_* 目录分离（v0.2+）：配置 / 数据 / 日志互不混放。
+#   优先级：外部已设 → 沿用；未设 → 脚本指定项目内目录（不入库）。
+#   直接运行 talksage.exe（不经脚本）→ 程序默认 ~/.talksage（配置与数据同目录）。
+$DataDirExternal = -not [string]::IsNullOrWhiteSpace($env:TALKSAGE_DATA_DIR)
+if ($DataDirExternal) {
+    Write-Host "提示: 沿用外部 TALKSAGE_DATA_DIR=$env:TALKSAGE_DATA_DIR（数据目录）" -ForegroundColor DarkGray
 } else {
-    Write-Host "提示: 沿用外部 TALKSAGE_DATA_DIR=$env:TALKSAGE_DATA_DIR（如需项目内 config\，先清除该环境变量）" -ForegroundColor DarkGray
+    $env:TALKSAGE_DATA_DIR = Join-Path $Root "data"
+    Write-Host "提示: 未检测到外部 TALKSAGE_DATA_DIR，脚本使用项目内数据目录 data\" -ForegroundColor DarkGray
+}
+# 配置目录：仅当数据目录也由脚本默认时才指向项目 config\；外部数据目录
+# 沿用时不设 CONFIG_DIR（配置文件随数据目录，兼容旧行为）。
+if (-not $env:TALKSAGE_CONFIG_DIR) {
+    if ($DataDirExternal) {
+        Write-Host "提示: TALKSAGE_CONFIG_DIR 未设，配置文件位于 $env:TALKSAGE_DATA_DIR\talksage.toml" -ForegroundColor DarkGray
+    } else {
+        $env:TALKSAGE_CONFIG_DIR = Join-Path $Root "config"
+        Write-Host "提示: 配置文件目录 config\（talksage.toml 与数据分离）" -ForegroundColor DarkGray
+    }
+}
+if (-not $env:TALKSAGE_LOG_DIR) {
+    $env:TALKSAGE_LOG_DIR = Join-Path $Root "logs"
+    Write-Host "提示: 日志目录 logs\" -ForegroundColor DarkGray
 }
 $env:TALKSAGE_MODELS_DIR = Join-Path $Root "models"
 $CargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
 if (Test-Path $CargoBin) { $env:Path = "$CargoBin;" + $env:Path }
+
+# 数据/日志目录就绪 + 旧版遗留迁移（幂等：config\ → data\ / logs\）。
+# v0.2+ 目录分离：配置只放 talksage.toml，数据（sessions.db/录音/导出/声纹）
+# 放 data\，日志放 logs\；旧版把这些都堆在配置目录 config\ 里。
+# 注意：旧版应用若仍在运行，迁移后可能往 config\ 重新写文件；下次运行本函数
+# 会再次合并（目录合并、同名文件保留 data\ 下版本、同名日志按时间追加）。
+function Ensure-DataLayout {
+    $dataDir = $env:TALKSAGE_DATA_DIR
+    $logDir  = $env:TALKSAGE_LOG_DIR
+    $cfgDir  = $env:TALKSAGE_CONFIG_DIR
+    New-Item -ItemType Directory -Force $dataDir | Out-Null
+    New-Item -ItemType Directory -Force $logDir | Out-Null
+    if (-not $cfgDir -or $cfgDir -eq $dataDir) { return }
+    foreach ($item in @("sessions.db", "recordings", "exports", "voiceprints", "window.json", "tmp")) {
+        $src = Join-Path $cfgDir $item
+        if (-not (Test-Path $src)) { continue }
+        $dst = Join-Path $dataDir $item
+        if (Test-Path $src -PathType Container) {
+            if (-not (Test-Path $dst)) {
+                Move-Item $src $dst -Force -ErrorAction SilentlyContinue
+                if (Test-Path $dst) { Write-Host "  [migrate] $cfgDir\$item → $dataDir\" -ForegroundColor DarkGray }
+            } else {
+                # 目录合并：把源目录内容并入目标（目标已存在的同名项保留 data\ 版本）
+                Get-ChildItem $src -ErrorAction SilentlyContinue | ForEach-Object {
+                    $t = Join-Path $dst $_.Name
+                    if (-not (Test-Path $t)) {
+                        Move-Item $_.FullName -Destination $dst -Force -ErrorAction SilentlyContinue
+                        Write-Host "  [migrate] $item\$($_.Name) → data\$item\" -ForegroundColor DarkGray
+                    } else {
+                        Write-Host "  [warn] $item\$($_.Name) 与 data\$item\ 下同名文件并存（保留 data\ 下版本）" -ForegroundColor Yellow
+                    }
+                }
+            }
+        } elseif (-not (Test-Path $dst)) {
+            Move-Item $src $dst -Force -ErrorAction SilentlyContinue
+            if (Test-Path $dst) { Write-Host "  [migrate] $cfgDir\$item → $dataDir\" -ForegroundColor DarkGray }
+        } else {
+            Write-Host "  [warn] $cfgDir\$item 与 $dst 同时存在（保留 data\ 下版本；如确认无需要可删除旧文件）" -ForegroundColor Yellow
+        }
+    }
+    # 旧版导出的 session-*.md 散落在配置目录根
+    Get-ChildItem $cfgDir -Filter "session-*.md" -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $dst = Join-Path $dataDir $_.Name
+        if (-not (Test-Path $dst)) {
+            Move-Item $_.FullName -Destination $dataDir -Force -ErrorAction SilentlyContinue
+            Write-Host "  [migrate] $($_.Name) → data\" -ForegroundColor DarkGray
+        }
+    }
+    # 日志：config\logs\* → logs\（同名日志按时间追加合并，不覆盖）
+    $oldLogs = Join-Path $cfgDir "logs"
+    if (Test-Path $oldLogs) {
+        $moved = $false
+        Get-ChildItem $oldLogs -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $t = Join-Path $logDir $_.Name
+            if (-not (Test-Path $t)) {
+                Move-Item $_.FullName -Destination $logDir -Force -ErrorAction SilentlyContinue
+            } else {
+                Add-Content -Path $t -Value (Get-Content $_.FullName -Raw) -ErrorAction SilentlyContinue
+                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+            }
+            $moved = $true
+        }
+        if ($moved) { Write-Host "  [migrate] $cfgDir\logs\* → $logDir\（同名追加）" -ForegroundColor DarkGray }
+        # 空目录清理（子目录一般不会出现在日志目录里；有则保留）
+        if (-not (Get-ChildItem $oldLogs -ErrorAction SilentlyContinue)) {
+            Remove-Item $oldLogs -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+& Ensure-DataLayout
 
 # 构建产物路径解析。产物实际位置取决于最近一次构建的环境：
 #   - Ensure-VulkanEnv 默认把 CARGO_TARGET_DIR 设为 C:\wt（短路径，避免 MAX_PATH）；
@@ -114,14 +201,14 @@ if (Test-Path $LocalEnv) { . $LocalEnv }
 function Write-Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 
 # 确保配置目录存在，首次自动从模板初始化配置文件。
-# 本脚本已保证 $env:TALKSAGE_DATA_DIR 非空（外部环境变量或项目内 config\）。
+# 配置目录 = $env:TALKSAGE_CONFIG_DIR（数据目录分离；未设时退回数据目录）。
 function Ensure-DevData {
-    $devData = $env:TALKSAGE_DATA_DIR
-    $config  = Join-Path $devData "talksage.toml"
+    $configDir = if ($env:TALKSAGE_CONFIG_DIR) { $env:TALKSAGE_CONFIG_DIR } else { $env:TALKSAGE_DATA_DIR }
+    $config  = Join-Path $configDir "talksage.toml"
     $template = Join-Path $Root "config/talksage.example.toml"
-    if (-not (Test-Path $devData)) {
-        New-Item -ItemType Directory -Force $devData | Out-Null
-        Write-Host "已创建配置目录: $devData" -ForegroundColor Green
+    if (-not (Test-Path $configDir)) {
+        New-Item -ItemType Directory -Force $configDir | Out-Null
+        Write-Host "已创建配置目录: $configDir" -ForegroundColor Green
     }
     if (-not (Test-Path $config)) {
         if (Test-Path $template) {
@@ -481,8 +568,8 @@ function Cmd-Package {
 }
 
 function Cmd-Logs {
-    $dataDir = $env:TALKSAGE_DATA_DIR
-    $logDir = Join-Path $dataDir "logs"
+    $logDir = $env:TALKSAGE_LOG_DIR
+    if (-not $logDir) { $logDir = Join-Path $env:TALKSAGE_DATA_DIR "logs" }
     if (-not (Test-Path $logDir)) { Write-Host "无日志目录: $logDir"; return }
     $log = Get-ChildItem $logDir -Filter "talksage.*.log" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $log) { Write-Host "无日志文件"; return }

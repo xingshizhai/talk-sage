@@ -6,10 +6,11 @@
 
 | 输出 | 位置/格式 |
 |---|---|
-| **文件**（主） | `<数据目录>/logs/talksage.YYYY-MM-DD.log`，**JSON lines**（每行一个事件，可直接解析） |
+| **文件**（主） | `TALKSAGE_LOG_DIR/talksage.YYYY-MM-DD.log`（默认 `<数据目录>/logs/`），**JSON lines**（每行一个事件，可直接解析） |
 | 控制台 | 人类可读文本（级别着色），CLI 直接可见 |
 
-- 数据目录：`TALKSAGE_DATA_DIR`（默认 `~/.talksage`）
+- 日志目录：`TALKSAGE_LOG_DIR`（未设时 `<数据目录>/logs`）；数据目录 `TALKSAGE_DATA_DIR`（默认 `~/.talksage`）
+- 脚本运行（`talksage.ps1`）时日志独立于数据目录，位于项目内 `logs/`
 - 每日轮转（`talksage.YYYY-MM-DD.log`），多天日志并存
 
 **JSON lines 示例：**
@@ -52,7 +53,7 @@ talksage --log-level debug serve
 
 ## 4. AI Agent 分析指引
 
-1. **定位入口**：读 `<数据目录>/logs/talksage.<最近日期>.log`
+1. **定位入口**：读 `<TALKSAGE_LOG_DIR>/talksage.<最近日期>.log`（默认 `<数据目录>/logs/`）
 2. **过滤关键信号**：
    ```bash
    # 只看错误与警告
@@ -71,7 +72,7 @@ talksage --log-level debug serve
 ## 5. 调试辅助
 
 - `talksage doctor`：环境/模型/配置诊断（配合日志确认）
-- `TALKSAGE_LOG_DIR`：覆盖日志目录（默认数据目录/logs）
+- `TALKSAGE_LOG_DIR`：覆盖日志目录（默认 `<数据目录>/logs`；脚本运行默认项目内 `logs/`）
 - `TALKSAGE_LOG_JSON=0`：文件也用文本格式（人工阅读）
 - 日志文件与 `sessions.db` 同目录，随数据目录一起备份/迁移
 

@@ -31,7 +31,7 @@ evaluation/reports/
 _meetily_src/
 
 # 开发数据目录（配置、会话数据库、录音；不入库，不随 clean 删除）。
-# 脚本默认配置目录为项目内 config/（模板 config/talksage.example.toml 入库，其余运行时产物忽略）
+# v0.2+ 目录分离：config/ 只放配置文件，数据在 data/、日志在 logs/。
 config/talksage.toml
 config/sessions.db
 config/logs/
@@ -42,6 +42,9 @@ config/models/
 config/window.json
 config/session-*.md
 config/exports/
+# 数据与日志（与配置分离；sessions.db/录音/导出/声纹在 data\，日志在 logs\）
+data/
+logs/
 
 # Misc
 dist/

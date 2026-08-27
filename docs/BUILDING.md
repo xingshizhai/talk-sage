@@ -17,7 +17,8 @@
 
 ## 0. 快速上手（推荐：一键脚本）
 
-仓库提供统一工具脚本，自动处理环境变量（CARGO_HOME / SHERPA_ONNX_ARCHIVE_DIR / TALKSAGE_DATA_DIR 项目内隔离）与路径解析：
+仓库提供统一工具脚本，自动处理环境变量（CARGO_HOME / SHERPA_ONNX_ARCHIVE_DIR，以及
+配置/数据/日志目录分离的 `TALKSAGE_CONFIG_DIR` / `TALKSAGE_DATA_DIR` / `TALKSAGE_LOG_DIR`）与路径解析：
 
 ```powershell
 # Windows
@@ -265,7 +266,7 @@ cd web && npx vitest run
 # 结构化日志（JSON lines）写入 <数据目录>/logs/talksage.YYYY-MM-DD.log
 # 级别：--verbose / --log-level / RUST_LOG / TALKSAGE_LOG
 .\target\debug\talksage.exe --verbose listen --input a.wav
-Get-Content "$env:TALKSAGE_DATA_DIR\logs\talksage.*.log" | Select-String '"level":"(ERROR|WARN)"'
+Get-Content "$env:TALKSAGE_LOG_DIR\talksage.*.log" | Select-String '"level":"(ERROR|WARN)"'
 ```
 
 详见 [docs/LOGGING.md](LOGGING.md)（日志位置、字段、AI Agent 分析指引）。
@@ -337,7 +338,9 @@ npx tauri build
 | `CARGO_HOME` | cargo 缓存/配置目录（隔离构建用） | `~/.cargo` |
 | `SHERPA_ONNX_ARCHIVE_DIR` | sherpa-onnx 预编译库目录 | 自动下载 |
 | `TALKSAGE_MODELS_DIR` | ASR/VAD 模型根目录 | 相对可执行文件探测 |
-| `TALKSAGE_DATA_DIR` | 数据目录（sessions.db 等），外部已设则优先 | 脚本运行：项目内 `config/`；直接运行程序：`~/.talksage` |
+| `TALKSAGE_CONFIG_DIR` | 配置目录（只放 `talksage.toml`） | 脚本运行：项目内 `config/`；未设时随数据目录 |
+| `TALKSAGE_DATA_DIR` | 数据目录（sessions.db / recordings / exports / voiceprints），外部已设则优先 | 脚本运行：项目内 `data/`；直接运行程序：`~/.talksage` |
+| `TALKSAGE_LOG_DIR` | 日志目录（`talksage.YYYY-MM-DD.log`） | 脚本运行：项目内 `logs/`；未设时 `<数据目录>/logs` |
 | `TALKSAGE_SERVER_TOKEN` | headless 服务鉴权 token | 空（不鉴权） |
 | `TALKSAGE_SERVER_PORT` / `HOST` | 覆盖服务端口/绑定 | 8080 / 127.0.0.1 |
 | `TALKSAGE_WEB_DIST` | SPA 静态目录（serve 用） | `web/dist` |
@@ -369,6 +372,9 @@ talk-sage/
 ├── scripts/                 # 模型下载 / 图标生成 / cargo 代理 / 一键测试
 ├── models/                  # ASR/VAD 模型（运行时，gitignore）
 ├── docs/                    # 架构 / 测试 / PoC 报告
+├── config/                  # 配置目录（talksage.toml 与模板；运行时，gitignore）
+├── data/                    # 数据目录（sessions.db / recordings / exports / voiceprints）
+├── logs/                    # 日志目录（talksage.YYYY-MM-DD.log）
 └── target/                  # Rust 构建产物（debug/release、bundle/）
 ```
 
