@@ -5,7 +5,18 @@
 //
 // 界面代码只依赖本接口，不感知载体。
 
-/** 应用配置快照（与 Rust 侧 Config 对应）。 */
+/**
+ * 应用配置快照（与 Rust 侧 Config 对应，getConfig 返回）。
+ *
+ * 桌面端与浏览器端形状相同，由 Rust 侧
+ * talksage_config::ui_config_json 统一组装。
+ *
+ * 密钥字段（llm.providers[].api_key / asr.aliyun_access_key_secret /
+ * server.token）在浏览器模式（transport = http）下是**掩码**，形如
+ * `sk-••••••••cdef`：够判断「已配置」，但不是真值。掩码原样提交回
+ * saveConfig / 检查接口都视作「未修改」，所以设置页照常读写即可；
+ * 想改就直接覆盖输入框，想清空就留空。
+ */
 export interface AppConfig {
   asr: {
     engine_zh: string;

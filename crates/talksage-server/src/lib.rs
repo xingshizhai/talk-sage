@@ -219,7 +219,11 @@ async fn test_aliyun_asr_api(State(state): State<ServerState>, headers: axum::ht
     }
     let cfg = state.config.snapshot();
     let key_id = body.access_key_id.clone().unwrap_or(cfg.asr.aliyun_access_key_id.clone());
-    let key_secret = body.access_key_secret.clone().unwrap_or(cfg.asr.aliyun_access_key_secret.clone());
+    // 设置页拿到的是掩码（GET /config 打码）：原样提交 = 用已存的密钥去验签。
+    let key_secret = talksage_config::resolve_secret_input(
+        body.access_key_secret.as_deref(),
+        &cfg.asr.aliyun_access_key_secret,
+    );
     let app_key = body.app_key.clone().unwrap_or(cfg.asr.aliyun_app_key.clone());
     if key_id.trim().is_empty() || key_secret.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "请先填写 AccessKey ID 和 AccessKey Secret" }))).into_response();
@@ -250,28 +254,17 @@ async fn get_config_api(State(state): State<ServerState>, headers: axum::http::H
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
     let cfg = state.config.snapshot();
-    let body = serde_json::json!({
-        "asr": {
-            "engine_en": cfg.asr.engine_en,
-            "engine_zh": cfg.asr.engine_zh,
-            "backend": cfg.asr.backend,
-            "punct_enabled": cfg.asr.punct_enabled,
-            "asr_mode": cfg.asr.asr_mode,
-            "aliyun_access_key_id": cfg.asr.aliyun_access_key_id,
-            "aliyun_access_key_secret": cfg.asr.aliyun_access_key_secret,
-            "aliyun_app_key": cfg.asr.aliyun_app_key,
-            "terminology": cfg.asr.terminology,
-        },
-        "audio": cfg.audio,
-        // 通用表：每个插件的默认值 + 用户覆盖，键就是插件 id。
-        // 前端不需要预先知道有哪些插件（Task 4 的 /plugins 端点给出元数据）。
-        "plugins": talksage_plugins::effective_plugin_configs(&cfg.plugins.entries),
-        "knowledge_base": {
-            "enabled": cfg.knowledge_base.enabled,
-            "folder": cfg.knowledge_base.folder,
-        },
-        "server": { "host": cfg.server.host, "port": cfg.server.port },
-    });
+    // 快照的组装规则归 talksage-config，桌面端 IPC 走的是同一个函数 ——
+    // 以前两边各挑各的字段，headless 每次都少几段（scene / recording / quality /
+    // network），设置页因此拿默认值当真值，保存时再写回去覆盖用户配置。
+    //
+    // 差别只有密钥：这里走网络，而 /config 在未设 token 时匿名可读，所以打码。
+    // 掩码原样写回视作「未修改」（见 talksage_config::apply_updates）。
+    let body = talksage_config::ui_config_json(
+        &cfg,
+        talksage_plugins::effective_plugin_configs(&cfg.plugins.entries),
+        talksage_config::SecretPolicy::Mask,
+    );
     (StatusCode::OK, Json(body)).into_response()
 }
 
@@ -532,149 +525,10 @@ async fn save_config_api(
     match state
         .config
         .update(|c| {
-            apply_config_updates(c, &updates);
+            talksage_config::apply_updates(c, &updates);
         }) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
-    }
-}
-
-/// 应用配置更新（与 Tauri 侧共享逻辑）。
-fn apply_config_updates(c: &mut talksage_config::Config, updates: &serde_json::Value) {
-    if let Some(llm) = updates.get("llm") {
-        if let Some(default) = llm.get("default").and_then(|v| v.as_str()) {
-            c.llm.default = default.to_string();
-        }
-        if let Some(providers) = llm.get("providers").and_then(|v| v.as_object()) {
-            for (name, p) in providers {
-                let entry = c.llm.providers.entry(name.clone()).or_default();
-                if let Some(k) = p.get("api_key").and_then(|v| v.as_str()) {
-                    entry.api_key = k.to_string();
-                }
-                if let Some(m) = p.get("model").and_then(|v| v.as_str()) {
-                    entry.model = m.to_string();
-                }
-                if let Some(b) = p.get("base_url").and_then(|v| v.as_str()) {
-                    entry.base_url = Some(b.to_string());
-                }
-            }
-        }
-    }
-    if let Some(plugins) = updates.get("plugins") {
-        c.plugins.apply_updates(plugins);
-    }
-    if let Some(kb) = updates.get("knowledge_base") {
-        if let Some(e) = kb.get("enabled").and_then(|v| v.as_bool()) {
-            c.knowledge_base.enabled = e;
-        }
-        if let Some(f) = kb.get("folder").and_then(|v| v.as_str()) {
-            c.knowledge_base.folder = f.to_string();
-        }
-    }
-    if let Some(asr) = updates.get("asr") {
-        if let Some(e) = asr.get("engine_en").or_else(|| asr.get("client_engine")).and_then(|v| v.as_str()) {
-            c.asr.engine_en = e.to_string();
-        }
-        if let Some(e) = asr.get("engine_zh").or_else(|| asr.get("user_engine")).and_then(|v| v.as_str()) {
-            c.asr.engine_zh = e.to_string();
-        }
-        if let Some(b) = asr.get("backend").and_then(|v| v.as_str()) {
-            c.asr.backend = b.to_string();
-        }
-        if let Some(v) = asr.get("punct_enabled").and_then(|v| v.as_bool()) {
-            c.asr.punct_enabled = v;
-        }
-        if let Some(v) = asr.get("asr_mode").and_then(|v| v.as_str()) {
-            c.asr.asr_mode = v.to_string();
-        }
-        if let Some(v) = asr.get("aliyun_access_key_id").and_then(|v| v.as_str()) {
-            c.asr.aliyun_access_key_id = v.trim().to_string();
-        }
-        if let Some(v) = asr.get("aliyun_access_key_secret").and_then(|v| v.as_str()) {
-            c.asr.aliyun_access_key_secret = v.trim().to_string();
-        }
-        if let Some(v) = asr.get("aliyun_app_key").and_then(|v| v.as_str()) {
-            c.asr.aliyun_app_key = v.trim().to_string();
-        }
-        if let Some(t) = asr.get("terminology") {
-            if let Some(v) = t.get("enabled").and_then(|v| v.as_bool()) { c.asr.terminology.enabled = v; }
-            if let Some(v) = t.get("hotword_score").and_then(|v| v.as_f64()) { c.asr.terminology.hotword_score = (v as f32).clamp(0.0, 10.0); }
-            if let Some(v) = t.get("terms").and_then(|v| v.as_array()) {
-                c.asr.terminology.terms = v.iter().filter_map(|x| x.as_str()).map(str::to_string).collect();
-            }
-            if let Some(v) = t.get("corrections").and_then(|v| v.as_object()) {
-                c.asr.terminology.corrections = v.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect();
-            }
-        }
-    }
-    if let Some(audio) = updates.get("audio") {
-        if let Some(v) = audio.get("input_gain_db").and_then(|v| v.as_f64()) {
-            c.audio.input_gain_db = (v as f32).clamp(0.0, 24.0);
-        }
-        if let Some(vad) = audio.get("vad") {
-            if let Some(p) = vad.get("preset").and_then(|v| v.as_str()) {
-                c.audio.vad.preset = match p {
-                    "sensitive" => talksage_config::VadPreset::Sensitive,
-                    "strict" => talksage_config::VadPreset::Strict,
-                    _ => talksage_config::VadPreset::Standard,
-                };
-            }
-        }
-        if let Some(d) = audio.get("denoise") {
-            if let Some(e) = d.get("enabled").and_then(|v| v.as_bool()) {
-                c.audio.denoise.enabled = e;
-            }
-            if let Some(h) = d.get("highpass").and_then(|v| v.as_bool()) {
-                c.audio.denoise.highpass = h;
-            }
-        }
-        if let Some(e) = audio.get("endpoint") {
-            if let Some(v) = e.get("enabled").and_then(|v| v.as_bool()) { c.audio.endpoint.enabled = v; }
-            if let Some(v) = e.get("stable_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.stable_ms = v.max(100); }
-            if let Some(v) = e.get("quiet_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.quiet_ms = v.max(100); }
-            if let Some(v) = e.get("force_quiet_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.force_quiet_ms = v.max(200); }
-            if let Some(v) = e.get("quiet_rms").and_then(|v| v.as_f64()) { c.audio.endpoint.quiet_rms = (v as f32).clamp(0.0, 0.5); }
-            if let Some(v) = e.get("min_segment_ms").and_then(|v| v.as_u64()) { c.audio.endpoint.min_segment_ms = v; }
-        }
-        // 最短提交时长（ms）：0/null = 不限制
-        if let Some(m) = audio.get("min_segment_ms") {
-            if let Some(v) = m.as_u64() {
-                c.audio.min_segment_ms = if v == 0 { None } else { Some(v) };
-            } else if m.is_null() {
-                c.audio.min_segment_ms = None;
-            }
-        }
-    }
-    // 会议结束 Webhook（借鉴 Call.md workflow-webhook）
-    if let Some(w) = updates.get("webhooks") {
-        if let Some(e) = w.get("enabled").and_then(|v| v.as_bool()) {
-            c.webhooks.enabled = e;
-        }
-        if let Some(urls) = w.get("urls").and_then(|v| v.as_array()) {
-            c.webhooks.urls = urls
-                .iter()
-                .filter_map(|u| u.as_str().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
-    }
-    // 场景模式
-    if let Some(scene) = updates.get("scene") {
-        if let Some(m) = scene.get("mode").and_then(|v| v.as_str()) {
-            c.scene.mode = match m {
-                "dictation" => talksage_config::SceneMode::Dictation,
-                "conversation" => talksage_config::SceneMode::Conversation,
-                "translation" | "bilingual" => talksage_config::SceneMode::Bilingual,
-                "live_translation" => talksage_config::SceneMode::LiveTranslation,
-                "meeting" => talksage_config::SceneMode::Meeting,
-                "lecture" => talksage_config::SceneMode::Lecture,
-                "custom" => talksage_config::SceneMode::Custom,
-                _ => talksage_config::SceneMode::Conversation,
-            };
-        }
-        if let Some(cu) = scene.get("custom") {
-            talksage_config::apply_scene_params(&mut c.scene.custom, cu);
-        }
     }
 }
 
@@ -980,10 +834,8 @@ async fn test_llm_api(State(state): State<ServerState>, headers: axum::http::Hea
     };
     let proxy = snapshot.network.proxy_url().map(str::to_string);
     let llm = talksage_llm::OpenAICompatProvider::new(
-        body.api_key
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| cfg.api_key.clone()),
+        // 同上：空或掩码都回落到配置里已存的 key。
+        talksage_config::resolve_secret_input(body.api_key.as_deref(), &cfg.api_key),
         body.model.clone().unwrap_or_else(|| cfg.model.clone()),
         body.base_url.clone().unwrap_or_else(|| cfg.base_url.clone().unwrap_or_else(|| "https://api.deepseek.com/v1".to_string())),
     ).with_proxy(proxy);
