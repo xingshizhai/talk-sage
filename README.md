@@ -15,7 +15,7 @@
 
 > **拓思者 (Tuòsī Zhě)** — "Talk" ≈ 拓 (expand), "Sage" ≈ 思 (think): an AI assistant that expands your thinking by turning every meeting into structured knowledge.
 
-**Platform support**: Windows (full features incl. system-loopback dual-stream capture), macOS / Linux (mic-only single stream; loopback capture is Windows-only, macOS ships the mic-permission TCC declaration).
+**Platform support**: Windows (full features incl. system-loopback dual-stream capture + Vulkan GPU ASR), macOS / Linux (mic-only single stream; loopback capture is Windows-only, macOS ships the mic-permission TCC declaration).
 
 ---
 
@@ -26,6 +26,7 @@
 ## Features
 
 - **Real-time streaming ASR** — Chinese (paraformer) + English (zipformer) dual streams, incremental partials, VAD segmentation; **smart punctuation** (streaming ASR emits no punctuation → heuristic 。，？ from question tails / conjunctions / subject & time words, then sentence-split display); **denoise off by default** so faint/distant speech is still recognized (enable in Settings for noisy rooms)
+- **Local GPU ASR** — Windows x64: **whisper.cpp + Vulkan** (AMD / Intel / NVIDIA, driver-level loader, no extra runtime needed); macOS Apple Silicon: **whisper.cpp + Metal**. Both use Whisper large-v3-turbo Q5_0 (~547 MiB). When a supported GPU is detected, the pipeline routes through it automatically; falls back to Aliyun cloud or CPU.
 - **Scene modes** — six complete runtime presets: **Dictation / Conversation / Bilingual / Meeting / Lecture / Custom**. Conversation is the default and uses low-cost channel attribution; only Meeting enables WeSpeaker voiceprint clustering by default. Bilingual explicitly binds Chinese/English models and translation direction to the two input streams.
 - **Speaker attribution** — explicit `off / channel / voiceprint` policy instead of a boolean. Channel attribution labels microphone/system-audio roles without loading a model; voiceprint mode identifies the enrolled owner and clusters other speakers as 「客户1」「客户2」…
 - **Live meeting intelligence** — term/acronym explanations, real-time translation (en↔zh), rule-based key-point aggregation (questions / requirements / decisions / actions / technical, with numeric & time heuristics), knowledge-base brief retrieval; History offers **AI-extracted key points** (LLM, needs config)
@@ -53,6 +54,9 @@
 - **Node.js 18+** (frontend build)
 - **Python 3** (model download script, stdlib only)
 - Windows: **VS 2022 Build Tools** (C++ workload) for Tauri & sherpa-onnx linking
+- Windows x64 GPU ASR (optional, auto-detected by `talksage.ps1`):
+  - **Vulkan SDK** — install from [vulkan.lunarg.com](https://vulkan.lunarg.com/sdk/home#windows); the installer sets `VULKAN_SDK` automatically
+  - **LLVM** — install from [llvm.org](https://releases.llvm.org/); run `setx LIBCLANG_PATH "C:\Program Files\LLVM\bin"` once after install
 
 ### 1. Get the models
 
@@ -76,13 +80,13 @@ This downloads into `models/`:
 | Model | Purpose |
 |---|---|
 | `sherpa-onnx-qwen3-asr-0.6b` | Qwen3-ASR 0.6B offline segment-level (int8, ~878 MB; distributed via official GitHub release, HF repo is gated) |
-| `whisper.cpp-large-v3-turbo-q5_0` | Apple Silicon Metal default (~547 MiB; whisper.cpp adapter) |
+| `whisper.cpp-large-v3-turbo-q5_0` | GPU ASR: Windows Vulkan (AMD/Intel/NVIDIA) + macOS Metal (~547 MiB; whisper.cpp adapter) |
 | `silero-vad/silero_vad.onnx` | Voice activity detection |
 | `wespeaker/wespeaker_zh_cnceleb_resnet34.onnx` | Speaker embedding (voiceprint) |
 
 Paraformer, Zipformer, and sherpa ONNX Whisper have been removed from the product model catalog. Existing directories are not deleted automatically because they may contain test fixtures; use the explicit `legacy` script target only for old benchmarks.
 
-The default high-accuracy path is segment-level local GPU ASR: NVIDIA CUDA uses Qwen3-ASR, while Apple Silicon uses Whisper large-v3-turbo Q5_0 through whisper.cpp/Metal. Machines without a supported GPU backend use Aliyun realtime ASR and require all three credentials. Legacy streaming Paraformer/Zipformer and explicit local CPU remain available for diagnostics.
+The default high-accuracy path is segment-level local GPU ASR: Windows x64 uses Whisper large-v3-turbo Q5_0 through whisper.cpp/Vulkan (AMD/Intel/NVIDIA), Apple Silicon uses the same model through whisper.cpp/Metal, and NVIDIA CUDA uses Qwen3-ASR. Machines without a supported GPU backend fall back to Aliyun realtime ASR (requires API credentials). Legacy streaming Paraformer/Zipformer and explicit local CPU remain available for diagnostics.
 
 ### 2. Build
 
@@ -95,6 +99,8 @@ The default high-accuracy path is segment-level local GPU ASR: NVIDIA CUDA uses 
 cd web
 npx tauri build --no-bundle
 ```
+
+`talksage.ps1 dev / build / package` automatically detects and sets the Vulkan build environment (Vulkan SDK, LIBCLANG_PATH, a short `CARGO_TARGET_DIR=C:\wt` to avoid the Windows MAX_PATH limit with `vulkan-shaders-gen`, and static-CRT RUSTFLAGS). If your Vulkan SDK or LLVM are installed in non-default paths, copy [`scripts/talksage.local.example.ps1`](scripts/talksage.local.example.ps1) to `scripts/talksage.local.ps1` (gitignored) and set your paths there — it is sourced automatically before every command.
 
 **macOS / Linux**
 
@@ -179,7 +185,7 @@ Meeting mode enables online speaker clustering when the WeSpeaker model is insta
 |---|---|
 | `talksage-core` | Domain events, sample clock, transcript state, speaker attribution, metrics |
 | `talksage-audio` | Mic/loopback capture, resample, denoise, wav IO, silence trim |
-| `talksage-asr` | sherpa-onnx streaming engine wrapper |
+| `talksage-asr` | ASR engine adapters: sherpa-onnx streaming, whisper.cpp GPU (Vulkan / Metal), Aliyun cloud |
 | `talksage-pipeline` | Shared service, fair dual-stream scheduling, segment lifecycle, bounded plugin/persistence workers |
 | `talksage-plugins` | Registry with filters, segment observers, finalizers, config metadata, and 8 built-ins |
 | `talksage-session` | SQLite storage, compatible schema migration, quality evaluation |
@@ -205,6 +211,7 @@ Real-model integration tests cover Chinese/English ASR, dual-stream fairness and
 - [architecture-v2.md](docs/architecture-v2.md) — current architecture: shared service, bounded workers, plugins, persistence, and sample clock
 - [plugin-development.md](docs/plugin-development.md) — plugin lifecycle, implementation guide, testing checklist, and mechanism assessment
 - [BUILDING.md](docs/BUILDING.md) — build & packaging guide
+- [vulkan-gpu-build.md](docs/vulkan-gpu-build.md) — Windows Vulkan GPU build: toolchain, CRT linking, troubleshooting
 - [RECORDING.md](docs/RECORDING.md) — recording / trim / regression loop
 - [LOGGING.md](docs/LOGGING.md) — structured logging & debugging
 - [testing.md](docs/testing.md) — automated testing strategy
@@ -215,6 +222,11 @@ Real-model integration tests cover Chinese/English ASR, dual-stream fairness and
 crates/            Rust workspace (10 domain crates)
 web/               Tauri 2 + React frontend
 scripts/           build/run/test tooling + model downloaders
+  talksage.ps1              Windows all-in-one script (auto-configures Vulkan env)
+  talksage.local.example.ps1  per-machine path overrides template (copy → talksage.local.ps1)
+  build-vulkan.bat          standalone Vulkan GPU build script
+  talksage.sh               macOS/Linux equivalent
+vendor/            forked crates (whisper-rs-sys: static-CRT patch for Vulkan)
 docs/              design & operation docs
 models/            runtime models (gitignored, ~1.2 GB, multi-engine optional)
 ```
