@@ -663,6 +663,9 @@ mod tests {
             category: talksage_core::KeyPointCategory::Requirement,
             content: "We need NPI samples by Friday.".into(),
             ts_ms: 1,
+            owner: None,
+            due_date: None,
+            source_refs: Vec::new(),
         }];
         let segs = vec![TranscriptSegment {
             speaker_id: 1,

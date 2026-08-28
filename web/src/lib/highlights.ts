@@ -8,6 +8,14 @@ export interface KeyPoint {
   text: string;
   tsMs: number;
   manual: boolean;
+  owner?: string;
+  dueDate?: string;
+  sourceRefs: number[];
+}
+
+/** 会话内删除/去重键：忽略标点、空白和英文大小写。 */
+export function keyPointKey(text: string): string {
+  return [...text].filter((c) => /[\p{L}\p{N}]/u.test(c)).join("").toLowerCase();
 }
 
 const CATEGORY_LABEL: Record<string, KeyPointKind> = {
@@ -25,13 +33,16 @@ export function categoryLabel(category: string): KeyPointKind {
 }
 
 /** 把插件/会话里的要点记录转成卡片用的结构。 */
-export function toKeyPoint(input: { result_id: string; category: string; content: string; ts_ms?: number; manual?: boolean }): KeyPoint {
+export function toKeyPoint(input: { result_id: string; category: string; content: string; ts_ms?: number; manual?: boolean; owner?: string; due_date?: string; source_refs?: number[] }): KeyPoint {
   return {
     resultId: input.result_id,
     kind: categoryLabel(input.category),
     text: input.content,
     tsMs: input.ts_ms ?? 0,
     manual: input.manual ?? false,
+    owner: input.owner,
+    dueDate: input.due_date,
+    sourceRefs: input.source_refs ?? [],
   };
 }
 

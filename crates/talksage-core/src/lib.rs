@@ -149,6 +149,15 @@ pub enum DomainEvent {
         /// true = 用户手动点击"立即整理"触发；false = 自动批量聚合。
         #[serde(default)]
         manual: bool,
+        /// 行动项负责人（LLM 能明确推断时才填）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+        /// 行动项截止时间（保留会话中的原始表达）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        due_date: Option<String>,
+        /// Prompt 中转写段的 1-based 序号，用于回溯来源。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        source_refs: Vec<usize>,
     },
     /// 简报检索命中。
     Brief { source: String, text: String },
@@ -654,6 +663,9 @@ mod tests {
                 content: "We need NPI samples".into(),
                 ts_ms: 1,
                 manual: false,
+                owner: None,
+                due_date: None,
+                source_refs: Vec::new(),
             }
             .delivery_class(),
             DeliveryClass::Durable
@@ -666,6 +678,9 @@ mod tests {
                 content: "…".into(),
                 ts_ms: 1,
                 manual: false,
+                owner: None,
+                due_date: None,
+                source_refs: Vec::new(),
             }
             .delivery_class(),
             DeliveryClass::Replayable

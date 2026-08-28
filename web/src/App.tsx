@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getApi } from "./lib/transport";
 import type { AppConfig, AsrRuntimeStatus, ConversationMetrics, DomainEvent, NotesTemplate, NudgeEvent, SceneMode, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./lib/api";
 import { TranscriptAccumulator } from "./lib/transcript";
-import { toKeyPoint, type KeyPoint } from "./lib/highlights";
+import { keyPointKey, toKeyPoint, type KeyPoint } from "./lib/highlights";
 import { applyIncomingNudge } from "./lib/nudge";
 import { termKey } from "./lib/terms";
 import { cssVars, type Theme } from "./lib/theme";
@@ -87,6 +87,7 @@ export default function App() {
   const [mode, setMode] = useState<TranscriptMode>(() => loadTranscriptMode());
   const [lines, setLines] = useState<TimelineLine[]>([]);
   const [points, setPoints] = useState<readonly KeyPoint[]>([]);
+  const [dismissedPointKeys, setDismissedPointKeys] = useState<ReadonlySet<string>>(() => new Set());
   // done = 已收到后端回执（msg 才是最终结论，此前只是"整理中…"）
   const [flushRecords, setFlushRecords] = useState<readonly { time: string; pointsBefore: number; msg: string; done?: boolean }[]>([]);
   const [terms, setTerms] = useState<TermItem[]>([]);
@@ -590,6 +591,7 @@ export default function App() {
     lastTranslationRef.current = {};
     setLines([]);
     setPoints([]);
+    setDismissedPointKeys(new Set());
     setFlushRecords([]);
     setTerms([]);
     setExpandedTerms({});
@@ -969,25 +971,28 @@ export default function App() {
               <KeyPointsCard
                 points={points}
                 flushRecords={flushRecords}
+                dismissedKeys={dismissedPointKeys}
+                onDelete={(text) => {
+                  const key = keyPointKey(text);
+                  if (!key) return;
+                  setDismissedPointKeys((prev) => new Set(prev).add(key));
+                }}
                 listening={listening}
                 onFlush={async () => {
                   const now = new Date();
                   const time = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
                   const pointsBefore = points.length;
-                  // 后端只回"已启动"，真正的结论随后由 key_point_flush 事件补上
-                  let msg = "整理中…";
-                  let done = false;
+                  // 先插入 pending，避免极快回执早于 UI 记录而丢失。
+                  setFlushRecords((prev) => [...prev, { time, pointsBefore, msg: "整理中…", done: false }]);
                   try {
                     const started = await api.flushKeyPoints();
                     if (started && !started.startsWith("已启动")) {
-                      msg = started; // 未在监听 / 插件未启用 / 无 LLM：这就是最终结论
-                      done = true;
+                      setFlushRecords((prev) => prev.map((r, i) => i === prev.length - 1 ? { ...r, msg: started, done: true } : r));
                     }
                   } catch (e) {
-                    msg = String(e).replace(/^Error: /, "");
-                    done = true;
+                    const msg = String(e).replace(/^Error: /, "");
+                    setFlushRecords((prev) => prev.map((r, i) => i === prev.length - 1 ? { ...r, msg, done: true } : r));
                   }
-                  setFlushRecords((prev) => [...prev, { time, pointsBefore, msg, done }]);
                 }}
                 pluginLabel={(() => {
                   const llmEnabled = config?.plugins?.["key_point_llm"]?.enabled !== false;

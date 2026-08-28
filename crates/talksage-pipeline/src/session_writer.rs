@@ -59,12 +59,18 @@ impl WriteCommand {
                 category,
                 content,
                 ts_ms,
+                owner,
+                due_date,
+                source_refs,
                 ..
             } => Some(Self::KeyPoint(KeyPointRecord {
                 result_id: result_id.clone(),
                 category: *category,
                 content: content.clone(),
                 ts_ms: *ts_ms,
+                owner: owner.clone(),
+                due_date: due_date.clone(),
+                source_refs: source_refs.clone(),
             })),
             DomainEvent::SessionStats {
                 speaker_label,

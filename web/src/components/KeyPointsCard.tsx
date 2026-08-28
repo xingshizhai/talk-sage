@@ -1,7 +1,7 @@
 // 要点聚合卡片：分类徽章 + 文本 + 手动整理时间戳记录。
 
-import { useState } from "react";
-import type { KeyPoint } from "../lib/highlights";
+import { useEffect, useRef } from "react";
+import { keyPointKey, type KeyPoint } from "../lib/highlights";
 
 const KIND_COLOR: Record<string, { fg: string; bg: string }> = {
   问句: { fg: "var(--client)", bg: "var(--client-soft)" },
@@ -20,21 +20,30 @@ export default function KeyPointsCard({
   pluginLabel,
   listening,
   onFlush,
+  dismissedKeys = new Set(),
+  onDelete,
 }: {
   points: readonly KeyPoint[];
   flushRecords?: readonly FlushRecord[];
   pluginLabel?: string;
   listening?: boolean;
   onFlush?: () => Promise<void>;
+  dismissedKeys?: ReadonlySet<string>;
+  onDelete?: (text: string) => void;
 }) {
-  const [flushing, setFlushing] = useState(false);
+  const visiblePoints = points.filter((point) => !dismissedKeys.has(keyPointKey(point.text)));
+  const listRef = useRef<HTMLDivElement>(null);
+  const newestId = visiblePoints.length > 0 ? visiblePoints[visiblePoints.length - 1].resultId : undefined;
+  useEffect(() => {
+    if (newestId && listRef.current) {
+      listRef.current.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
+    }
+  }, [newestId]);
+  const flushing = flushRecords.some((record) => !record.done);
 
   const handleFlush = async () => {
     if (!onFlush || flushing) return;
-    setFlushing(true);
-    try { await onFlush(); } finally {
-      setTimeout(() => setFlushing(false), 1500);
-    }
+    await onFlush();
   };
 
   // 把 points 和 flushRecords 交织：flush 记录插在它触发时已有的要点数量之后
@@ -44,14 +53,14 @@ export default function KeyPointsCard({
 
   const rows: Row[] = [];
   let flushIdx = 0;
-  for (let i = 0; i <= points.length; i++) {
+  for (let i = 0; i <= visiblePoints.length; i++) {
     // 插入所有 pointsBefore === i 的 flush 记录
     while (flushIdx < flushRecords.length && flushRecords[flushIdx].pointsBefore === i) {
       rows.push({ kind: "flush", record: flushRecords[flushIdx], key: `flush-${flushIdx}` });
       flushIdx++;
     }
-    if (i < points.length) {
-      rows.push({ kind: "point", point: points[i], idx: i });
+    if (i < visiblePoints.length) {
+      rows.push({ kind: "point", point: visiblePoints[i], idx: i });
     }
   }
   // 剩余的 flush 记录追加到末尾
@@ -103,10 +112,10 @@ export default function KeyPointsCard({
               {flushing ? "整理中…" : "⚡ 立即整理"}
             </button>
           )}
-          <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>{points.length}</span>
+          <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>{visiblePoints.length}</span>
         </span>
       </div>
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--pad)", display: "flex", flexDirection: "column", gap: 9 }}>
+      <div ref={listRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--pad)", display: "flex", flexDirection: "column", gap: 9 }}>
         {rows.length === 0 && (
           <div style={{ color: "var(--muted)", fontSize: 13 }}>会中要点由插件抽取；关闭插件或听写场景下这里为空…</div>
         )}
@@ -136,13 +145,27 @@ export default function KeyPointsCard({
               <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 5, background: c.bg, color: c.fg }}>
                 {row.point.kind}
               </span>
-              <span style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)", flex: 1 }}>{row.point.text}</span>
+              <span style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)", flex: 1 }}>
+                {row.point.text}
+                {(row.point.owner || row.point.dueDate || row.point.sourceRefs.length > 0) && (
+                  <span style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4, fontSize: 10, color: "var(--muted)" }}>
+                    {row.point.owner && <span>负责人：{row.point.owner}</span>}
+                    {row.point.dueDate && <span>截止：{row.point.dueDate}</span>}
+                    {row.point.sourceRefs.length > 0 && <span title="本次聚合 Prompt 中的转写段序号">来源：#{row.point.sourceRefs.join(", #")}</span>}
+                  </span>
+                )}
+              </span>
               <span
                 title={row.point.manual ? "手动点击「立即整理」触发" : "自动批量聚合触发"}
                 style={{ flexShrink: 0, fontSize: 9, color: "var(--muted)", alignSelf: "center", opacity: 0.6 }}
               >
                 {row.point.manual ? "手动" : "自动"}
               </span>
+              {onDelete && (
+                <button type="button" title="在本次会话中删除并屏蔽该要点" aria-label={`删除要点 ${row.point.text}`} onClick={() => onDelete(row.point.text)} style={{ border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", padding: "1px 3px", lineHeight: 1 }}>
+                  ×
+                </button>
+              )}
             </div>
           );
         })}

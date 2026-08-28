@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { categoryLabel, textNoiseScore, toKeyPoint } from "./highlights";
+import { categoryLabel, keyPointKey, textNoiseScore, toKeyPoint } from "./highlights";
+
+describe("keyPointKey", () => {
+  it("忽略标点、空白和英文大小写", () => {
+    expect(keyPointKey("下周完成 API 文档。")).toBe(keyPointKey("下周完成 api文档"));
+  });
+});
 
 describe("textNoiseScore", () => {
   it("scores clean speech low", () => {
@@ -42,6 +48,12 @@ describe("toKeyPoint", () => {
       text: "We need NPI samples by Friday.",
       tsMs: 42,
       manual: false,
+      sourceRefs: [],
     });
+  });
+
+  it("保留行动项负责人、截止时间和来源引用", () => {
+    expect(toKeyPoint({ result_id: "a", category: "action", content: "更新文档", owner: "张三", due_date: "周五", source_refs: [2, 3] }))
+      .toMatchObject({ owner: "张三", dueDate: "周五", sourceRefs: [2, 3] });
   });
 });

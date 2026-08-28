@@ -521,6 +521,21 @@ token = ""
 - `SceneParams`：VAD/降噪/最短段、两条流的 ASR 引擎与语言、翻译策略、分析插件 allowlist，以及显式角色策略 `off / channel / voiceprint`。只有 `voiceprint` 加载 WeSpeaker；`channel` 直接使用麦克风/系统音频的来源角色。
 - 内置模板：单人听写（灵敏 VAD、单流、最低资源）、一对一会话（默认、同语言双流、按通道角色）、双语对话（中文用户流 + 英文对方流、双向翻译）、多人会议（在线声纹聚类）、演讲/课堂（长段单流、术语与简报）和自定义。场景是完整运行预设，pipeline 不再从 speaker id 猜测语言或用全局 ASR 设置暗中覆盖场景模型。
 - 应用：`TalkSageService` 构建管道时取 `snapshot.scene.effective()` → VAD/降噪 + 每流引擎和语言 + 翻译策略 + 插件 + 角色模式 + `min_commit_ms`；质量评估 auto_detect 跟随场景
+
+### 要点聚合可靠性与结构化信息（2026-08-28）
+
+- `key_point_llm` 的 LLM 结果在后台任务结束后立即由 `take_pending_events`
+  发射，不再等待下一段转写。
+- 管道每 250ms 轮询慢插件尾部截止时间；用户说完后持续静音也能触发不足
+  `batch_size` 的聚合。
+- 正常停止会先 drain 插件执行器，再整理剩余 buffer，保证最后一批要点在
+  SQLite writer 关闭前入库。
+- LLM/网络/JSON 失败时把自动批次放回 buffer；手动整理会返回明确错误，
+  不再伪装成“没有要点”。同一会话最多一个要点 LLM 请求在途。
+- 场景化策略：实时翻译 `4/15s`，对话 `6/30s`，听写 `8/45s`，会议/课堂
+  `12/60s`（格式为 `batch_size/tail_timeout`）；自定义模式保留插件配置。
+- `KeyPoint` 可选携带 `owner` / `due_date` / `source_refs`，贯通实时事件、
+  SQLite 和历史详情。界面支持会话内删除屏蔽和自动跟随最新要点。
 - 前端：设置页「场景模式」tab（4 模式按钮 + 非自定义只读摘要 + 自定义全量编辑），保存 `scene.{mode,custom}`
 - 测试：锁定六种预设的输入流、语言、翻译、插件和角色策略，并覆盖 TOML roundtrip、自定义参数持久化及翻译方向。
 

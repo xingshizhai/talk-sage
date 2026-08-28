@@ -180,12 +180,20 @@ pub trait SegmentObserver: Send + Sync {
         seg: &TranscriptSegment,
         ctx: &PluginContext,
     ) -> anyhow::Result<Option<DomainEvent>>;
+    /// `run` 一次可能产生多个事件；执行器在 run 返回后立即取走。
+    fn take_pending_events(&self) -> Vec<DomainEvent> { Vec::new() }
+    /// 没有新转写时的尾部定时触发。true 必须同时预留本次触发。
+    fn idle_trigger_due(&self) -> bool { false }
+    /// 执行器队列满时释放 `idle_trigger_due` 的预留。
+    fn idle_trigger_rejected(&self) {}
     /// 可选：外部请求在下次 run() 时立即处理 buffer（手动触发）。
     /// 默认空实现，不支持手动 flush 的 observer 无需实现。
     fn request_flush(&self) {}
     /// 可选：直接在调用线程内调用 LLM 处理 buffer 并通过 emit 发射结果事件。
     /// 与 request_flush 不同，此方法同步执行，不依赖下一个 segment 触发。
     fn flush_now(&self, _ctx: &PluginContext, _emit: &dyn Fn(DomainEvent)) {}
+    /// 正常停止会话前整理剩余缓冲。
+    fn flush_remaining(&self, _ctx: &PluginContext, _emit: &dyn Fn(DomainEvent)) {}
 }
 
 /// finalizer 的输入。会话已停、已落库，此处只读。
@@ -406,6 +414,14 @@ impl HookRegistry {
         for obs in &self.observers {
             if obs.name() == "key_point_llm" {
                 obs.flush_now(ctx, emit);
+            }
+        }
+    }
+
+    pub fn flush_key_points_remaining(&self, ctx: &PluginContext, emit: &dyn Fn(DomainEvent)) {
+        for obs in &self.observers {
+            if obs.name() == "key_point_llm" {
+                obs.flush_remaining(ctx, emit);
             }
         }
     }

@@ -247,11 +247,13 @@ fn worker_loop(shared: Arc<Shared>) {
             .elapsed_micros
             .fetch_add(elapsed.as_micros().min(u64::MAX as u128) as u64, Ordering::Relaxed);
         if shared.cancel.load(Ordering::Relaxed) || !shared.active.load(Ordering::Acquire) {
+            let _ = job.plugin.take_pending_events();
             shared.stats.canceled.fetch_add(1, Ordering::Relaxed);
             log::info!("插件[{name}] 会话已停止，丢弃结果");
             continue;
         }
         if elapsed > PLUGIN_RUN_TIMEOUT {
+            let _ = job.plugin.take_pending_events();
             shared.stats.timed_out.fetch_add(1, Ordering::Relaxed);
             log::warn!("插件[{name}] 超时 {elapsed:?}，丢弃结果");
             continue;
@@ -273,6 +275,11 @@ fn worker_loop(shared: Arc<Shared>) {
             Err(_) => {
                 shared.stats.panicked.fetch_add(1, Ordering::Relaxed);
                 log::warn!("插件[{name}] 执行 panic，任务已隔离");
+            }
+        }
+        if shared.active.load(Ordering::Acquire) {
+            for event in job.plugin.take_pending_events() {
+                (job.emit)(event);
             }
         }
     }

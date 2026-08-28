@@ -224,6 +224,16 @@ fn engine_for_language(lang: &str, asr: &talksage_config::AsrConfig) -> EngineKi
     }
 }
 
+fn key_point_aggregation_policy(mode: talksage_config::SceneMode) -> Option<(u64, u64)> {
+    match mode {
+        talksage_config::SceneMode::LiveTranslation => Some((4, 15_000)),
+        talksage_config::SceneMode::Conversation | talksage_config::SceneMode::Bilingual => Some((6, 30_000)),
+        talksage_config::SceneMode::Dictation => Some((8, 45_000)),
+        talksage_config::SceneMode::Meeting | talksage_config::SceneMode::Lecture => Some((12, 60_000)),
+        talksage_config::SceneMode::Custom => None,
+    }
+}
+
 impl TalkSageService {
     pub fn new(config: Arc<ConfigManager>, sessions: Option<Arc<SessionStore>>, engines: Arc<EnginePool>) -> Self {
         Self {
@@ -586,6 +596,16 @@ impl TalkSageService {
 
         // 注册表在这里只建一次 —— 两条流共享同一批 filter 实例（跨流去重的前提）。
         let mut plugin_overrides = plugin_overrides_for(&snapshot.plugins, &scene);
+        // 段级 ASR 缩短后，聚合窗口也必须跟场景调整：翻译/对话优先
+        // 低延迟，会议/课堂优先跨句上下文。自定义模式保留用户插件配置。
+        let aggregation = key_point_aggregation_policy(snapshot.scene.mode);
+        if let Some((batch_size, tail_timeout_ms)) = aggregation {
+            merge_override(
+                &mut plugin_overrides,
+                "key_point_llm",
+                serde_json::json!({ "batch_size": batch_size, "tail_timeout_ms": tail_timeout_ms }),
+            );
+        }
 
         let plugin_ctx = PluginContext {
             kb,
@@ -1153,6 +1173,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn key_point_aggregation_latency_follows_scene() {
+        assert_eq!(key_point_aggregation_policy(SceneMode::LiveTranslation), Some((4, 15_000)));
+        assert_eq!(key_point_aggregation_policy(SceneMode::Conversation), Some((6, 30_000)));
+        assert_eq!(key_point_aggregation_policy(SceneMode::Meeting), Some((12, 60_000)));
+        assert_eq!(key_point_aggregation_policy(SceneMode::Custom), None);
+    }
+
     /// 基础设施类插件不受场景 allowlist 约束 —— 生活模式也要有短段抑制、
     /// 跨流去重、指标与质量评估。
     #[test]
@@ -1410,6 +1438,9 @@ mod tests {
             content: "We need NPI samples".into(),
             ts_ms: 42,
             manual: false,
+            owner: None,
+            due_date: None,
+            source_refs: Vec::new(),
         });
         writer.finish().unwrap();
         let detail = store.get_session(sid).unwrap();

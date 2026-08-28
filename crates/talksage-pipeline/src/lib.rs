@@ -271,7 +271,9 @@ impl LivePipeline {
     /// 停止管道并在时限内 join。超时返回 `false`（不卡死调用方）；
     /// 句柄**保留**，可再调 [`Self::join_remaining`] 继续等待。
     pub fn stop_with_timeout(&mut self, timeout: Duration) -> bool {
-        self.cancel.store(true, Ordering::Relaxed);
+        // stop channel 表示正常停止：管道仍需排空已提交的插件任务，
+        // 并在 writer 关闭前整理最后一批要点。`cancel` 只留给真正的
+        // 强制取消，不能在正常 stop 路径提前置位。
         if let Some(tx) = self.tx_stop.take() {
             let _ = tx.send(());
         }
@@ -1549,6 +1551,7 @@ fn run_loop(
     // 事件循环：轮询各流（出错时先收尾再返回，保证录音完成）
     let mut tick_err: Option<anyhow::Error> = None;
     let mut last_stall_check = std::time::Instant::now();
+    let mut last_plugin_idle_poll = std::time::Instant::now();
     let mut was_paused = false;
     let mut poll_cursor = RoundRobin::default();
     loop {
@@ -1558,6 +1561,29 @@ fn run_loop(
         match rx_stop.try_recv() {
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
             Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        // 真正的尾部超时：即使用户说完后一直静音，也会把不足
+        // batch_size 的要点任务交给后台执行器，不再依赖下一段转写。
+        if last_plugin_idle_poll.elapsed() >= Duration::from_millis(250) {
+            for plugin in cfg.hooks.observers() {
+                if plugin.idle_trigger_due() {
+                    let idle = TranscriptSegment {
+                        speaker_id: 0,
+                        speaker_label: "系统".into(),
+                        speaker_attribution: None,
+                        text: String::new(),
+                        is_partial: false,
+                        ts_ms: 0,
+                        duration_ms: 0,
+                        rms: 0.0,
+                    };
+                    if !plugin_handle.submit(plugin.clone(), cfg.plugin_ctx.clone(), emit.clone(), idle) {
+                        plugin.idle_trigger_rejected();
+                    }
+                }
+            }
+            last_plugin_idle_poll = std::time::Instant::now();
         }
 
         let paused = cfg.runtime.paused.load(Ordering::Acquire);
@@ -1655,7 +1681,11 @@ fn run_loop(
     for w in workers.iter_mut() {
         w.shutdown(&emit);
     }
-    plugin_executor.shutdown(!cancel.load(Ordering::Relaxed), Duration::from_millis(500));
+    plugin_executor.shutdown(!cancel.load(Ordering::Relaxed), PLUGIN_RUN_TIMEOUT + Duration::from_secs(1));
+    if !cancel.load(Ordering::Relaxed) {
+        // executor 已 drain，没有并发 LLM 任务；此时安全整理不足一批的尾段。
+        cfg.hooks.flush_key_points_remaining(&cfg.plugin_ctx, &|ev| emit(ev));
+    }
     // 会话统计事件（每条流一条）：质量评估 / 历史回溯的基础数据
     for w in &workers {
         let StreamStatisticsSnapshot {

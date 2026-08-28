@@ -610,7 +610,14 @@ export default function HistorySection({
                     <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 5, background: "var(--surface-2)", color: "var(--text-2)" }}>
                       {categoryLabel(kp.category)}
                     </span>
-                    <span>{kp.content}</span>
+                    <span>
+                      {kp.content}
+                      {(kp.owner || kp.due_date || (kp.source_refs?.length ?? 0) > 0) && (
+                        <span style={{ display: "block", color: "var(--muted)", fontSize: 10 }}>
+                          {[kp.owner && `负责人：${kp.owner}`, kp.due_date && `截止：${kp.due_date}`, (kp.source_refs?.length ?? 0) > 0 && `来源：#${kp.source_refs!.join(", #")}`].filter(Boolean).join("·")}
+                        </span>
+                      )}
+                    </span>
                   </div>
                 ))}
               </div>

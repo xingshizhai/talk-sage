@@ -27,6 +27,12 @@ pub struct KeyPointRecord {
     pub category: KeyPointCategory,
     pub content: String,
     pub ts_ms: u64,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub due_date: Option<String>,
+    #[serde(default)]
+    pub source_refs: Vec<usize>,
 }
 
 /// 会话内增量聚合：近窗口去重，有界列表。
@@ -65,6 +71,9 @@ impl KeyPointAggregator {
                 category: kp.category,
                 content: kp.text,
                 ts_ms,
+                owner: None,
+                due_date: None,
+                source_refs: Vec::new(),
             };
             self.items.push(record.clone());
             added.push(record);

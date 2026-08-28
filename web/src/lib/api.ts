@@ -198,7 +198,7 @@ export type DomainEvent =
     }
   | { type: "term"; result_id: string; status: "skeleton" | "final"; content: string }
   | { type: "translation"; result_id: string; status: "skeleton" | "final"; direction: "zh_en" | "en_zh"; content: string }
-  | { type: "key_point"; result_id: string; status: "skeleton" | "final"; category: string; content: string; ts_ms?: number; manual?: boolean }
+  | { type: "key_point"; result_id: string; status: "skeleton" | "final"; category: string; content: string; ts_ms?: number; manual?: boolean; owner?: string; due_date?: string; source_refs?: number[] }
   | { type: "brief"; source: string; text: string }
   | { type: "state"; topic: string; open_questions: string[]; recent_decisions: string[] }
   | { type: "status"; stage: string; message: string }
@@ -390,6 +390,9 @@ export interface SessionKeyPoint {
   category: string;
   content: string;
   ts_ms: number;
+  owner?: string | null;
+  due_date?: string | null;
+  source_refs?: number[];
 }
 
 /** 会话详情。 */

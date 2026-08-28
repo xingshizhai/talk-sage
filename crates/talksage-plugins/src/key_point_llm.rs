@@ -16,6 +16,22 @@ use talksage_core::{DomainEvent, KeyPointCategory, ResultStatus, TranscriptSegme
 use crate::registry::{HookRegistry, Plugin, PluginConfig, SegmentObserver};
 use crate::PluginContext;
 
+#[derive(Debug)]
+struct GeneratedPoint {
+    category: KeyPointCategory,
+    content: String,
+    owner: Option<String>,
+    due_date: Option<String>,
+    source_refs: Vec<usize>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 // ── 共享状态 ────────────────────────────────────────────────────────────────
 
 /// 手动聚合的回看窗口（段数）。
@@ -97,6 +113,10 @@ pub struct KeyPointLlmObserver {
     state: Mutex<State>,
     /// 手动 flush 标志：设为 true 后在下次 run() 中强制触发 LLM。
     manual_flush: AtomicBool,
+    /// 同一 observer 只允许一个 LLM 请求（自动/手动共用）。
+    llm_busy: AtomicBool,
+    /// 尾部定时任务已入队，防止 250ms 轮询重复提交。
+    idle_scheduled: AtomicBool,
 }
 
 impl KeyPointLlmObserver {
@@ -106,6 +126,8 @@ impl KeyPointLlmObserver {
             tail_timeout_ms,
             state: Mutex::new(State::new()),
             manual_flush: AtomicBool::new(false),
+            llm_busy: AtomicBool::new(false),
+            idle_scheduled: AtomicBool::new(false),
         }
     }
 
@@ -115,57 +137,36 @@ impl KeyPointLlmObserver {
         texts: &[String],
         existing: &[String],
         llm: &Arc<dyn talksage_llm::LLMProvider>,
-    ) -> (Vec<(KeyPointCategory, String)>, Vec<String>) {
+    ) -> anyhow::Result<(Vec<GeneratedPoint>, Vec<String>)> {
         log::info!(
             "key_point_llm: 手动整理发送 {} 段给 LLM，内容: {}",
             texts.len(),
             texts.join(" | ").chars().take(200).collect::<String>()
         );
         let prompt = build_prompt_manual(texts, existing);
-        match llm.complete(&prompt, SYSTEM_PROMPT) {
-            Ok(resp) => {
-                log::info!("key_point_llm: 手动整理原始响应: {}", resp.chars().take(500).collect::<String>());
-                let result = parse_response(&resp);
-                log::info!("key_point_llm: 手动整理解析得到 {} 个要点，{} 个关键词", result.0.len(), result.1.len());
-                result
-            }
-            Err(e) => {
-                log::warn!("key_point_llm: 手动整理 LLM 调用失败: {e}");
-                (Vec::new(), Vec::new())
-            }
-        }
+        let resp = llm.complete(&prompt, SYSTEM_PROMPT)?;
+        log::info!("key_point_llm: 手动整理原始响应: {}", resp.chars().take(500).collect::<String>());
+        let result = parse_response_checked(&resp)?;
+        log::info!("key_point_llm: 手动整理解析得到 {} 个要点，{} 个关键词", result.0.len(), result.1.len());
+        Ok(result)
     }
 
     fn call_llm(
         texts: &[String],
         existing: &[String],
         llm: &Arc<dyn talksage_llm::LLMProvider>,
-    ) -> (Vec<(KeyPointCategory, String)>, Vec<String>) {
+    ) -> anyhow::Result<(Vec<GeneratedPoint>, Vec<String>)> {
         log::info!(
             "key_point_llm: 发送 {} 段给 LLM，内容: {}",
             texts.len(),
             texts.join(" | ").chars().take(200).collect::<String>()
         );
         let prompt = build_prompt(texts, existing);
-        match llm.complete(&prompt, SYSTEM_PROMPT) {
-            Ok(resp) => {
-                log::info!(
-                    "key_point_llm: LLM 原始响应: {}",
-                    resp.chars().take(500).collect::<String>()
-                );
-                let result = parse_response(&resp);
-                log::info!(
-                    "key_point_llm: 解析得到 {} 个要点，{} 个关键词",
-                    result.0.len(),
-                    result.1.len()
-                );
-                result
-            }
-            Err(e) => {
-                log::warn!("key_point_llm: LLM 调用失败: {e}");
-                (Vec::new(), Vec::new())
-            }
-        }
+        let resp = llm.complete(&prompt, SYSTEM_PROMPT)?;
+        log::info!("key_point_llm: LLM 原始响应: {}", resp.chars().take(500).collect::<String>());
+        let result = parse_response_checked(&resp)?;
+        log::info!("key_point_llm: 解析得到 {} 个要点，{} 个关键词", result.0.len(), result.1.len());
+        Ok(result)
     }
 }
 
@@ -179,11 +180,16 @@ impl SegmentObserver for KeyPointLlmObserver {
     }
 
     fn flush_now(&self, ctx: &PluginContext, emit: &dyn Fn(DomainEvent)) {
+        if self.llm_busy.swap(true, Ordering::AcqRel) {
+            emit(DomainEvent::KeyPointFlush { added: 0, message: "已有一次要点整理正在进行".into() });
+            return;
+        }
         let Some(llm) = ctx.llm.as_ref() else {
             log::warn!("key_point_llm: 手动 flush 无 LLM，跳过");
+            self.llm_busy.store(false, Ordering::Release);
             return;
         };
-        let (texts, existing) = {
+        let (texts, existing, buffered) = {
             let mut g = self.state.lock().unwrap();
             if g.recent.is_empty() {
                 log::info!("key_point_llm: 手动 flush 滑动窗口为空，跳过");
@@ -191,16 +197,24 @@ impl SegmentObserver for KeyPointLlmObserver {
                     added: 0,
                     message: "最近没有新的转写内容".into(),
                 });
+                self.llm_busy.store(false, Ordering::Release);
                 return;
             }
             g.last_flush = Instant::now();
-            g.buffer.clear();
             // 刻意不清空 recent：一次没整出东西不该把这批内容永久丢掉，
             // 用户再点一次仍应能重试（重复要点由 seen 指纹和 prompt 去重拦住）。
-            (g.recent.clone(), g.emitted.clone())
+            (g.recent.clone(), g.emitted.clone(), g.buffer.len())
         };
         log::info!("key_point_llm: 手动 flush 处理最近 {} 段（已有 {} 条要点作去重参考）", texts.len(), existing.len());
-        let (points, keywords) = Self::call_llm_manual(&texts, &existing, llm);
+        let (points, keywords) = match Self::call_llm_manual(&texts, &existing, llm) {
+            Ok(result) => result,
+            Err(error) => {
+                log::warn!("key_point_llm: 手动整理失败: {error:#}");
+                emit(DomainEvent::KeyPointFlush { added: 0, message: format!("整理失败：{error}") });
+                self.llm_busy.store(false, Ordering::Release);
+                return;
+            }
+        };
         let ts_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -209,20 +223,26 @@ impl SegmentObserver for KeyPointLlmObserver {
         let mut skipped_dup = 0usize;
         {
             let mut g = self.state.lock().unwrap();
-            for (i, (category, content)) in points.into_iter().enumerate() {
-                if g.is_duplicate(&content) {
+            // 只消费发起请求时已有的 buffer；LLM 运行期间新进来的段留给下一批。
+            let consume = buffered.min(g.buffer.len());
+            g.buffer.drain(..consume);
+            for (i, point) in points.into_iter().enumerate() {
+                if g.is_duplicate(&point.content) {
                     skipped_dup += 1;
                     continue;
                 }
-                g.record_emitted(&content);
+                g.record_emitted(&point.content);
                 added += 1;
                 emit(DomainEvent::KeyPoint {
                     result_id: format!("kp-manual-{ts_ms}-{i}"),
                     status: talksage_core::ResultStatus::Final,
-                    category,
-                    content,
+                    category: point.category,
+                    content: point.content,
                     ts_ms,
                     manual: true,
+                    owner: point.owner,
+                    due_date: point.due_date,
+                    source_refs: point.source_refs,
                 });
             }
             for (i, kw) in keywords.into_iter().enumerate() {
@@ -238,23 +258,29 @@ impl SegmentObserver for KeyPointLlmObserver {
         let message = flush_message(added, skipped_dup, texts.len(), existing.len());
         log::info!("key_point_llm: 手动 flush 完成 —— {message}");
         emit(DomainEvent::KeyPointFlush { added, message });
+        self.llm_busy.store(false, Ordering::Release);
     }
 
     fn should_trigger(&self, seg: &TranscriptSegment) -> bool {
         !seg.is_partial && seg.text.trim().chars().count() >= 6
     }
 
-    /// 把上一批 LLM 结果发射出去，同时将本段加入缓冲区。
+    /// 将本段加入缓冲区；LLM 结果由执行器在 run 后立即发射。
     fn skeleton(&self, seg: &TranscriptSegment) -> Vec<DomainEvent> {
         let mut g = self.state.lock().unwrap();
         let label = if seg.speaker_label.is_empty() { "讲话者" } else { seg.speaker_label.as_str() };
         g.push_segment(format!("[{label}] {}", seg.text.trim()));
-        std::mem::take(&mut g.pending)
+        Vec::new()
     }
 
     /// 当积满 batch_size 或超过 tail_timeout 时调用 LLM。
     fn run(&self, _seg: &TranscriptSegment, ctx: &PluginContext) -> anyhow::Result<Option<DomainEvent>> {
         let Some(llm) = ctx.llm.as_ref() else { return Ok(None) };
+
+        self.idle_scheduled.store(false, Ordering::Release);
+        if self.llm_busy.swap(true, Ordering::AcqRel) {
+            return Ok(None);
+        }
 
         let manual = self.manual_flush.swap(false, Ordering::Relaxed);
         let should_flush = {
@@ -276,25 +302,39 @@ impl SegmentObserver for KeyPointLlmObserver {
                 // 自动聚合只清空 buffer，不碰 recent（留给手动聚合）
                 (std::mem::take(&mut g.buffer), g.emitted.clone())
             };
-            let (points, keywords) = Self::call_llm(&texts, &existing, llm);
+            let (points, keywords) = match Self::call_llm(&texts, &existing, llm) {
+                Ok(result) => result,
+                Err(error) => {
+                    // 失败批次放回队首，不因网络/限流/JSON 错误永久丢失。
+                    let mut g = self.state.lock().unwrap();
+                    let mut restored = texts;
+                    restored.append(&mut g.buffer);
+                    g.buffer = restored;
+                    self.llm_busy.store(false, Ordering::Release);
+                    return Err(error);
+                }
+            };
             let ts_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
             let mut g = self.state.lock().unwrap();
-            for (i, (category, content)) in points.into_iter().enumerate() {
-                if g.is_duplicate(&content) {
-                    log::debug!("key_point_llm: 跳过重复要点: {content}");
+            for (i, point) in points.into_iter().enumerate() {
+                if g.is_duplicate(&point.content) {
+                    log::debug!("key_point_llm: 跳过重复要点: {}", point.content);
                     continue;
                 }
-                g.record_emitted(&content);
+                g.record_emitted(&point.content);
                 g.pending.push(DomainEvent::KeyPoint {
                     result_id: format!("kp-llm-{ts_ms}-{i}"),
                     status: ResultStatus::Final,
-                    category,
-                    content,
+                    category: point.category,
+                    content: point.content,
                     ts_ms,
                     manual: false,
+                    owner: point.owner,
+                    due_date: point.due_date,
+                    source_refs: point.source_refs,
                 });
             }
             for (i, kw) in keywords.into_iter().enumerate() {
@@ -306,11 +346,59 @@ impl SegmentObserver for KeyPointLlmObserver {
                 });
             }
             if !g.pending.is_empty() {
-                log::info!("key_point_llm: 批量结果 {} 条已存入 pending，等待下段发射", g.pending.len());
+                log::info!("key_point_llm: 批量结果 {} 条已就绪，本次任务返回后立即发射", g.pending.len());
             }
         }
 
+        self.llm_busy.store(false, Ordering::Release);
         Ok(None)
+    }
+
+    fn take_pending_events(&self) -> Vec<DomainEvent> {
+        std::mem::take(&mut self.state.lock().unwrap().pending)
+    }
+
+    fn idle_trigger_due(&self) -> bool {
+        let due = {
+            let g = self.state.lock().unwrap();
+            self.tail_timeout_ms > 0
+                && !g.buffer.is_empty()
+                && g.last_flush.elapsed().as_millis() as u64 >= self.tail_timeout_ms
+        };
+        due && self.idle_scheduled.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+
+    fn idle_trigger_rejected(&self) {
+        self.idle_scheduled.store(false, Ordering::Release);
+    }
+
+    fn flush_remaining(&self, ctx: &PluginContext, emit: &dyn Fn(DomainEvent)) {
+        let Some(llm) = ctx.llm.as_ref() else { return };
+        if self.llm_busy.swap(true, Ordering::AcqRel) { return; }
+        let (texts, existing) = {
+            let mut g = self.state.lock().unwrap();
+            (std::mem::take(&mut g.buffer), g.emitted.clone())
+        };
+        if texts.is_empty() {
+            self.llm_busy.store(false, Ordering::Release);
+            return;
+        }
+        match Self::call_llm(&texts, &existing, llm) {
+            Ok((points, keywords)) => {
+                let ts_ms = now_ms();
+                let mut g = self.state.lock().unwrap();
+                for (i, point) in points.into_iter().enumerate() {
+                    if g.is_duplicate(&point.content) { continue; }
+                    g.record_emitted(&point.content);
+                    emit(DomainEvent::KeyPoint { result_id: format!("kp-final-{ts_ms}-{i}"), status: ResultStatus::Final, category: point.category, content: point.content, ts_ms, manual: false, owner: point.owner, due_date: point.due_date, source_refs: point.source_refs });
+                }
+                for (i, content) in keywords.into_iter().filter(|v| !v.trim().is_empty()).enumerate() {
+                    emit(DomainEvent::Term { result_id: format!("term-kp-final-{ts_ms}-{i}"), status: ResultStatus::Final, content });
+                }
+            }
+            Err(error) => log::warn!("key_point_llm: 会话收尾整理失败: {error:#}"),
+        }
+        self.llm_busy.store(false, Ordering::Release);
     }
 }
 
@@ -417,6 +505,9 @@ fn build_prompt(texts: &[String], existing: &[String]) -> String {
 请先理解上下文推断真实含义，再提炼核心内容。返回 JSON 数组，每个元素包含：\n\
 - category: \"requirement\"（要求/需求）| \"decision\"（决策）| \"action\"（行动项）| \"question\"（待解答问题）| \"technical\"（技术/知识要点）| \"other\"（其他重要信息）\n\
 - content: 一句话概括要点，用规范书面语，主语明确，≤40字；如遇 ASR 错字请纠正后再概括\n\
+- owner: 行动项负责人，无法确定时为 null\n\
+- due_date: 行动项截止时间，保留原文表达，无法确定时为 null\n\
+- source_refs: 支撑该要点的输入段编号数组（例如 [2,3]）\n\
 - keywords: 数组，每项形如 {{\"term\":\"词\",\"gloss\":\"≤20字解释\"}}。只收听众可能不懂、需要解释的行业缩写/专业名词/技术概念；\n\
   常识词（人名、地名、日常物品、知名公司产品）一律不收；没有够格的就给空数组\n\n\
 要求：\n\
@@ -456,6 +547,12 @@ struct RawPoint {
     content: String,
     #[serde(default)]
     keywords: Vec<RawKeyword>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    due_date: Option<String>,
+    #[serde(default)]
+    source_refs: Vec<usize>,
 }
 
 fn parse_category(s: &str) -> KeyPointCategory {
@@ -469,17 +566,26 @@ fn parse_category(s: &str) -> KeyPointCategory {
     }
 }
 
-fn parse_response(resp: &str) -> (Vec<(KeyPointCategory, String)>, Vec<String>) {
+#[cfg(test)]
+fn parse_response(resp: &str) -> (Vec<GeneratedPoint>, Vec<String>) {
+    parse_response_checked(resp).unwrap_or_default()
+}
+
+fn parse_response_checked(resp: &str) -> anyhow::Result<(Vec<GeneratedPoint>, Vec<String>)> {
     let json_str = extract_json_array(resp);
-    let Ok(points) = serde_json::from_str::<Vec<RawPoint>>(&json_str) else {
-        log::warn!("key_point_llm: 无法解析 LLM 响应: {}", &resp[..resp.len().min(200)]);
-        return (Vec::new(), Vec::new());
-    };
+    let points = serde_json::from_str::<Vec<RawPoint>>(&json_str)
+        .map_err(|error| anyhow::anyhow!("LLM 返回的要点 JSON 无法解析: {error}"))?;
     let mut kps = Vec::new();
     let mut all_keywords: Vec<String> = Vec::new();
     for p in points {
         if p.content.trim().is_empty() { continue; }
-        kps.push((parse_category(&p.category), p.content.trim().to_string()));
+        kps.push(GeneratedPoint {
+            category: parse_category(&p.category),
+            content: p.content.trim().to_string(),
+            owner: p.owner.filter(|v| !v.trim().is_empty()),
+            due_date: p.due_date.filter(|v| !v.trim().is_empty()),
+            source_refs: p.source_refs.into_iter().filter(|v| *v > 0).collect(),
+        });
         for kw in p.keywords {
             let kw = kw.into_line();
             if !kw.is_empty() && !all_keywords.contains(&kw) {
@@ -487,7 +593,7 @@ fn parse_response(resp: &str) -> (Vec<(KeyPointCategory, String)>, Vec<String>) 
             }
         }
     }
-    (kps, all_keywords)
+    Ok((kps, all_keywords))
 }
 
 fn extract_json_array(s: &str) -> String {
@@ -608,9 +714,50 @@ mod tests {
         let resp = r#"[{"category":"action","content":"下周完成 API 文档","keywords":[{"term":"API","gloss":"应用程序接口"}]},{"category":"decision","content":"预算不超过 20 万","keywords":[]}]"#;
         let (pts, kws) = parse_response(resp);
         assert_eq!(pts.len(), 2);
-        assert!(matches!(pts[0].0, KeyPointCategory::Action));
-        assert!(matches!(pts[1].0, KeyPointCategory::Decision));
+        assert!(matches!(pts[0].category, KeyPointCategory::Action));
+        assert!(matches!(pts[1].category, KeyPointCategory::Decision));
         assert_eq!(kws, vec!["API：应用程序接口"]);
+    }
+
+    #[test]
+    fn parse_response_keeps_action_metadata() {
+        let resp = r#"[{"category":"action","content":"张三在周五前更新文档","owner":"张三","due_date":"周五","source_refs":[2,3],"keywords":[]}]"#;
+        let (pts, _) = parse_response(resp);
+        assert_eq!(pts[0].owner.as_deref(), Some("张三"));
+        assert_eq!(pts[0].due_date.as_deref(), Some("周五"));
+        assert_eq!(pts[0].source_refs, vec![2, 3]);
+    }
+
+    #[test]
+    fn automatic_result_is_available_immediately_and_invalid_json_restores_buffer() {
+        use talksage_llm::MockProvider;
+        let segment = TranscriptSegment {
+            speaker_id: 0, speaker_label: "我".into(), speaker_attribution: None,
+            text: "下周完成 API 文档".into(), is_partial: false,
+            ts_ms: 1, duration_ms: 500, rms: 0.2,
+        };
+        let obs = KeyPointLlmObserver::new(1, 60_000);
+        let _ = SegmentObserver::skeleton(&obs, &segment);
+        let ctx = PluginContext { kb: None, llm: Some(Arc::new(MockProvider { response: r#"[{"category":"action","content":"下周完成 API 文档","keywords":[]}]"#.into() })), ..PluginContext::new() };
+        SegmentObserver::run(&obs, &segment, &ctx).unwrap();
+        assert!(SegmentObserver::take_pending_events(&obs).iter().any(|ev| matches!(ev, DomainEvent::KeyPoint { .. })));
+
+        let failed = KeyPointLlmObserver::new(1, 60_000);
+        let _ = SegmentObserver::skeleton(&failed, &segment);
+        let bad = PluginContext { kb: None, llm: Some(Arc::new(MockProvider { response: "not-json".into() })), ..PluginContext::new() };
+        assert!(SegmentObserver::run(&failed, &segment, &bad).is_err());
+        assert_eq!(failed.state.lock().unwrap().buffer.len(), 1, "失败批次必须恢复");
+    }
+
+    #[test]
+    fn idle_timeout_reserves_only_one_background_job() {
+        let obs = KeyPointLlmObserver::new(12, 10);
+        obs.state.lock().unwrap().buffer.push("尾部内容".into());
+        obs.state.lock().unwrap().last_flush = Instant::now() - std::time::Duration::from_millis(20);
+        assert!(SegmentObserver::idle_trigger_due(&obs));
+        assert!(!SegmentObserver::idle_trigger_due(&obs));
+        SegmentObserver::idle_trigger_rejected(&obs);
+        assert!(SegmentObserver::idle_trigger_due(&obs));
     }
 
     #[test]
@@ -626,7 +773,7 @@ mod tests {
         let resp = "好的，以下是要点：\n[{\"category\":\"question\",\"content\":\"预算如何分配？\",\"keywords\":[]}]";
         let (pts, _) = parse_response(resp);
         assert_eq!(pts.len(), 1);
-        assert!(matches!(pts[0].0, KeyPointCategory::Question));
+        assert!(matches!(pts[0].category, KeyPointCategory::Question));
     }
 
     #[test]

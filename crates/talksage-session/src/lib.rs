@@ -694,6 +694,9 @@ impl SessionStore {
                 category TEXT NOT NULL,
                 content TEXT NOT NULL,
                 ts_ms INTEGER NOT NULL,
+                owner TEXT,
+                due_date TEXT,
+                source_refs TEXT NOT NULL DEFAULT '[]',
                 FOREIGN KEY(session_id) REFERENCES sessions(id)
             );
             CREATE TABLE IF NOT EXISTS chat_threads (
@@ -725,6 +728,9 @@ impl SessionStore {
         let _ = conn.execute_batch("ALTER TABLE segments ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0;");
         let _ = conn.execute_batch("ALTER TABLE segments ADD COLUMN rms REAL NOT NULL DEFAULT 0;");
         let _ = conn.execute_batch("ALTER TABLE segments ADD COLUMN speaker_attribution TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE key_points ADD COLUMN owner TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE key_points ADD COLUMN due_date TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE key_points ADD COLUMN source_refs TEXT NOT NULL DEFAULT '[]';");
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -841,8 +847,8 @@ impl SessionStore {
     pub fn add_key_point(&self, session_id: i64, kp: &KeyPointRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO key_points (session_id, result_id, category, content, ts_ms) VALUES (?1,?2,?3,?4,?5)",
-            rusqlite::params![session_id, kp.result_id, kp.category.as_str(), kp.content, kp.ts_ms],
+            "INSERT INTO key_points (session_id, result_id, category, content, ts_ms, owner, due_date, source_refs) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![session_id, kp.result_id, kp.category.as_str(), kp.content, kp.ts_ms, kp.owner, kp.due_date, serde_json::to_string(&kp.source_refs)?],
         )?;
         Ok(())
     }
@@ -1126,7 +1132,7 @@ impl SessionStore {
         };
         let key_points: Vec<KeyPointRecord> = {
             let mut stmt = conn.prepare(
-                "SELECT result_id, category, content, ts_ms FROM key_points WHERE session_id = ?1 ORDER BY id",
+                "SELECT result_id, category, content, ts_ms, owner, due_date, source_refs FROM key_points WHERE session_id = ?1 ORDER BY id",
             )?;
             let rows = stmt
                 .query_map([session_id], |r| {
@@ -1136,6 +1142,9 @@ impl SessionStore {
                         category: talksage_core::KeyPointCategory::from_name(&category_raw),
                         content: r.get(2)?,
                         ts_ms: r.get(3)?,
+                        owner: r.get(4)?,
+                        due_date: r.get(5)?,
+                        source_refs: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1279,6 +1288,9 @@ mod tests {
                 category: talksage_core::KeyPointCategory::Requirement,
                 content: "We need NPI samples by Friday.".into(),
                 ts_ms: 1000,
+                owner: Some("张三".into()),
+                due_date: Some("周五".into()),
+                source_refs: vec![1, 2],
             },
         )
         .unwrap();
@@ -1286,6 +1298,9 @@ mod tests {
         assert_eq!(detail.key_points.len(), 1);
         assert_eq!(detail.key_points[0].category, talksage_core::KeyPointCategory::Requirement);
         assert!(detail.key_points[0].content.contains("NPI"));
+        assert_eq!(detail.key_points[0].owner.as_deref(), Some("张三"));
+        assert_eq!(detail.key_points[0].due_date.as_deref(), Some("周五"));
+        assert_eq!(detail.key_points[0].source_refs, vec![1, 2]);
         let md = export_markdown(&detail);
         assert!(md.contains("会中要点"));
         assert!(md.contains("要求"));
@@ -1568,6 +1583,9 @@ mod tests {
                 category: talksage_core::KeyPointCategory::Requirement,
                 content: "Need NPI".into(),
                 ts_ms: 1,
+                owner: None,
+                due_date: None,
+                source_refs: Vec::new(),
             },
         )
         .unwrap();
