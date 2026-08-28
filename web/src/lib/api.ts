@@ -156,6 +156,8 @@ export interface SceneParams {
   denoise_enabled: boolean;
   denoise_gate: number;
   min_segment_ms: number;
+  /** 段级 ASR 最长上下文（ms；0 = 不主动切分）。 */
+  asr_segment_ms: number;
   /** 自定义模式：用户流引擎（其他模式由 engine_zh/engine_en 决定）。 */
   user_engine: string;
   client_enabled: boolean;

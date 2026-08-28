@@ -947,24 +947,6 @@ impl StreamWorker {
         if self.in_speech && !just_started {
             self.segment.advance_pending(chunk.len() as u64);
             self.statistics.observe_speech(&chunk);
-            // 段级引擎（whisper.cpp）：超过强制切分阈值时立即提交，避免 30s+ 积累延迟
-            if self.force_segment_ms > 0 && !self.engine_kind.is_streaming() {
-                let elapsed_ms = AudioClock::samples_to_ms(
-                    talksage_audio::TARGET_SAMPLE_RATE,
-                    self.statistics.segment_samples(),
-                );
-                if elapsed_ms >= self.force_segment_ms {
-                    log::info!(
-                        "流[{}] 段时长 {}ms 超限（max={}ms），强制切分",
-                        self.speaker_label, elapsed_ms, self.force_segment_ms
-                    );
-                    self.vad.reset();
-                    self.pre_roll.clear();
-                    self.pre_roll_samples = 0;
-                    self.finish_speech(emit);
-                    return Ok(true);
-                }
-            }
             // 说话人音频缓冲（预处理后，限 30s，说话人识别用）
             if self.speaker.is_some() {
                 const MAX_SEG_AUDIO: usize = 480000; // 30s @16k
@@ -975,6 +957,25 @@ impl StreamWorker {
             }
             if let Some(asr) = &self.asr {
                 asr.accept(chunk.clone(), self.asr_generation);
+            }
+            // 强制切分必须在当前块送入 ASR 之后执行。旧实现先
+            // finish + return，会整块丢掉切点附近的音频，表现为句尾字消失。
+            if self.force_segment_ms > 0 && !self.engine_kind.is_streaming() {
+                let elapsed_ms = AudioClock::samples_to_ms(
+                    talksage_audio::TARGET_SAMPLE_RATE,
+                    self.statistics.segment_samples(),
+                );
+                if elapsed_ms >= self.force_segment_ms {
+                    log::info!(
+                        "流[{}] 段时长 {}ms 超限（max={}ms），当前块已入 ASR，强制切分",
+                        self.speaker_label, elapsed_ms, self.force_segment_ms
+                    );
+                    self.vad.reset();
+                    self.pre_roll.clear();
+                    self.pre_roll_samples = 0;
+                    self.finish_speech(emit);
+                    return Ok(true);
+                }
             }
             // 送完这块再收一次：刚才那次 accept 可能已经产出 partial
             let partial_update = match self.drain_asr(emit) {
@@ -1457,6 +1458,12 @@ fn run_loop(
         )?;
         // 段级引擎（whisper.cpp）设置强制切分阈值
         w.force_segment_ms = cfg.force_segment_ms;
+        log::info!(
+            "流[{}] ASR 切段策略: engine={} max_segment_ms={}",
+            sc.speaker_label,
+            sc.engine_kind.display_name(),
+            w.force_segment_ms,
+        );
         // 标点恢复独立于 ASR 类型；离线大模型和云端结果也需要统一语义分句。
         if cfg.punct_enabled {
             if let Some(models_root) = sc.model_dir.parent() {

@@ -146,6 +146,9 @@ pub struct SceneParams {
     pub denoise_gate: f32,
     /// 最短提交时长（ms；0 = 不限制，噪音短段抑制）。
     pub min_segment_ms: u64,
+    /// 段级 ASR 最长上下文（ms；0 = 不主动切分）。
+    /// 该值只影响 Whisper/Qwen 等整段推理引擎，流式引擎忽略。
+    pub asr_segment_ms: u64,
     /// 用户流引擎（默认 Qwen3-ASR；仍可显式选择旧流式或 Whisper）。
     pub user_engine: String,
     /// 是否启用客户流（双流；系统回环 + 英文引擎）。
@@ -203,6 +206,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 0,
+            asr_segment_ms: 5_000,
             user_engine: "qwen3-asr".into(),
             client_enabled: false,
             client_engine: "qwen3-asr".into(),
@@ -222,6 +226,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 300,
+            asr_segment_ms: 4_000,
             user_engine: "qwen3-asr".into(),
             client_enabled: true,
             client_engine: "qwen3-asr".into(),
@@ -241,6 +246,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 300,
+            asr_segment_ms: 4_000,
             user_engine: "qwen3-asr".into(),
             client_enabled: true,
             client_engine: "qwen3-asr".into(),
@@ -260,6 +266,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 300,
+            asr_segment_ms: 3_000,
             user_engine: "qwen3-asr".into(),
             client_enabled: false,
             client_engine: "qwen3-asr".into(),
@@ -279,6 +286,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 0,
+            asr_segment_ms: 6_000,
             user_engine: "qwen3-asr".into(),
             client_enabled: true,
             client_engine: "qwen3-asr".into(),
@@ -298,6 +306,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 300,
+            asr_segment_ms: 6_000,
             user_engine: "qwen3-asr".into(),
             client_enabled: false,
             client_engine: "qwen3-asr".into(),
@@ -317,6 +326,7 @@ pub fn scene_params(mode: SceneMode) -> SceneParams {
             denoise_enabled: false,
             denoise_gate: 0.008,
             min_segment_ms: 0,
+            asr_segment_ms: 4_000,
             user_engine: "qwen3-asr".into(),
             client_enabled: true,
             client_engine: "qwen3-asr".into(),
@@ -424,6 +434,9 @@ pub fn apply_scene_params(p: &mut SceneParams, u: &serde_json::Value) {
     }
     if let Some(v) = u.get("min_segment_ms") {
         p.min_segment_ms = v.as_u64().unwrap_or(0);
+    }
+    if let Some(v) = u.get("asr_segment_ms") {
+        p.asr_segment_ms = v.as_u64().unwrap_or(0).min(60_000);
     }
     if let Some(v) = u.get("user_engine").and_then(|v| v.as_str()) {
         p.user_engine = v.to_string();
@@ -1247,6 +1260,7 @@ fn merge_config(default: Config, user: Config) -> Config {
                 denoise_enabled: user.scene.custom.denoise_enabled,
                 denoise_gate: user.scene.custom.denoise_gate,
                 min_segment_ms: user.scene.custom.min_segment_ms,
+                asr_segment_ms: user.scene.custom.asr_segment_ms.min(60_000),
                 user_engine: user.scene.custom.user_engine,
                 client_enabled: user.scene.custom.client_enabled,
                 client_engine: user.scene.custom.client_engine,
@@ -1824,6 +1838,7 @@ min_segment_ms = 600
         assert_eq!(p.vad_preset, VadPreset::Standard);
         assert!(!p.denoise_enabled);
         assert_eq!(p.min_segment_ms, 300);
+        assert_eq!(p.asr_segment_ms, 4_000);
         assert_eq!(p.user_engine, "qwen3-asr");
         assert!(p.client_enabled);
         assert_eq!(p.language, "zh");
@@ -1849,6 +1864,7 @@ min_segment_ms = 600
         assert!(!dictation.client_enabled, "听写场景应单流");
         assert!(dictation.plugin_allowlist.contains(&"key_point_llm".to_string()), "听写场景应允许要点聚合");
         assert_eq!(dictation.vad_min_silence_ms, Some(600));
+        assert_eq!(dictation.asr_segment_ms, 5_000);
 
         assert_eq!(bilingual.translation_mode, TranslationMode::Bidirectional);
         assert_eq!(bilingual.language, "zh");
@@ -1860,9 +1876,11 @@ min_segment_ms = 600
         assert!(live_translation.plugin_allowlist.contains(&"translator".to_string()));
         assert_eq!(live_translation.language, "zh");
         assert_eq!(live_translation.client_language, "en");
+        assert_eq!(live_translation.asr_segment_ms, 3_000);
 
         assert_eq!(meeting.speaker_mode, SpeakerMode::Voiceprint);
         assert_eq!(meeting.language, "zh");
+        assert_eq!(meeting.asr_segment_ms, 6_000);
 
         assert_eq!(lecture.vad_max_speech_ms, Some(60_000));
 
@@ -1986,6 +2004,17 @@ knob = 42
         // 未提交时保留原值
         apply_scene_params(&mut p, &serde_json::json!({ "denoise_enabled": true }));
         assert_eq!(p.plugin_allowlist, vec!["translator"]);
+    }
+
+    #[test]
+    fn apply_scene_params_clamps_asr_segment_duration() {
+        let mut p = scene_params(SceneMode::Custom);
+        apply_scene_params(&mut p, &serde_json::json!({ "asr_segment_ms": 3500 }));
+        assert_eq!(p.asr_segment_ms, 3500);
+        apply_scene_params(&mut p, &serde_json::json!({ "asr_segment_ms": 120_000 }));
+        assert_eq!(p.asr_segment_ms, 60_000);
+        apply_scene_params(&mut p, &serde_json::json!({ "asr_segment_ms": 0 }));
+        assert_eq!(p.asr_segment_ms, 0);
     }
 
     #[test]

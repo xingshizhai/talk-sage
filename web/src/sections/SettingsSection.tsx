@@ -131,6 +131,7 @@ export default function SettingsSection({
     denoise_enabled: config?.scene?.custom?.denoise_enabled ?? false,
     denoise_gate: config?.scene?.custom?.denoise_gate ?? 0.008,
     min_segment_ms: config?.scene?.custom?.min_segment_ms ?? 0,
+    asr_segment_ms: config?.scene?.custom?.asr_segment_ms ?? 4000,
     user_engine: config?.scene?.custom?.user_engine ?? "qwen3-asr",
     client_enabled: config?.scene?.custom?.client_enabled ?? true,
     client_engine: config?.scene?.custom?.client_engine ?? "qwen3-asr",
@@ -918,6 +919,11 @@ export default function SettingsSection({
                 最短提交时长（噪音短段抑制）：
                 <input type="number" min={0} step={100} value={sceneCustom.min_segment_ms} onChange={(e) => setSceneCustom({ ...sceneCustom, min_segment_ms: Math.max(0, Number(e.target.value) || 0) })} style={numStyle} />
                 ms（0 = 不限制）
+              </label>
+              <label style={labelBlock}>
+                段级 ASR 最长上下文：
+                <input type="number" min={0} max={60000} step={500} value={sceneCustom.asr_segment_ms} onChange={(e) => setSceneCustom({ ...sceneCustom, asr_segment_ms: Math.min(60000, Math.max(0, Number(e.target.value) || 0)) })} style={numStyle} />
+                ms（0 = 只按 VAD 自然停顿切段）
               </label>
               <label style={labelBlock}>
                 <input type="checkbox" checked={sceneCustom.denoise_enabled} onChange={(e) => setSceneCustom({ ...sceneCustom, denoise_enabled: e.target.checked })} /> 开启降噪（噪声门 + 高通；弱信号环境慎开）
