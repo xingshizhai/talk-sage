@@ -21,7 +21,7 @@ export interface TermRow {
  * 与 Rust 侧 `talksage_core::term_key` 同一套规则。监听中由事件出口统一去重，
  * 这里兜住没有会话的场景（未监听时手动查词直接推给界面，不经过那一层）。
  */
-function termKey(term: string): string {
+export function termKey(term: string): string {
   return [...term].filter((c) => /[\p{L}\p{N}]/u.test(c)).join("").toLowerCase();
 }
 
@@ -49,7 +49,7 @@ function splitLine(line: string): { term: string; gloss: string } {
  * 一次提取最多给两条术语，插件把它们放在同一个事件里按行分隔 —— 直接整块渲染
  * 会挤成一张卡、计数也不对。
  */
-export function toTermRows(items: TermItem[]): TermRow[] {
+export function toTermRows(items: TermItem[], dismissed: ReadonlySet<string> = new Set()): TermRow[] {
   const seen = new Set<string>();
   return items
     .flatMap((item) =>
@@ -67,6 +67,7 @@ export function toTermRows(items: TermItem[]): TermRow[] {
     .filter((row) => {
       const key = termKey(row.term);
       if (!key) return true; // 取不出术语（如"识别中…"）：照常显示
+      if (dismissed.has(key)) return false;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;

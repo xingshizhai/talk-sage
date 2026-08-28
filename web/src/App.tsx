@@ -5,6 +5,7 @@ import type { AppConfig, AsrRuntimeStatus, ConversationMetrics, DomainEvent, Not
 import { TranscriptAccumulator } from "./lib/transcript";
 import { toKeyPoint, type KeyPoint } from "./lib/highlights";
 import { applyIncomingNudge } from "./lib/nudge";
+import { termKey } from "./lib/terms";
 import { cssVars, type Theme } from "./lib/theme";
 import { loadTheme, saveTheme, loadTranscriptMode, saveTranscriptMode, loadAsideCollapsed, saveAsideCollapsed } from "./lib/prefs";
 import SideNav, { type HealthRow, type NavItem } from "./components/SideNav";
@@ -90,6 +91,8 @@ export default function App() {
   const [flushRecords, setFlushRecords] = useState<readonly { time: string; pointsBefore: number; msg: string; done?: boolean }[]>([]);
   const [terms, setTerms] = useState<TermItem[]>([]);
   const [expandedTerms, setExpandedTerms] = useState<Record<string, boolean>>({});
+  // 用户在当前会话主动删除的术语；后续其他插件再返回同一词也不显示。
+  const [dismissedTermKeys, setDismissedTermKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [briefs, setBriefs] = useState<BriefItem[]>([]);
   const [rawEvents, setRawEvents] = useState<DomainEvent[]>([]);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
@@ -590,6 +593,7 @@ export default function App() {
     setFlushRecords([]);
     setTerms([]);
     setExpandedTerms({});
+    setDismissedTermKeys(new Set());
     setBriefs([]);
     setRawEvents([]);
     setMetrics(null);
@@ -1067,6 +1071,16 @@ export default function App() {
           briefs={briefs}
           expandedTerms={expandedTerms}
           onToggleTerm={(id) => setExpandedTerms((prev) => ({ ...prev, [id]: !prev[id] }))}
+          dismissedTermKeys={dismissedTermKeys}
+          onDeleteTerm={(term) => {
+            const key = termKey(term);
+            if (!key) return;
+            setDismissedTermKeys((prev) => {
+              const next = new Set(prev);
+              next.add(key);
+              return next;
+            });
+          }}
           onAskTerm={async (term) => {
             // 结果由后端以 Term 事件推回来（监听中还会一并入库），这里不手动插卡片
             await api.explainTerm(term);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toTermRows } from "./terms";
+import { termKey, toTermRows } from "./terms";
 
 describe("toTermRows", () => {
   it("把一个事件里的多条术语摊平成一行一条", () => {
@@ -44,5 +44,17 @@ describe("toTermRows", () => {
   it("空内容不产生卡片（撤销骨架的事件）", () => {
     expect(toTermRows([{ resultId: "t", content: "", isFinal: true }])).toHaveLength(0);
     expect(toTermRows([{ resultId: "t", content: "  \n  ", isFinal: true }])).toHaveLength(0);
+  });
+
+  it("删除后按归一化术语键持续屏蔽后续结果", () => {
+    const dismissed = new Set([termKey("MOQ")]);
+    const rows = toTermRows(
+      [
+        { resultId: "old", content: "MOQ：最小起订量\nSLA：服务等级协议", isFinal: true },
+        { resultId: "new-summary", content: "moq: minimum order quantity", isFinal: true },
+      ],
+      dismissed,
+    );
+    expect(rows.map((row) => row.term)).toEqual(["SLA"]);
   });
 });

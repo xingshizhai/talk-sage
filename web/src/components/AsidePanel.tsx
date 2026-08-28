@@ -1,6 +1,6 @@
 // 右栏：术语卡片（可展开）+ 简报（知识库命中）。支持整体折叠（偏好持久化）。
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { BriefItem } from "../sections/BriefSection";
 import type { TermItem } from "../sections/TermsSection";
 import { toTermRows } from "../lib/terms";
@@ -12,6 +12,8 @@ export default function AsidePanel({
   briefs,
   expandedTerms,
   onToggleTerm,
+  dismissedTermKeys,
+  onDeleteTerm,
   onAskTerm,
 }: {
   collapsed: boolean;
@@ -20,10 +22,20 @@ export default function AsidePanel({
   briefs: BriefItem[];
   expandedTerms: Record<string, boolean>;
   onToggleTerm: (resultId: string) => void;
+  dismissedTermKeys: ReadonlySet<string>;
+  onDeleteTerm: (term: string) => void;
   /** 手动查词：交给 App 调后端，结果通过 Term 事件回到列表。 */
   onAskTerm: (term: string) => Promise<void>;
 }) {
-  const termRows = toTermRows(terms);
+  const termRows = toTermRows(terms, dismissedTermKeys);
+  const termListRef = useRef<HTMLDivElement>(null);
+  const newestTermId = termRows.length > 0 ? termRows[termRows.length - 1].resultId : undefined;
+  useEffect(() => {
+    const list = termListRef.current;
+    if (list && newestTermId) {
+      list.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
+    }
+  }, [newestTermId]);
   // 手动查词：结果由后端以 Term 事件回来（和自动提取同一条路），
   // 所以这里只管输入与"查询中"状态，不自己往列表里塞卡片。
   const [asking, setAsking] = useState(false);
@@ -123,7 +135,7 @@ export default function AsidePanel({
           <b style={{ fontSize: 13 }}>专业术语</b>
           <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>{termRows.length}</span>
         </div>
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+        <div ref={termListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
           {termRows.length === 0 && (
             <div style={{ color: "var(--muted)", fontSize: 13 }}>
               出现行业术语或缩写时会在这里解释；常识词不收录
@@ -147,6 +159,20 @@ export default function AsidePanel({
                     </span>
                   )}
                   <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)" }}>{expanded ? "▾" : "▸"}</span>
+                  {t.isFinal && (
+                    <button
+                      type="button"
+                      title={`在本次会话中删除并屏蔽“${term}”`}
+                      aria-label={`删除术语 ${term}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteTerm(term);
+                      }}
+                      style={{ border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", padding: "1px 3px", lineHeight: 1 }}
+                    >
+                      ×
+                    </button>
+                  )}
                 </div>
                 {expanded && (
                   <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)", fontSize: 13, lineHeight: 1.6, color: "var(--text)", wordBreak: "break-word" }}>
