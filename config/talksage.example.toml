@@ -148,11 +148,6 @@ mode = "conversation"
 
 # ── 会话记录 ─────────────────────────────────────────────────────────────────
 
-[session]
-sqlite          = true    # 会话存入 SQLite 数据库
-export_markdown = true    # 同时导出 Markdown 文件
-record_audio    = true    # 同时录制原始音频
-
 [recording]
 enabled       = true    # 监听时自动保存录音
 dir           = ""      # 录音目录（空 = <data_dir>/recordings，可填绝对路径）

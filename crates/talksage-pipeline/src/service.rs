@@ -1271,6 +1271,47 @@ mod tests {
         assert_eq!(texts.lock().unwrap().as_slice(), ["定稿"]);
     }
 
+    /// 专业术语要跟着会话一起入库，且只入「有内容的 Final」：
+    /// 骨架卡片和撤销骨架用的空事件都不该留在历史里（曾经 61 条里 49 条是空的），
+    /// 一次给出的多条术语也要拆成独立记录，历史页才能逐条列。
+    #[test]
+    fn persist_terms_splits_lines_and_skips_skeletons() {
+        let (svc, _dir) = temp_service(true);
+        let store = svc.sessions().unwrap().clone();
+        let sid = store.start_session(1).unwrap();
+        let stats = Arc::new(Mutex::new(Vec::new()));
+        let texts = Arc::new(Mutex::new(Vec::new()));
+        let mut writer = SessionWriter::start(store.clone(), sid, stats, texts).unwrap();
+        let tx = writer.sender();
+
+        // 骨架：只给界面看，不入库
+        tx.enqueue(&DomainEvent::Term {
+            result_id: "t1".into(),
+            status: talksage_core::ResultStatus::Skeleton,
+            content: "专业术语识别中…".into(),
+        });
+        // 一次给出两条：应拆成两条记录
+        tx.enqueue(&DomainEvent::Term {
+            result_id: "t1".into(),
+            status: talksage_core::ResultStatus::Final,
+            content: "MOQ：最小起订量。\n灰度发布：新版本先放小比例用户。".into(),
+        });
+        // 撤销骨架的空事件：不入库
+        tx.enqueue(&DomainEvent::Term {
+            result_id: "t2".into(),
+            status: talksage_core::ResultStatus::Final,
+            content: String::new(),
+        });
+        writer.finish().unwrap();
+
+        let detail = store.get_session(sid).unwrap();
+        assert_eq!(
+            detail.terms,
+            vec!["MOQ：最小起订量。", "灰度发布：新版本先放小比例用户。"],
+            "应只留两条 Final 术语，且一行一条"
+        );
+    }
+
     #[test]
     fn persist_final_key_points() {
         let (svc, _dir) = temp_service(true);

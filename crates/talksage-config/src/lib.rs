@@ -475,7 +475,6 @@ pub struct Config {
     pub audio: AudioConfig,
     pub llm: LlmConfig,
     pub plugins: PluginsConfig,
-    pub session: SessionConfig,
     pub recording: RecordingConfig,
     pub quality: QualityConfig,
     pub privacy: PrivacyConfig,
@@ -493,7 +492,6 @@ impl Default for Config {
             audio: AudioConfig::default(),
             llm: LlmConfig::default(),
             plugins: PluginsConfig::default(),
-            session: SessionConfig::default(),
             recording: RecordingConfig::default(),
             quality: QualityConfig::default(),
             privacy: PrivacyConfig::default(),
@@ -962,24 +960,6 @@ impl Default for NotesConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SessionConfig {
-    pub sqlite: bool,
-    pub export_markdown: bool,
-    pub record_audio: bool,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        Self {
-            sqlite: true,
-            export_markdown: true,
-            record_audio: true,
-        }
-    }
-}
-
 /// 会议录音配置（边用边录，形成"录制 → 裁剪 → 回放验证"闭环）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1234,7 +1214,6 @@ fn merge_config(default: Config, user: Config) -> Config {
         // 通用表：用户写了什么就是什么，宿主不认识键也不该替插件填默认值
         // —— 默认值归 plugin.default_config()，合并在 build_registry 里发生。
         plugins: user.plugins,
-        session: user.session,
         recording: RecordingConfig {
             enabled: user.recording.enabled,
             dir: take_or(user.recording.dir, default.recording.dir),
@@ -1652,6 +1631,23 @@ pub fn apply_updates(c: &mut Config, updates: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 已下线的 `[session]` 段（sqlite / export_markdown / record_audio 三个开关
+    /// 从来没有代码读，删掉了）不能让老配置文件加载失败 —— 用户机器上还留着它。
+    #[test]
+    fn removed_session_section_is_ignored_by_old_config_files() {
+        let raw = r#"
+[asr]
+engine_zh = "qwen3-asr"
+
+[session]
+sqlite = true
+export_markdown = true
+record_audio = true
+"#;
+        let cfg: Config = toml::from_str(raw).expect("含已下线段的老配置仍应能加载");
+        assert_eq!(cfg.asr.engine_zh, "qwen3-asr", "其余字段照常解析");
+    }
 
     #[test]
     fn session_dirs_follow_per_session_layout() {

@@ -255,6 +255,15 @@ pub fn export_markdown(detail: &SessionDetail) -> String {
         }
     }
 
+    // 专业术语：会中解释过的词，导出后别人也能看懂这场会在说什么
+    if !detail.terms.is_empty() {
+        md.push_str("\n## 专业术语\n\n");
+        for term in &detail.terms {
+            md.push_str(&format!("- {term}\n"));
+        }
+        md.push('\n');
+    }
+
     // 转写
     md.push_str("## 转写\n\n");
     for s in &detail.segments {
@@ -1457,6 +1466,7 @@ mod tests {
         s.add_segment(id, &seg(1, "客户", "We need NPI samples by Friday.")).unwrap();
         s.add_segment(id, &seg(0, "我", "我们确认可以安排。")).unwrap();
         s.set_notes(id, "# 会议纪要\n\n## 摘要\n测试").unwrap();
+        s.add_term(id, "MOQ：最小起订量，供应商单次接单的最低数量门槛。").unwrap();
         s.set_trio(
             id,
             r#"{"short_overview":"概述文本","key_points":[{"topic":"交付","points":["客户确认了周五交付"]}],"action_items":["客户发邮件确认"]}"#,
@@ -1473,6 +1483,9 @@ mod tests {
         assert!(md.contains("**概述**：概述文本"));
         assert!(md.contains("### 交付"));
         assert!(md.contains("- [ ] 客户发邮件确认"), "行动项应为可勾选列表: {md}");
+        // 会中解释过的术语要跟着导出走：库里有、界面看得到，导出给别人时不能缺
+        assert!(md.contains("## 专业术语"), "缺少专业术语小节: {md}");
+        assert!(md.contains("- MOQ：最小起订量，供应商单次接单的最低数量门槛。"));
         assert!(md.contains("## 转写"));
         assert!(md.contains("[客户]"));
         assert!(md.contains("We need NPI samples by Friday."));
