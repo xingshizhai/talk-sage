@@ -4,7 +4,7 @@
   web/src-tauri/icons/{16,32,48,64,128,256,512}x{size}.png
   web/src-tauri/icons/icon.png (512)
   web/src-tauri/icons/icon.ico  (PNG-in-ICO, Windows)
-  web/src-tauri/icons/icon.icns (ic08/ic09/ic10, macOS)
+  web/src-tauri/icons/icon.icns (ic07/ic08/ic09/ic10, macOS)
 
 图案: 深色圆角方块 + 青色对话气泡点（极简品牌）。
 """
@@ -19,21 +19,27 @@ BG = (15, 23, 42, 255)      # #0f172a 深蓝黑
 FG = (45, 212, 191, 255)    # #2dd4bf 青色（与旧版术语强调色一致）
 
 
-def make_rgba(size: int) -> bytes:
-    """生成 size×size RGBA 像素: 圆角方块 + 居中气泡点。"""
+def make_rgba(size: int, artwork_scale: float = 1.0) -> bytes:
+    """生成 size×size RGBA 像素: 圆角方块 + 居中气泡点。
+
+    ``artwork_scale`` 用于给 macOS 图标保留系统视觉安全区。Dock 会把 ICNS
+    的整个画布当作图标尺寸；如果底板铺满画布，会比系统图标显得大一圈。
+    """
     rows = []
-    radius = max(2, size // 8)
+    artwork_size = size * artwork_scale
+    inset = (size - artwork_size) / 2
+    radius = max(2, artwork_size / 8)
     cx, cy = size / 2, size / 2
-    r_dot = size * 0.22
+    r_dot = artwork_size * 0.22
     # 气泡: 大圆 + 小尾巴圆
-    tail_x, tail_y = cx + size * 0.16, cy + size * 0.24
-    r_tail = size * 0.09
+    tail_x, tail_y = cx + artwork_size * 0.16, cy + artwork_size * 0.24
+    r_tail = artwork_size * 0.09
     for y in range(size):
         row = bytearray()
         for x in range(size):
             # 圆角判定
-            dx = max(radius - x, x - (size - 1 - radius), 0)
-            dy = max(radius - y, y - (size - 1 - radius), 0)
+            dx = max(inset + radius - x, x - (size - 1 - inset - radius), 0)
+            dy = max(inset + radius - y, y - (size - 1 - inset - radius), 0)
             if dx * dx + dy * dy > radius * radius:
                 row += bytes(BG[:3] + (0,))  # 圆角外透明
                 continue
@@ -80,8 +86,8 @@ def write_ico(pngs: dict[int, bytes], path: Path) -> None:
 
 
 def write_icns(pngs: dict[int, bytes], path: Path) -> None:
-    """ICNS 容器: ic08=128, ic09=256, ic10=512（均为 PNG 数据条目）。"""
-    types = {128: b"ic08", 256: b"ic09", 512: b"ic10"}
+    """ICNS 容器（均为 PNG 数据条目）。"""
+    types = {128: b"ic07", 256: b"ic08", 512: b"ic09", 1024: b"ic10"}
     body = b""
     for size, t in types.items():
         if size in pngs:
@@ -102,7 +108,9 @@ def main() -> None:
     (OUT / "128x128.png").write_bytes(pngs[128])
     (OUT / "128x128@2x.png").write_bytes(pngs[256])
     write_ico({16: pngs[16], 32: pngs[32], 48: pngs[48], 64: pngs[64], 128: pngs[128], 256: pngs[256]}, OUT / "icon.ico")
-    write_icns({128: pngs[128], 256: pngs[256], 512: pngs[512]}, OUT / "icon.icns")
+    # macOS 的图标画布包含约 10% 的四周安全区，以匹配系统图标的视觉尺寸。
+    mac_pngs = {s: make_rgba(s, artwork_scale=0.8) for s in (128, 256, 512, 1024)}
+    write_icns(mac_pngs, OUT / "icon.icns")
     for f in sorted(OUT.iterdir()):
         print(f"{f.name:20s} {f.stat().st_size:>8} bytes")
 
