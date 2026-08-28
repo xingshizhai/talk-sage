@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AppApi, AppConfig, AsrModelInfo, AsrRuntimeStatus, DomainEvent, NotesTemplate, OfflineUpgradeResult, PluginMeta, PluginStatusInfo, SegmentHit, SessionDetail, SessionRecord, TrioSummary, UpdateCheckResult } from "./api";
+import type { AppApi, AppConfig, AsrModelInfo, AsrRuntimeStatus, ChatMessageRecord, ChatSendResult, ChatThread, DomainEvent, NotesTemplate, OfflineUpgradeResult, PluginMeta, PluginStatusInfo, SegmentHit, SessionDetail, SessionRecord, TrioSummary, UpdateCheckResult } from "./api";
 
 /** 统一 fetch 辅助（同源 /api）。 */
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -132,6 +132,34 @@ export const ipcApi: AppApi = {
 
   async renameSession(id: number, title: string): Promise<void> {
     await invoke("rename_session", { sessionId: id, title });
+  },
+
+  async listChatThreads(): Promise<ChatThread[]> {
+    return invoke("list_chat_threads");
+  },
+
+  async createChatThread(): Promise<number> {
+    return invoke("create_chat_thread");
+  },
+
+  async getChatMessages(threadId: number): Promise<ChatMessageRecord[]> {
+    return invoke("get_chat_messages", { threadId });
+  },
+
+  async renameChatThread(threadId: number, title: string): Promise<void> {
+    await invoke("rename_chat_thread", { threadId, title });
+  },
+
+  async deleteChatThread(threadId: number): Promise<void> {
+    await invoke("delete_chat_thread", { threadId });
+  },
+
+  async sendChatMessage(threadId: number, text: string): Promise<ChatSendResult> {
+    return invoke("send_chat_message", { threadId, text });
+  },
+
+  async cancelChatMessage(messageId: number): Promise<void> {
+    await invoke("cancel_chat_message", { messageId });
   },
 
   async deleteSession(id: number): Promise<void> {
@@ -378,6 +406,47 @@ export const httpApi: AppApi = {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
+    });
+  },
+
+  async listChatThreads(): Promise<ChatThread[]> {
+    return req<ChatThread[]>("/chat/threads");
+  },
+
+  async createChatThread(): Promise<number> {
+    const r = await req<{ id: number }>("/chat/threads", { method: "POST" });
+    return r.id;
+  },
+
+  async getChatMessages(threadId: number): Promise<ChatMessageRecord[]> {
+    return req<ChatMessageRecord[]>(`/chat/threads/${threadId}`);
+  },
+
+  async renameChatThread(threadId: number, title: string): Promise<void> {
+    await req(`/chat/threads/${threadId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+  },
+
+  async deleteChatThread(threadId: number): Promise<void> {
+    await req(`/chat/threads/${threadId}`, { method: "DELETE" });
+  },
+
+  async sendChatMessage(threadId: number, text: string): Promise<ChatSendResult> {
+    return req<ChatSendResult>(`/chat/threads/${threadId}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  },
+
+  async cancelChatMessage(messageId: number): Promise<void> {
+    await req("/chat/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message_id: messageId }),
     });
   },
 

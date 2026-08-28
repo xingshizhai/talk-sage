@@ -146,6 +146,9 @@ pub enum DomainEvent {
         category: KeyPointCategory,
         content: String,
         ts_ms: u64,
+        /// true = 用户手动点击"立即整理"触发；false = 自动批量聚合。
+        #[serde(default)]
+        manual: bool,
     },
     /// 简报检索命中。
     Brief { source: String, text: String },
@@ -202,6 +205,21 @@ pub enum DomainEvent {
     Nudge {
         nudge: Nudge,
     },
+    /// AI 助手回答增量（流式逐字输出；按 message_id 追加）。
+    ChatDelta {
+        /// 所属话题 id。
+        thread_id: i64,
+        /// 本条回答的 id（前端按它把增量拼到同一条消息上）。
+        message_id: i64,
+        /// 本次新增的文本片段（done=true 时可为空）。
+        #[serde(default)]
+        delta: String,
+        /// 是否已结束（结束后不再有增量）。
+        done: bool,
+        /// 出错时的可读原因（done=true 且非空表示这次回答失败）。
+        #[serde(default)]
+        error: String,
+    },
     /// 模型下载进度（应用内「转写引擎」安装/卸载）。
     ModelProgress {
         /// 引擎 id（EngineKind::display_name）。
@@ -249,6 +267,8 @@ impl DomainEvent {
             | DomainEvent::Metrics { .. }
             | DomainEvent::Nudge { .. }
             | DomainEvent::ModelProgress { .. } => DeliveryClass::Replayable,
+            // 增量只在生成过程中有意义：漏了就重开一次；完整回答落在 chat_messages 表里
+            DomainEvent::ChatDelta { .. } => DeliveryClass::Ephemeral,
         }
     }
 }
@@ -595,6 +615,7 @@ mod tests {
                 category: KeyPointCategory::Requirement,
                 content: "We need NPI samples".into(),
                 ts_ms: 1,
+                manual: false,
             }
             .delivery_class(),
             DeliveryClass::Durable
@@ -606,6 +627,7 @@ mod tests {
                 category: KeyPointCategory::Requirement,
                 content: "…".into(),
                 ts_ms: 1,
+                manual: false,
             }
             .delivery_class(),
             DeliveryClass::Replayable

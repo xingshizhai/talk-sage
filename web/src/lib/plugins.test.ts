@@ -41,7 +41,7 @@ describe("pluginStatusLabel", () => {
     expect(pluginStatusLabel({ id: "x", label: "X", status: "active" })).toBe("可用");
     expect(pluginStatusLabel({ id: "x", label: "X", status: "disabled" })).toBe("已关闭");
     expect(pluginStatusLabel({ id: "x", label: "X", status: "unavailable", missing_capabilities: ["llm", "knowledge_base"] }))
-      .toBe("不可用：缺少 llm、knowledge_base");
+      .toBe("不可用：缺少 LLM（请配置 API Key）、knowledge_base");
     expect(pluginStatusLabel({ id: "x", label: "X", status: "invalid_config", issues: [{ path: "x.enabled", message: "bad" }] }))
       .toBe("配置错误：x.enabled");
   });

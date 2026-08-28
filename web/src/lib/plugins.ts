@@ -11,7 +11,10 @@ export function pluginStatusLabel(registration: PluginStatusInfo | undefined): s
   if (registration.status === "active") return "可用";
   if (registration.status === "disabled") return "已关闭";
   if (registration.status === "unavailable") {
-    return `不可用：缺少 ${(registration.missing_capabilities ?? []).join("、")}`;
+    const missing = (registration.missing_capabilities ?? [])
+      .map((c) => (c === "llm" ? "LLM（请配置 API Key）" : c))
+      .join("、");
+    return `不可用：缺少 ${missing}`;
   }
   return `配置错误：${(registration.issues ?? []).map((item) => item.path).join("、")}`;
 }

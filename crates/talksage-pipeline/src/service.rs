@@ -280,6 +280,11 @@ impl TalkSageService {
 
     /// 根据配置构建 LLM（无 key 且非 ollama 时返回 None）。
     pub fn build_llm(config: &ConfigManager) -> Option<Arc<dyn LLMProvider>> {
+        Self::build_chat_provider(config).map(|p| Arc::new(p) as Arc<dyn LLMProvider>)
+    }
+
+    /// 同上，但返回具体类型 —— AI 助手要用的 `stream_chat` 是固有方法，不在 trait 上。
+    pub fn build_chat_provider(config: &ConfigManager) -> Option<OpenAICompatProvider> {
         let snapshot = config.snapshot();
         let name = snapshot.llm.default.clone();
         let provider = snapshot.llm.providers.get(&name)?;
@@ -287,14 +292,14 @@ impl TalkSageService {
             return None;
         }
         let proxy = snapshot.network.proxy_url().map(str::to_string);
-        Some(Arc::new(OpenAICompatProvider::new(
+        Some(OpenAICompatProvider::new(
             provider.api_key.clone(),
             provider.model.clone(),
             provider
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "https://api.deepseek.com/v1".to_string()),
-        ).with_proxy(proxy)))
+        ).with_proxy(proxy))
     }
 
     /// 探测 models/ 根目录。
@@ -843,7 +848,15 @@ fn plugin_overrides_for(
     // 自己的 register() 里靠 PluginContext 做，宿主这里不重复。
     for id in talksage_plugins::analysis_plugin_ids() {
         if !scene.plugin_allowlist.iter().any(|a| a == id) {
-            merge_override(&mut overrides, id, serde_json::json!({ "enabled": false }));
+            // 用户明确开启的插件，场景不强制关闭；未设置或关闭的才受场景约束
+            let user_enabled = overrides
+                .get(id)
+                .and_then(|v| v.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !user_enabled {
+                merge_override(&mut overrides, id, serde_json::json!({ "enabled": false }));
+            }
         }
     }
 
@@ -1120,9 +1133,9 @@ mod tests {
             "用户关掉的，场景允许也不该打开"
         );
 
-        // 生活：allowlist 不允许，enabled 被压成 false，但其他键不动
+        // 生活：allowlist 不允许，但用户明确开启的插件不应被压掉
         let dictation = plugin_overrides_for(&plugins, &talksage_config::scene_params(SceneMode::Dictation));
-        assert_eq!(enabled_in(&dictation, on), Some(false));
+        assert_eq!(enabled_in(&dictation, on), Some(true), "用户明确开启的插件，场景不应强制关闭");
         assert_eq!(
             dictation[on]["knob"],
             serde_json::json!(99.0),
@@ -1256,6 +1269,7 @@ mod tests {
             category: talksage_core::KeyPointCategory::Requirement,
             content: "We need NPI samples".into(),
             ts_ms: 42,
+            manual: false,
         });
         writer.finish().unwrap();
         let detail = store.get_session(sid).unwrap();

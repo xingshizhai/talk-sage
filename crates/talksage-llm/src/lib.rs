@@ -15,6 +15,32 @@ const LLM_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const LLM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const LLM_OVERALL_TIMEOUT: Duration = Duration::from_secs(12);
 
+/// 聊天（AI 助手）用的超时：与插件不同，用户在等一个完整回答，
+/// 且流式下"读"是按 chunk 计的，卡住才该超时。
+const CHAT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 两个 chunk 之间的最长间隔（首个 token 也受它约束）。
+const CHAT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 一条聊天消息（多轮上下文）。
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+pub struct ChatMessage {
+    /// system | user | assistant
+    pub role: String,
+    pub content: String,
+}
+
+impl ChatMessage {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self { role: "user".into(), content: content.into() }
+    }
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self { role: "assistant".into(), content: content.into() }
+    }
+    pub fn system(content: impl Into<String>) -> Self {
+        Self { role: "system".into(), content: content.into() }
+    }
+}
+
 /// LLM Provider 抽象。
 pub trait LLMProvider: Send + Sync {
     /// 一次完整补全。
@@ -66,6 +92,90 @@ impl OpenAICompatProvider {
         builder.build()
     }
 
+    /// 聊天用 agent：读超时按「两个 chunk 之间的最长间隔」设，不能沿用插件那套
+    /// 10s —— 长回答会被拦腰截断。
+    fn build_chat_agent(&self) -> ureq::Agent {
+        let mut builder = ureq::AgentBuilder::new()
+            .try_proxy_from_env(false)
+            .timeout_connect(CHAT_CONNECT_TIMEOUT)
+            .timeout_read(CHAT_STREAM_IDLE_TIMEOUT)
+            .timeout_write(LLM_WRITE_TIMEOUT);
+        if let Some(p) = &self.proxy {
+            match ureq::Proxy::new(p) {
+                Ok(proxy_cfg) => { builder = builder.proxy(proxy_cfg); }
+                Err(e) => { log::warn!("LLM 代理地址无效，将直连: proxy={p} error={e}"); }
+            }
+        }
+        builder.build()
+    }
+
+    /// 多轮流式补全：每收到一段增量就回调 `on_delta`，返回拼好的完整回答。
+    ///
+    /// `cancelled` 每读一行检查一次：返回 true 时立即收尾（用户点了停止），
+    /// 已经产生的部分照常返回，不算错误。
+    pub fn stream_chat(
+        &self,
+        messages: &[ChatMessage],
+        on_delta: &mut dyn FnMut(&str),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<String> {
+        use std::io::BufRead;
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.6,
+            "stream": true,
+        });
+        let agent = self.build_chat_agent();
+        let mut req = agent.post(&url).set("Content-Type", "application/json");
+        if !self.api_key.is_empty() && self.api_key != "ollama" {
+            req = req.set("Authorization", &format!("Bearer {}", self.api_key));
+        }
+        let resp = match req.send_json(&body) {
+            Ok(r) => r,
+            Err(ureq::Error::Status(status, _)) => {
+                return Err(anyhow!("HTTP {status}：{}", friendly_status(status)))
+            }
+            Err(e) => return Err(anyhow!("LLM 请求失败: {e}")),
+        };
+
+        let mut reader = std::io::BufReader::new(resp.into_reader());
+        let mut full = String::new();
+        let mut line = String::new();
+        loop {
+            if cancelled() {
+                break;
+            }
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break, // 端点直接关流（有些实现不发 [DONE]）
+                Ok(_) => {}
+                Err(e) => {
+                    // 已经出了字就别把整次回答判死：把读到的部分交回去
+                    if full.is_empty() {
+                        return Err(anyhow!("LLM 流式读取失败: {e}"));
+                    }
+                    log::warn!("LLM 流式读取中断，返回已生成部分: {e}");
+                    break;
+                }
+            }
+            match parse_sse_line(&line) {
+                SseLine::Delta(text) => {
+                    full.push_str(&text);
+                    on_delta(&text);
+                }
+                SseLine::Done => break,
+                SseLine::Ignore => {}
+            }
+        }
+        if full.trim().is_empty() {
+            return Err(anyhow!("LLM 无输出"));
+        }
+        Ok(full)
+    }
+
     /// 最小化连通性测试：向配置的端点发一个 max_tokens=1 的请求，
     /// 验证 key / base_url / model 是否可用。不依赖 [`Self::complete`]
     /// 的完整响应解析（有些端点可能因超长 prompt 拒绝）。
@@ -95,6 +205,41 @@ impl OpenAICompatProvider {
             )),
             Err(e) => Err(anyhow!("请求失败: {e}")),
         }
+    }
+}
+
+/// 一行 SSE 的解析结果。
+#[derive(Debug, PartialEq, Eq)]
+pub enum SseLine {
+    /// 一段新增文本。
+    Delta(String),
+    /// 流正常结束（`data: [DONE]`）。
+    Done,
+    /// 心跳 / 空行 / 只带 role 的首帧等，忽略即可。
+    Ignore,
+}
+
+/// 解析流式响应里的一行。
+///
+/// 各家 OpenAI 兼容端点的差异都收在这里（首帧只给 role、中途插心跳注释、
+/// DeepSeek 的 reasoning_content 等），拆成纯函数是为了不起网络也能测。
+pub fn parse_sse_line(line: &str) -> SseLine {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let Some(payload) = line.strip_prefix("data:") else {
+        return SseLine::Ignore; // 空行、`event:`、`:` 开头的心跳注释
+    };
+    let payload = payload.trim();
+    if payload == "[DONE]" {
+        return SseLine::Done;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return SseLine::Ignore;
+    };
+    let delta = &v["choices"][0]["delta"];
+    match delta["content"].as_str() {
+        Some(text) if !text.is_empty() => SseLine::Delta(text.to_string()),
+        // 首帧常常只有 {"role":"assistant"}；推理模型的 reasoning_content 不计入正文
+        _ => SseLine::Ignore,
     }
 }
 
@@ -196,6 +341,35 @@ impl LLMProvider for MockSeqProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SSE 行解析：正文增量、结束标记、以及各种应当忽略的噪音行。
+    #[test]
+    fn sse_line_parsing_covers_endpoint_quirks() {
+        assert_eq!(
+            parse_sse_line(r#"data: {"choices":[{"delta":{"content":"你好"}}]}"#),
+            SseLine::Delta("你好".into())
+        );
+        assert_eq!(parse_sse_line("data: [DONE]"), SseLine::Done);
+        // 首帧只带 role
+        assert_eq!(
+            parse_sse_line(r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#),
+            SseLine::Ignore
+        );
+        // 推理模型的思维链不计入正文
+        assert_eq!(
+            parse_sse_line(r#"data: {"choices":[{"delta":{"reasoning_content":"嗯"}}]}"#),
+            SseLine::Ignore
+        );
+        // 心跳注释 / 空行 / 非 JSON
+        assert_eq!(parse_sse_line(": keep-alive"), SseLine::Ignore);
+        assert_eq!(parse_sse_line(""), SseLine::Ignore);
+        assert_eq!(parse_sse_line("data: not-json"), SseLine::Ignore);
+        // 末尾 CRLF 不影响解析
+        assert_eq!(
+            parse_sse_line("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\r\n"),
+            SseLine::Delta("x".into())
+        );
+    }
 
     #[test]
     fn friendly_status_maps_common_errors() {

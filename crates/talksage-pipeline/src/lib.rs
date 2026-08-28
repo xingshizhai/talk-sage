@@ -19,6 +19,7 @@ use talksage_audio::{AudioHub, Preprocessor};
 use talksage_config::{DenoiseConfig, EndpointConfig, VadConfig};
 use talksage_core::{AudioClock, DomainEvent, StatusStage, TranscriptSegment};
 
+pub mod chat;
 pub mod finalize;
 mod endpoint;
 mod input_scheduler;

@@ -1,11 +1,9 @@
 //! LLM 要点聚合插件：批量积累转写段 → 调用 LLM → 发射 KeyPoint 事件。
 //!
-//! 策略：每积累 `batch_size` 段（默认 4），在 `run()` 里调一次 LLM；
-//! 结果先存入 `pending` 队列，下次 `skeleton()` 调用时发射出去。
-//!
-//! 不依赖 SessionFinalizer（其 FinalizeContext 无 LLM 句柄），会话末尾
-//! 剩余的不足 batch_size 的段会在最后一次 run() 里以 `flush_tail` 模式处理：
-//! 当超过 `tail_timeout_ms` 没有新段时，把剩余段也发给 LLM。
+//! 策略：
+//! - `buffer`：待自动聚合的新段，积满 `batch_size` 或超过 `tail_timeout_ms` 后触发
+//! - `recent`：最近 N 段的滑动窗口，**手动聚合专用**，不受自动聚合清空影响
+//!   这样即使自动一直在跑，用户手动点击时仍能得到足够的上下文
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,24 +18,49 @@ use crate::PluginContext;
 
 // ── 共享状态 ────────────────────────────────────────────────────────────────
 
+/// 手动聚合时使用的滑动窗口大小（段数）。
+const RECENT_WINDOW: usize = 30;
+
 struct State {
-    /// 尚未发给 LLM 的段文本（带说话人标签）。
+    /// 尚未自动聚合的新段，积满 batch_size 后清空。
     buffer: Vec<String>,
+    /// 最近 RECENT_WINDOW 段的滑动窗口，手动聚合时使用，自动聚合不清空它。
+    recent: Vec<String>,
     /// LLM 已返回、等待下次 skeleton() 发射的事件。
     pending: Vec<DomainEvent>,
     /// 上次触发 LLM 的时间（用于 tail 超时触发）。
     last_flush: Instant,
-    /// 已输出要点的归一化指纹（跨批去重：同一要点在多个批次重复出现时只发一次）。
+    /// 已输出要点的归一化指纹（跨批去重）。
     seen: std::collections::HashSet<String>,
+    /// 已输出要点的完整文本（传给 LLM 做语义去重）。
+    emitted: Vec<String>,
 }
 
 impl State {
     fn new() -> Self {
         Self {
             buffer: Vec::new(),
+            recent: Vec::new(),
             pending: Vec::new(),
             last_flush: Instant::now(),
             seen: std::collections::HashSet::new(),
+            emitted: Vec::new(),
+        }
+    }
+
+    fn record_emitted(&mut self, content: &str) {
+        self.remember(content);
+        if self.emitted.len() >= 50 {
+            self.emitted.remove(0);
+        }
+        self.emitted.push(content.to_string());
+    }
+
+    fn push_segment(&mut self, text: String) {
+        self.buffer.push(text.clone());
+        self.recent.push(text);
+        if self.recent.len() > RECENT_WINDOW {
+            self.recent.remove(0);
         }
     }
 
@@ -45,7 +68,7 @@ impl State {
     fn fingerprint(content: &str) -> String {
         content
             .chars()
-            .filter(|c| !c.is_whitespace() && !matches!(c, '，' | '。' | '、' | '；' | '：' | ',' | '.' | '?' | '？' | '!' | '！' | '"' | '“' | '”' | ' '))
+            .filter(|c| !c.is_whitespace() && !matches!(c, '，' | '。' | '、' | '；' | '：' | ',' | '.' | '?' | '？' | '!' | '！' | '"' | '"' | '"' | ' '))
             .flat_map(|c| c.to_lowercase())
             .collect()
     }
@@ -85,11 +108,29 @@ impl KeyPointLlmObserver {
 
     fn call_llm(
         texts: &[String],
+        existing: &[String],
         llm: &Arc<dyn talksage_llm::LLMProvider>,
     ) -> (Vec<(KeyPointCategory, String)>, Vec<String>) {
-        let prompt = build_prompt(texts);
+        log::info!(
+            "key_point_llm: 发送 {} 段给 LLM，内容: {}",
+            texts.len(),
+            texts.join(" | ").chars().take(200).collect::<String>()
+        );
+        let prompt = build_prompt(texts, existing);
         match llm.complete(&prompt, SYSTEM_PROMPT) {
-            Ok(resp) => parse_response(&resp),
+            Ok(resp) => {
+                log::info!(
+                    "key_point_llm: LLM 原始响应: {}",
+                    resp.chars().take(500).collect::<String>()
+                );
+                let result = parse_response(&resp);
+                log::info!(
+                    "key_point_llm: 解析得到 {} 个要点，{} 个关键词",
+                    result.0.len(),
+                    result.1.len()
+                );
+                result
+            }
             Err(e) => {
                 log::warn!("key_point_llm: LLM 调用失败: {e}");
                 (Vec::new(), Vec::new())
@@ -112,17 +153,18 @@ impl SegmentObserver for KeyPointLlmObserver {
             log::warn!("key_point_llm: 手动 flush 无 LLM，跳过");
             return;
         };
-        let texts = {
+        let (texts, existing) = {
             let mut g = self.state.lock().unwrap();
-            if g.buffer.is_empty() {
-                log::info!("key_point_llm: 手动 flush buffer 为空，跳过");
+            if g.recent.is_empty() {
+                log::info!("key_point_llm: 手动 flush 滑动窗口为空，跳过");
                 return;
             }
             g.last_flush = Instant::now();
-            std::mem::take(&mut g.buffer)
+            g.buffer.clear();
+            (std::mem::take(&mut g.recent), g.emitted.clone())
         };
-        log::info!("key_point_llm: 手动 flush 立即处理 {} 段", texts.len());
-        let (points, keywords) = Self::call_llm(&texts, llm);
+        log::info!("key_point_llm: 手动 flush 处理最近 {} 段（已有 {} 条要点作去重参考）", texts.len(), existing.len());
+        let (points, keywords) = Self::call_llm(&texts, &existing, llm);
         let ts_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -130,13 +172,14 @@ impl SegmentObserver for KeyPointLlmObserver {
         let mut g = self.state.lock().unwrap();
         for (i, (category, content)) in points.into_iter().enumerate() {
             if g.is_duplicate(&content) { continue; }
-            g.remember(&content);
+            g.record_emitted(&content);
             emit(DomainEvent::KeyPoint {
                 result_id: format!("kp-manual-{ts_ms}-{i}"),
                 status: talksage_core::ResultStatus::Final,
                 category,
                 content,
                 ts_ms,
+                manual: true,
             });
         }
         for (i, kw) in keywords.into_iter().enumerate() {
@@ -157,7 +200,7 @@ impl SegmentObserver for KeyPointLlmObserver {
     fn skeleton(&self, seg: &TranscriptSegment) -> Vec<DomainEvent> {
         let mut g = self.state.lock().unwrap();
         let label = if seg.speaker_label.is_empty() { "讲话者" } else { seg.speaker_label.as_str() };
-        g.buffer.push(format!("[{label}] {}", seg.text.trim()));
+        g.push_segment(format!("[{label}] {}", seg.text.trim()));
         std::mem::take(&mut g.pending)
     }
 
@@ -174,46 +217,49 @@ impl SegmentObserver for KeyPointLlmObserver {
                 || (timeout_elapsed && !g.buffer.is_empty())
                 || (manual && !g.buffer.is_empty())
         };
-        if manual && should_flush {
-            log::info!("key_point_llm: 手动触发立即整理");
-        }
 
         if should_flush {
-            let texts = {
+            if manual {
+                log::info!("key_point_llm: 手动触发自动批量整理（via run）");
+            }
+            let (texts, existing) = {
                 let mut g = self.state.lock().unwrap();
                 g.last_flush = Instant::now();
-                std::mem::take(&mut g.buffer)
+                // 自动聚合只清空 buffer，不碰 recent（留给手动聚合）
+                (std::mem::take(&mut g.buffer), g.emitted.clone())
             };
-            let (points, keywords) = Self::call_llm(&texts, llm);
+            let (points, keywords) = Self::call_llm(&texts, &existing, llm);
             let ts_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
             let mut g = self.state.lock().unwrap();
-            let mut events: Vec<DomainEvent> = Vec::new();
             for (i, (category, content)) in points.into_iter().enumerate() {
                 if g.is_duplicate(&content) {
                     log::debug!("key_point_llm: 跳过重复要点: {content}");
                     continue;
                 }
-                g.remember(&content);
-                events.push(DomainEvent::KeyPoint {
+                g.record_emitted(&content);
+                g.pending.push(DomainEvent::KeyPoint {
                     result_id: format!("kp-llm-{ts_ms}-{i}"),
                     status: ResultStatus::Final,
                     category,
                     content,
                     ts_ms,
+                    manual: false,
                 });
             }
             for (i, kw) in keywords.into_iter().enumerate() {
                 if kw.trim().is_empty() { continue; }
-                events.push(DomainEvent::Term {
+                g.pending.push(DomainEvent::Term {
                     result_id: format!("term-kp-{ts_ms}-{i}"),
                     status: ResultStatus::Final,
                     content: kw,
                 });
             }
-            g.pending.extend(events);
+            if !g.pending.is_empty() {
+                log::info!("key_point_llm: 批量结果 {} 条已存入 pending，等待下段发射", g.pending.len());
+            }
         }
 
         Ok(None)
@@ -229,7 +275,7 @@ impl Plugin for KeyPointLlmPlugin {
         static D: crate::PluginDescriptor = crate::PluginDescriptor {
             id: "key_point_llm",
             label: "要点聚合（LLM）",
-            description: "用 LLM 从转写提取会议要点，支持 DeepSeek / OpenRouter 等 API",
+            description: "用 LLM 从转写提取要点，支持 DeepSeek / OpenRouter 等 API",
             category: crate::PluginCategory::Analysis,
             phase: crate::PluginPhase::Observer,
             capabilities: &[crate::PluginCapability::Llm],
@@ -242,13 +288,13 @@ impl Plugin for KeyPointLlmPlugin {
     fn default_config(&self) -> PluginConfig {
         PluginConfig::from_value(json!({
             "enabled": true,
-            "batch_size": 4,
+            "batch_size": 12,
             "tail_timeout_ms": 60000,
         }))
     }
 
     fn register(&self, cfg: &PluginConfig, _ctx: &PluginContext, hooks: &mut HookRegistry) {
-        let batch_size = cfg.get_u64("batch_size", 4) as usize;
+        let batch_size = cfg.get_u64("batch_size", 12) as usize;
         let tail_timeout_ms = cfg.get_u64("tail_timeout_ms", 60000);
         hooks.add_observer(Arc::new(KeyPointLlmObserver::new(batch_size, tail_timeout_ms)));
     }
@@ -257,16 +303,18 @@ impl Plugin for KeyPointLlmPlugin {
 // ── Prompt & Parser ─────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT: &str = "\
-你是专业的会议记录助理，专门处理**语音识别（ASR）转写结果**。\
-输入文本来自自动语音识别，可能存在以下问题：同音字/谐音字错误、方言词汇、\
-中英文混杂（英文专有名词可能被转写成中文谐音）、口语停顿词、句子不完整等。\
+你是专业的内容摘要助理，专门处理**语音识别（ASR）转写结果**。\
+输入文本来自自动语音识别，可能存在同音字错误、中英混杂、口语停顿词、句子不完整等问题。\
 请根据上下文推断说话者的真实意图，而非照字面解读可能有误的文字。\
-\n\n任务：从转写片段中提炼会议核心要点，并提取对话中的关键术语/专有名词。\
-\n要点必须是实质性内容：决策、要求、行动项、待解决问题、技术方案等。\
-\n忽略废话、客套、寒暄、确认性应答（嗯/对/好的）以及无意义的口语碎片。\
+\n\n你的任务是从转写片段中提炼**核心要点**。内容类型可能是：\
+\n- 会议讨论 → 提取决策、要求、行动项、待解决问题\
+\n- 教学讲座 → 提取核心知识点、重要概念、关键结论\
+\n- 故事叙述 → 提取关键事件、人物、时间节点\
+\n- 其他场景 → 提取对听者有价值的实质性信息\
+\n\n忽略：寒暄客套、确认性应答（嗯/对/好的）、无意义的口语碎片、不完整的半句话。\
 \n只返回 JSON 数组，不加任何其他文字或 Markdown 格式。";
 
-fn build_prompt(texts: &[String]) -> String {
+fn build_prompt(texts: &[String], existing: &[String]) -> String {
     let numbered = texts
         .iter()
         .enumerate()
@@ -274,20 +322,32 @@ fn build_prompt(texts: &[String]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
+    let existing_section = if existing.is_empty() {
+        String::new()
+    } else {
+        let list = existing.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n");
+        format!(
+            "\n**已提取的要点（请勿重复，语义相同或高度相似的内容也算重复）：**\n{list}\n"
+        )
+    };
+
     format!(
         "以下是语音识别转写片段（ASR 输出，可能含错字、谐音字、中英混杂、不完整句子）：\n\
-{numbered}\n\n\
+{numbered}\n\
+{existing_section}\n\
 请先理解上下文推断真实含义，再提炼核心内容。返回 JSON 数组，每个元素包含：\n\
-- category: \"requirement\"（要求/需求）| \"decision\"（决策）| \"action\"（行动项）| \"question\"（待解答问题）| \"technical\"（技术方案）| \"other\"（其他重要事项）\n\
+- category: \"requirement\"（要求/需求）| \"decision\"（决策）| \"action\"（行动项）| \"question\"（待解答问题）| \"technical\"（技术/知识要点）| \"other\"（其他重要信息）\n\
 - content: 一句话概括要点，用规范书面语，主语明确，≤40字；如遇 ASR 错字请纠正后再概括\n\
-- keywords: 字符串数组，提取对话中的专业术语、产品名、技术名词、人名、组织名等关键词，每项≤10字，若无则为空数组\n\n\
+- keywords: 字符串数组，提取专业术语、产品名、技术名词、人名、地名、组织名等关键词，每项≤10字，若无则为空数组\n\n\
 要求：\n\
-1. 只保留**会议核心**：决策、明确的要求、具体的行动项、未决问题、关键技术结论；\n\
+1. 提取对听者有价值的实质性内容，无论是决策、知识点还是关键事件；\n\
 2. 多条片段讲同一件事时合并成一条；\n\
 3. 跳过寒暄、确认应答、语气词、不完整的半句话；\n\
-4. 宁可少而精，不要多而碎。\n\n\
-示例：[{{\"category\":\"action\",\"content\":\"下周前完成 API 文档更新\",\"keywords\":[\"API\",\"文档\"]}}]\n\
-若无实质性要点返回空数组 []"
+4. 宁可少而精，不要多而碎；\n\
+5. 内容有误字时（ASR 错误）先纠正再概括；\n\
+6. 已提取的要点不要重复，语义相同或高度相似的内容直接跳过。\n\n\
+示例：[{{\"category\":\"technical\",\"content\":\"瞒天过海：利用处于优势地位时麻痹对方，暗中行动\",\"keywords\":[\"三十六计\",\"瞒天过海\"]}}]\n\
+若无新的实质性内容返回空数组 []"
     )
 }
 
@@ -305,7 +365,7 @@ fn parse_category(s: &str) -> KeyPointCategory {
         "decision" | "决策" => KeyPointCategory::Decision,
         "action" | "行动" | "行动项" => KeyPointCategory::Action,
         "question" | "问句" | "问题" => KeyPointCategory::Question,
-        "technical" | "技术" | "技术方案" => KeyPointCategory::Technical,
+        "technical" | "技术" | "技术方案" | "技术知识要点" | "知识要点" => KeyPointCategory::Technical,
         _ => KeyPointCategory::Other,
     }
 }
@@ -356,7 +416,6 @@ mod tests {
 
     #[test]
     fn parse_response_no_keywords_field() {
-        // 旧格式无 keywords 字段时应正常解析
         let resp = r#"[{"category":"action","content":"下周完成 API 文档"}]"#;
         let (pts, kws) = parse_response(resp);
         assert_eq!(pts.len(), 1);
@@ -393,9 +452,7 @@ mod tests {
         let mut state = State::new();
         assert!(!state.is_duplicate("下周前完成 API 文档更新"));
         state.remember("下周前完成 API 文档更新");
-        // 同义但标点/大小写不同的表述应视为重复
         assert!(state.is_duplicate("下周前完成 api 文档更新。"));
-        // 不同要点不误伤
         assert!(!state.is_duplicate("预算不超过 20 万"));
     }
 
@@ -403,7 +460,27 @@ mod tests {
     fn state_ignores_too_short_fingerprints() {
         let mut state = State::new();
         state.remember("好");
-        // 极短指纹不进入去重集合，避免误伤常见短句
         assert!(!state.is_duplicate("好"));
+    }
+
+    #[test]
+    fn recent_window_caps_at_limit() {
+        let mut state = State::new();
+        for i in 0..=RECENT_WINDOW + 5 {
+            state.push_segment(format!("段 {i}"));
+        }
+        assert_eq!(state.recent.len(), RECENT_WINDOW);
+        assert_eq!(state.buffer.len(), RECENT_WINDOW + 6);
+    }
+
+    #[test]
+    fn auto_flush_does_not_affect_recent() {
+        let mut state = State::new();
+        for i in 0..8 {
+            state.push_segment(format!("段 {i}"));
+        }
+        // 模拟自动聚合：清空 buffer，不碰 recent
+        state.buffer.clear();
+        assert_eq!(state.recent.len(), 8, "recent 不受自动聚合影响");
     }
 }

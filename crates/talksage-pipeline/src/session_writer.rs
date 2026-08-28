@@ -57,6 +57,7 @@ impl WriteCommand {
                 category,
                 content,
                 ts_ms,
+                ..
             } => Some(Self::KeyPoint(KeyPointRecord {
                 result_id: result_id.clone(),
                 category: *category,

@@ -7,7 +7,6 @@ use serde_json::Value;
 use crate::brief_retriever::BriefRetrieverPluginDef;
 use crate::conversation_metrics::ConversationMetricsPlugin;
 use crate::cross_stream_dedup::CrossStreamDedupPlugin;
-use crate::key_point_extractor::KeyPointExtractorPlugin;
 use crate::key_point_llm::KeyPointLlmPlugin;
 use crate::registry::{
     config_type_name, CapabilityAvailability, HookRegistry, Plugin, PluginCategory,
@@ -51,7 +50,6 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
         Box::new(TermExplainerPluginDef),
         Box::new(TranslatorPluginDef),
         Box::new(BriefRetrieverPluginDef),
-        Box::new(KeyPointExtractorPlugin),
         Box::new(KeyPointLlmPlugin),
         // finalizer：session_quality 必须在 webhook 之前 —— 它把质量 meta 写进
         // 会话行，webhook 要重新读这一行来拼载荷
@@ -443,7 +441,7 @@ mod tests {
     #[test]
     fn analysis_plugins_are_in_the_registry() {
         let ids: Vec<&str> = builtin_plugins().iter().map(|p| p.id()).collect();
-        for want in ["term_explainer", "translator", "brief_retriever", "key_point_extractor"] {
+        for want in ["term_explainer", "translator", "brief_retriever", "key_point_llm"] {
             assert!(ids.contains(&want), "缺少插件 {want}，实际: {ids:?}");
         }
     }

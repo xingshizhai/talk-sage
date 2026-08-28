@@ -44,6 +44,7 @@ fn test_state() -> ServerState {
         talksage_asr::EnginePool::new(),
     );
     ServerState {
+        chat: Arc::new(talksage_pipeline::chat::ChatService::new(config.clone(), sessions.clone())),
         config,
         sessions,
         events: tx,
@@ -277,6 +278,7 @@ async fn export_returns_markdown_for_session() {
             talksage_asr::EnginePool::new(),
         );
         ServerState {
+            chat: Arc::new(talksage_pipeline::chat::ChatService::new(config.clone(), sessions.clone())),
             config,
             sessions,
             events: tx,
@@ -324,6 +326,123 @@ async fn patch_session_renames_and_clears_title() {
     let resp = patch(r#"{"title":""}"#).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(sessions.get_session(id).unwrap().title, None, "空串应清除自定义名");
+}
+
+/// WebSocket 必须在根路径 `/ws`：前端连的就是它，挂进 /api 的 nest 会 404，
+/// 浏览器模式下所有实时事件（转写增量、AI 助手回答）都会静默丢失。
+#[tokio::test]
+async fn websocket_is_served_at_root_path() {
+    let resp = app()
+        .oneshot(
+            Request::builder()
+                .uri("/ws")
+                .header("connection", "upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // oneshot 里没有真正的连接可升级，axum 的 WebSocketUpgrade 因此返回 426；
+    // 关键是它**走到了** WS 提取器 —— 挂错位置时这里是 404。
+    assert_eq!(
+        resp.status(),
+        StatusCode::UPGRADE_REQUIRED,
+        "/ws 应命中 WebSocket 处理器（426 = 已进入升级流程）"
+    );
+
+    // /api/ws 不再提供（历史上错挂在这里）
+    let (status, _) = get("/api/ws").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// AI 助手：话题增删改查（不触发 LLM，纯存储路径）。
+#[tokio::test]
+async fn chat_thread_crud_over_http() {
+    let state = test_state();
+    let sessions = state.sessions.clone();
+    let router = build_router(state, &std::path::PathBuf::from("nonexistent-dist"));
+
+    let created = router
+        .clone()
+        .oneshot(Request::builder().method("POST").uri("/api/chat/threads").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(created.into_body(), usize::MAX).await.unwrap();
+    let id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_i64().unwrap();
+
+    sessions.add_chat_message(id, "user", "会议纪要怎么写", 1_000).unwrap();
+
+    let listed = router
+        .clone()
+        .oneshot(Request::builder().uri("/api/chat/threads").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(listed.into_body(), usize::MAX).await.unwrap();
+    let threads: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(threads[0]["id"].as_i64(), Some(id));
+    assert_eq!(threads[0]["title"].as_str(), Some("会议纪要怎么写"), "首条提问自动成为标题");
+    assert_eq!(threads[0]["message_count"].as_u64(), Some(1));
+
+    let msgs = router
+        .clone()
+        .oneshot(Request::builder().uri(format!("/api/chat/threads/{id}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(msgs.into_body(), usize::MAX).await.unwrap();
+    let msgs: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(msgs[0]["role"].as_str(), Some("user"));
+
+    let renamed = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/chat/threads/{id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"title":"纪要模板"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed.status(), StatusCode::OK);
+    assert_eq!(sessions.list_chat_threads(10).unwrap()[0].title.as_deref(), Some("纪要模板"));
+
+    let deleted = router
+        .oneshot(Request::builder().method("DELETE").uri(format!("/api/chat/threads/{id}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert!(sessions.list_chat_threads(10).unwrap().is_empty());
+}
+
+/// 没配 LLM key 时提问应给出可读原因，而不是 500 或静默失败。
+#[tokio::test]
+async fn chat_send_without_llm_key_returns_readable_error() {
+    let state = test_state();
+    let sessions = state.sessions.clone();
+    let id = sessions.create_chat_thread(1).unwrap();
+    let router = build_router(state, &std::path::PathBuf::from("nonexistent-dist"));
+
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/chat/threads/{id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"在吗"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(json["error"].as_str().unwrap().contains("LLM"), "错误应指向 LLM 配置: {json}");
+    assert!(sessions.get_chat_messages(id).unwrap().is_empty(), "失败时不留半条对话");
 }
 
 // ── OpenAI 兼容 API（/v1/*）────────────────────────────────
@@ -374,10 +493,16 @@ async fn openai_models_lists_engines() {
     if root.join("sherpa-onnx-qwen3-asr-0.6b").is_dir() {
         assert!(body.contains("qwen3-asr"), "body={body}");
     }
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        assert!(body.contains("whisper-large-v3-turbo-metal"));
-    } else {
-        assert!(!body.contains("whisper-large-v3-turbo-metal"));
+    // 是否上榜由 EngineKind::profile().selectable 决定，直接问库而不是在这里重写
+    // 平台判断：`cfg!(feature = "vulkan-gpu")` 在本测试 crate 里指的是 talksage-server
+    // 自己的 feature（永远为假），而 talksage-asr 的这个 feature 会被 talksage-app
+    // 的依赖在 workspace 构建时统一打开 —— 照抄 cfg 只会写出跑 workspace 必挂的断言。
+    let metal_selectable = talksage_asr::EngineKind::WhisperLargeV3TurboMetal.profile().selectable;
+    if !metal_selectable {
+        assert!(!body.contains("whisper-large-v3-turbo-metal"), "不可选的模型不该上榜: body={body}");
+    } else if root.join("whisper.cpp-large-v3-turbo-q5_0").is_dir() {
+        // 可选 + 已安装才会列出（与 models_api 的 selectable && is_available 一致）
+        assert!(body.contains("whisper-large-v3-turbo-metal"), "body={body}");
     }
 }
 

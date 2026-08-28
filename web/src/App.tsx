@@ -14,6 +14,7 @@ import AsidePanel from "./components/AsidePanel";
 import HistorySection from "./sections/HistorySection";
 import SettingsSection from "./sections/SettingsSection";
 import ModelsSection from "./sections/ModelsSection";
+import ChatSection from "./sections/ChatSection";
 import DebugWindow from "./sections/DebugWindow";
 import type { TermItem } from "./sections/TermsSection";
 import type { BriefItem } from "./sections/BriefSection";
@@ -326,8 +327,9 @@ export default function App() {
   ];
 
   const navItems: NavItem[] = [
-    { key: "transcript", label: "转写", dot: importing ? "var(--brief)" : listening ? "var(--live)" : "var(--muted)", badge: importing ? String(importLines.length) : String(lines.length), active: navPage === "transcript" },
+    { key: "transcript", label: "语音转写", dot: importing ? "var(--brief)" : listening ? "var(--live)" : "var(--muted)", badge: importing ? String(importLines.length) : String(lines.length), active: navPage === "transcript" },
     { key: "history", label: "历史会话", dot: "var(--term)", badge: String(sessions.length), active: navPage === "history" },
+    { key: "chat", label: "AI 助手", dot: "var(--me)", badge: "", active: navPage === "chat" },
     { key: "models", label: "模型管理", dot: "var(--client)", badge: "", active: navPage === "models" },
     { key: "settings", label: "设置", dot: "var(--brief)", badge: "", active: navPage === "settings" },
   ];
@@ -937,13 +939,8 @@ export default function App() {
                 }}
                 pluginLabel={(() => {
                   const llmEnabled = config?.plugins?.["key_point_llm"]?.enabled !== false;
-                  const oldEnabled = config?.plugins?.["key_point_extractor"]?.enabled !== false;
-                  if (llmEnabled) {
-                    const provider = config?.llm?.default ?? "deepseek";
-                    return provider;
-                  }
-                  if (!oldEnabled) return "已禁用";
-                  return "本地规则";
+                  if (llmEnabled) return config?.llm?.default ?? "deepseek";
+                  return "已禁用";
                 })()}
               />
             )}
@@ -976,6 +973,20 @@ export default function App() {
                 notesBusy={notesBusy}
                 trioBusy={trioBusy}
               />
+            </div>
+          </section>
+        )}
+
+        {navPage === "chat" && (
+          <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+            <div style={{ padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
+              <b style={{ fontSize: 13 }}>AI 助手</b>
+              <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 8 }}>
+                多轮对话，回答由「设置 → LLM」配置的模型生成
+              </span>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "var(--pad)", display: "flex", flexDirection: "column" }}>
+              <ChatSection onOpenSettings={() => setNavPage("settings")} />
             </div>
           </section>
         )}

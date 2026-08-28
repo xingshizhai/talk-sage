@@ -7,6 +7,7 @@ export interface KeyPoint {
   kind: KeyPointKind;
   text: string;
   tsMs: number;
+  manual: boolean;
 }
 
 const CATEGORY_LABEL: Record<string, KeyPointKind> = {
@@ -24,12 +25,13 @@ export function categoryLabel(category: string): KeyPointKind {
 }
 
 /** 把插件/会话里的要点记录转成卡片用的结构。 */
-export function toKeyPoint(input: { result_id: string; category: string; content: string; ts_ms?: number }): KeyPoint {
+export function toKeyPoint(input: { result_id: string; category: string; content: string; ts_ms?: number; manual?: boolean }): KeyPoint {
   return {
     resultId: input.result_id,
     kind: categoryLabel(input.category),
     text: input.content,
     tsMs: input.ts_ms ?? 0,
+    manual: input.manual ?? false,
   };
 }
 

@@ -41,6 +41,7 @@ describe("toKeyPoint", () => {
       kind: "要求",
       text: "We need NPI samples by Friday.",
       tsMs: 42,
+      manual: false,
     });
   });
 });

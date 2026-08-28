@@ -42,6 +42,8 @@ pub struct ServerState {
     pub token: String,
     /// 共享用例入口（装配 / 落库 / 引擎池）。
     pub service: TalkSageService,
+    /// AI 助手（多轮对话 + 流式生成）。
+    pub chat: Arc<talksage_pipeline::chat::ChatService>,
 }
 
 /// 启动 headless 服务（阻塞运行）。
@@ -57,6 +59,7 @@ pub async fn run(host: &str, port: u16, token: &str, web_dist: &PathBuf) -> Resu
     // 上次异常退出的残留（未完成录音 + 未结束会话），在对外服务前先收拾干净。
     service.recover_on_startup();
     let state = ServerState {
+        chat: Arc::new(talksage_pipeline::chat::ChatService::new(config.clone(), sessions.clone())),
         config,
         sessions,
         events: tx,
@@ -96,6 +99,15 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
             get(get_session_api).delete(delete_session_api).patch(rename_session_api),
         )
         .route("/templates", get(list_templates_api))
+        .route("/chat/threads", get(list_chat_threads_api).post(create_chat_thread_api))
+        .route(
+            "/chat/threads/{id}",
+            get(get_chat_messages_api)
+                .patch(rename_chat_thread_api)
+                .delete(delete_chat_thread_api),
+        )
+        .route("/chat/threads/{id}/messages", axum::routing::post(send_chat_message_api))
+        .route("/chat/cancel", axum::routing::post(cancel_chat_message_api))
         .route("/session/{id}/notes", axum::routing::post(generate_notes_api))
         .route("/session/{id}/trio-notes", axum::routing::post(generate_trio_notes_api))
         .route("/session/{id}/export", get(export_session_api))
@@ -115,6 +127,12 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/voiceprint/enroll", axum::routing::post(voiceprint_enroll_api))
         .route("/voiceprint/remove", axum::routing::post(voiceprint_remove_api))
         .route("/recordings/{filename}", axum::routing::get(get_recording_api))
+        .with_state(state.clone());
+
+    // WebSocket 挂在根路径：前端连的是 ws://host/ws，架构文档写的也是「HTTP /api +
+    // WebSocket /ws」。放进 /api 的 nest 里会变成 /api/ws，前端拿到 404，
+    // 浏览器模式下所有实时事件（转写增量、AI 助手回答）都收不到。
+    let ws = Router::new()
         .route("/ws", get(ws_handler))
         .with_state(state.clone());
 
@@ -127,6 +145,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
     Router::new()
         .nest("/api", api)
         .nest("/v1", v1)
+        .merge(ws)
         .fallback_service(tower_http::services::ServeDir::new(web_dist).append_index_html_on_directories(true))
 }
 
@@ -611,6 +630,124 @@ async fn delete_session_api(
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
+}
+
+// ── AI 助手 ───────────────────────────────────────────────────────────
+
+async fn list_chat_threads_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    match state.sessions.list_chat_threads(200) {
+        Ok(threads) => (StatusCode::OK, Json(threads)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+async fn create_chat_thread_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    match state.sessions.create_chat_thread(now) {
+        Ok(id) => (StatusCode::OK, Json(serde_json::json!({ "id": id }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+async fn get_chat_messages_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    match state.sessions.get_chat_messages(id) {
+        Ok(msgs) => (StatusCode::OK, Json(msgs)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+async fn rename_chat_thread_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(body): Json<RenameSessionBody>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    match state.sessions.set_chat_thread_title(id, &body.title) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+async fn delete_chat_thread_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    match state.sessions.delete_chat_thread(id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct SendChatBody {
+    text: String,
+}
+
+/// 提交提问。回答正文经 /ws 的 ChatDelta 事件推送，这里只回两条消息的 id。
+async fn send_chat_message_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    Json(body): Json<SendChatBody>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let events = state.events.clone();
+    let emit: talksage_pipeline::chat::ChatEmit = Arc::new(move |ev| {
+        let _ = events.send(ev);
+    });
+    match state.chat.send(id, &body.text, emit) {
+        Ok(sent) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "user_message_id": sent.user_message_id,
+                "assistant_message_id": sent.assistant_message_id,
+            })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CancelChatBody {
+    message_id: i64,
+}
+
+async fn cancel_chat_message_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<CancelChatBody>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    state.chat.cancel(body.message_id);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
 async fn list_templates_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {

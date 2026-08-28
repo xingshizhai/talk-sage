@@ -655,7 +655,16 @@ mod tests {
         }
         assert_eq!(EngineKind::ALL, [EngineKind::Qwen3Asr, EngineKind::WhisperMediumMetal, EngineKind::WhisperLargeV3TurboMetal]);
         assert!(EngineKind::Qwen3Asr.profile().selectable);
-        assert_eq!(EngineKind::WhisperLargeV3TurboMetal.profile().selectable, cfg!(all(target_os = "macos", target_arch = "aarch64")));
+        // 与 profile() 里的 cfg 保持一字不差：Windows 上 selectable 取决于 vulkan-gpu
+        // feature，而 `cargo test --workspace` 会因 talksage-app 的依赖统一打开它 ——
+        // 只写 macOS 分支的话，单跑本 crate 过、跑 workspace 挂。
+        assert_eq!(
+            EngineKind::WhisperLargeV3TurboMetal.profile().selectable,
+            cfg!(any(
+                all(target_os = "macos", target_arch = "aarch64"),
+                all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu")
+            ))
+        );
         assert!(!EngineKind::ParaformerZh.is_product_model());
     }
 

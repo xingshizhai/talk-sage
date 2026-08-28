@@ -196,7 +196,7 @@ export type DomainEvent =
     }
   | { type: "term"; result_id: string; status: "skeleton" | "final"; content: string }
   | { type: "translation"; result_id: string; status: "skeleton" | "final"; direction: "zh_en" | "en_zh"; content: string }
-  | { type: "key_point"; result_id: string; status: "skeleton" | "final"; category: string; content: string; ts_ms?: number }
+  | { type: "key_point"; result_id: string; status: "skeleton" | "final"; category: string; content: string; ts_ms?: number; manual?: boolean }
   | { type: "brief"; source: string; text: string }
   | { type: "state"; topic: string; open_questions: string[]; recent_decisions: string[] }
   | { type: "status"; stage: string; message: string }
@@ -215,6 +215,15 @@ export type DomainEvent =
       vad_threshold: number;
       words?: number;
       questions?: number;
+    }
+  | {
+      /** AI 助手回答增量：按 message_id 把 delta 拼到同一条消息上。 */
+      type: "chat_delta";
+      thread_id: number;
+      message_id: number;
+      delta?: string;
+      done: boolean;
+      error?: string;
     }
   | { type: "metrics"; metrics: ConversationMetrics }
   | { type: "nudge"; nudge: NudgeEvent }
@@ -272,6 +281,31 @@ export interface TrioSummary {
 };
 
 /** 会话概要（历史列表）。 */
+/** AI 助手话题（左侧列表）。 */
+export interface ChatThread {
+  id: number;
+  /** 话题名；null = 尚未命名（首条提问后自动生成）。 */
+  title: string | null;
+  created_at: number;
+  updated_at: number;
+  message_count: number;
+}
+
+/** AI 助手的一条消息。 */
+export interface ChatMessageRecord {
+  id: number;
+  /** user | assistant */
+  role: string;
+  content: string;
+  ts_ms: number;
+}
+
+/** 提交提问后立刻拿到的两条消息 id；回答正文随后由 ChatDelta 事件补齐。 */
+export interface ChatSendResult {
+  user_message_id: number;
+  assistant_message_id: number;
+}
+
 export interface SessionRecord {
   id: number;
   started_at: number;
@@ -465,6 +499,20 @@ export interface AppApi {
   searchSessions(query: string): Promise<SegmentHit[]>;
   /** 历史：会话详情。 */
   getSession(id: number): Promise<SessionDetail>;
+  /** AI 助手：话题列表（最近活跃在前）。 */
+  listChatThreads(): Promise<ChatThread[]>;
+  /** AI 助手：新建话题，返回 id。 */
+  createChatThread(): Promise<number>;
+  /** AI 助手：话题内全部消息。 */
+  getChatMessages(threadId: number): Promise<ChatMessageRecord[]>;
+  /** AI 助手：重命名话题；空串 = 清除自定义名。 */
+  renameChatThread(threadId: number, title: string): Promise<void>;
+  /** AI 助手：删除话题及其消息。 */
+  deleteChatThread(threadId: number): Promise<void>;
+  /** AI 助手：提交提问；回答经 ChatDelta 事件流式返回。 */
+  sendChatMessage(threadId: number, text: string): Promise<ChatSendResult>;
+  /** AI 助手：停止正在生成的回答。 */
+  cancelChatMessage(messageId: number): Promise<void>;
   /** 历史：重命名会话；传空串 = 清除自定义名。 */
   renameSession(id: number, title: string): Promise<void>;
   /** 历史：删除会话（含段/术语/翻译）。 */

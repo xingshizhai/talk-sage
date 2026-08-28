@@ -132,7 +132,13 @@ export default function KeyPointsCard({
               <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 5, background: c.bg, color: c.fg }}>
                 {row.point.kind}
               </span>
-              <span style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)" }}>{row.point.text}</span>
+              <span style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)", flex: 1 }}>{row.point.text}</span>
+              <span
+                title={row.point.manual ? "手动点击「立即整理」触发" : "自动批量聚合触发"}
+                style={{ flexShrink: 0, fontSize: 9, color: "var(--muted)", alignSelf: "center", opacity: 0.6 }}
+              >
+                {row.point.manual ? "手动" : "自动"}
+              </span>
             </div>
           );
         })}

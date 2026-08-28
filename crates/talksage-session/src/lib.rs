@@ -302,6 +302,39 @@ fn fmt_unix(secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", sod / 3600, (sod % 3600) / 60)
 }
 
+/// 由首条提问生成话题名：压掉换行、截到 24 个字符。
+///
+/// 按字符而不是字节截断——中文提问按字节切会把一个字劈成两半。
+pub fn auto_thread_title(first_question: &str) -> String {
+    let flat = first_question.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut title: String = flat.chars().take(24).collect();
+    if flat.chars().count() > 24 {
+        title.push('…');
+    }
+    title
+}
+
+/// AI 助手话题（左侧列表用）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatThread {
+    pub id: i64,
+    /// 话题名；None = 尚未命名（首条提问后自动生成）。
+    pub title: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub message_count: u64,
+}
+
+/// AI 助手的一条消息。
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatMessageRecord {
+    pub id: i64,
+    /// user | assistant
+    pub role: String,
+    pub content: String,
+    pub ts_ms: i64,
+}
+
 /// 会话概要（历史列表用）。
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionRecord {
@@ -654,6 +687,21 @@ impl SessionStore {
                 ts_ms INTEGER NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES sessions(id)
             );
+            CREATE TABLE IF NOT EXISTS chat_threads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                ts_ms INTEGER NOT NULL,
+                FOREIGN KEY(thread_id) REFERENCES chat_threads(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(thread_id);
             CREATE INDEX IF NOT EXISTS idx_segments_text ON segments(text);
             CREATE INDEX IF NOT EXISTS idx_segments_session ON segments(session_id);
             CREATE INDEX IF NOT EXISTS idx_terms_session ON terms(session_id);
@@ -861,6 +909,120 @@ impl SessionStore {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    // ── AI 助手（chat）────────────────────────────────────────────────
+
+    /// 新建话题，返回 id。标题留空，等首条提问后由 [`Self::add_chat_message`] 自动生成。
+    pub fn create_chat_thread(&self, now: i64) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO chat_threads (title, created_at, updated_at) VALUES (NULL, ?1, ?1)",
+            [now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// 话题列表（最近活跃在前）。
+    pub fn list_chat_threads(&self, limit: u32) -> Result<Vec<ChatThread>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.title, t.created_at, t.updated_at,
+                    (SELECT COUNT(*) FROM chat_messages m WHERE m.thread_id = t.id)
+             FROM chat_threads t ORDER BY t.updated_at DESC, t.id DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit], |r| {
+                Ok(ChatThread {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    created_at: r.get(2)?,
+                    updated_at: r.get(3)?,
+                    message_count: r.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 话题内的全部消息（按时间升序）。
+    pub fn get_chat_messages(&self, thread_id: i64) -> Result<Vec<ChatMessageRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, role, content, ts_ms FROM chat_messages WHERE thread_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([thread_id], |r| {
+                Ok(ChatMessageRecord {
+                    id: r.get(0)?,
+                    role: r.get(1)?,
+                    content: r.get(2)?,
+                    ts_ms: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 追加一条消息，返回消息 id。
+    ///
+    /// 同时把话题的 `updated_at` 推到最新；话题还没有标题时，用首条用户提问
+    /// 截出一个（列表里总得有个能认出来的名字）。
+    pub fn add_chat_message(&self, thread_id: i64, role: &str, content: &str, ts_ms: i64) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO chat_messages (thread_id, role, content, ts_ms) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![thread_id, role, content, ts_ms],
+        )?;
+        let id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE chat_threads SET updated_at = ?2 WHERE id = ?1",
+            rusqlite::params![thread_id, ts_ms / 1000],
+        )?;
+        if role == "user" {
+            conn.execute(
+                "UPDATE chat_threads SET title = ?2 WHERE id = ?1 AND (title IS NULL OR title = '')",
+                rusqlite::params![thread_id, auto_thread_title(content)],
+            )?;
+        }
+        Ok(id)
+    }
+
+    /// 覆盖某条消息的正文（流式回答边生成边落库）。
+    pub fn update_chat_message(&self, message_id: i64, content: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE chat_messages SET content = ?2 WHERE id = ?1",
+            rusqlite::params![message_id, content],
+        )?;
+        Ok(())
+    }
+
+    /// 删除单条消息（生成失败、一个字都没出的空占位）。
+    pub fn delete_chat_message(&self, message_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM chat_messages WHERE id = ?1", [message_id])?;
+        Ok(())
+    }
+
+    /// 重命名话题；空串 = 清除自定义名（下次提问会重新自动生成）。
+    pub fn set_chat_thread_title(&self, thread_id: i64, title: &str) -> Result<()> {
+        let trimmed = title.trim();
+        let value = if trimmed.is_empty() { None } else { Some(trimmed) };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE chat_threads SET title = ?2 WHERE id = ?1",
+            rusqlite::params![thread_id, value],
+        )?;
+        Ok(())
+    }
+
+    /// 删除话题及其全部消息。
+    pub fn delete_chat_thread(&self, thread_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM chat_messages WHERE thread_id = ?1", [thread_id])?;
+        conn.execute("DELETE FROM chat_threads WHERE id = ?1", [thread_id])?;
+        Ok(())
     }
 
     /// 全文检索转写段。
@@ -1191,6 +1353,55 @@ mod tests {
         let named = export_markdown(&s.get_session(id).unwrap());
         assert!(named.starts_with("# 周三 NPI 评审"), "命名后应以会话名开头: {named}");
         assert!(named.contains(&format!("> 会议记录 #{id}")), "编号与时间退到引用行: {named}");
+    }
+
+    /// 话题 + 消息往返：列表按最近活跃排序，首条提问自动成为标题。
+    #[test]
+    fn chat_threads_and_messages_roundtrip() {
+        let s = store();
+        let t1 = s.create_chat_thread(1_000).unwrap();
+        let t2 = s.create_chat_thread(1_001).unwrap();
+
+        assert_eq!(s.list_chat_threads(10).unwrap()[0].id, t2, "新建话题排在最前");
+        assert!(s.list_chat_threads(10).unwrap().iter().all(|t| t.title.is_none()));
+
+        s.add_chat_message(t1, "user", "帮我把上周的 NPI 评审整理成行动项", 5_000_000).unwrap();
+        let assistant = s.add_chat_message(t1, "assistant", "", 5_000_100).unwrap();
+        s.update_chat_message(assistant, "1. 确认样品交期").unwrap();
+
+        let threads = s.list_chat_threads(10).unwrap();
+        assert_eq!(threads[0].id, t1, "有新消息的话题排到最前");
+        assert_eq!(threads[0].message_count, 2);
+        assert_eq!(threads[0].title.as_deref(), Some("帮我把上周的 NPI 评审整理成行动项"));
+
+        let msgs = s.get_chat_messages(t1).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[1].content, "1. 确认样品交期", "流式回答落库后应是完整文本");
+
+        // 手动改名后，后续提问不再覆盖标题
+        s.set_chat_thread_title(t1, "NPI 评审").unwrap();
+        s.add_chat_message(t1, "user", "再补一条", 5_000_200).unwrap();
+        assert_eq!(s.list_chat_threads(10).unwrap()[0].title.as_deref(), Some("NPI 评审"));
+
+        // 空串清除自定义名
+        s.set_chat_thread_title(t1, "  ").unwrap();
+        assert_eq!(s.list_chat_threads(10).unwrap()[0].title, None);
+
+        s.delete_chat_thread(t1).unwrap();
+        assert!(s.get_chat_messages(t1).unwrap().is_empty(), "消息应随话题一起删除");
+        assert_eq!(s.list_chat_threads(10).unwrap().len(), 1);
+    }
+
+    /// 自动标题按字符截断——中文按字节切会劈坏字。
+    #[test]
+    fn auto_thread_title_truncates_by_chars() {
+        assert_eq!(auto_thread_title("短问题"), "短问题");
+        let long = "一二三四五六七八九十一二三四五六七八九十一二三四五";
+        let title = auto_thread_title(long);
+        assert_eq!(title.chars().count(), 25, "24 字 + 省略号");
+        assert!(title.ends_with('…'));
+        assert_eq!(auto_thread_title("多行\n提问  带空白"), "多行 提问 带空白");
     }
 
     #[test]

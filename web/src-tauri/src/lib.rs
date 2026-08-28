@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use talksage_audio::AudioHub;
 use talksage_config::ConfigManager;
 use talksage_core::{DomainEvent, StatusStage};
+use talksage_pipeline::chat::{ChatEmit, ChatService};
 use talksage_pipeline::{AudioInput, ClientCapture, RunningListen, StartListen, TalkSageService};
 use talksage_asr::{EngineKind, EnginePool};
 use talksage_session::SessionStore;
@@ -37,6 +38,8 @@ pub struct AppState {
     downloads: Arc<Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
     /// 文件导入取消标志（None = 未在导入中）。
     import_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    /// AI 助手（多轮对话 + 流式生成）。
+    chat: Arc<ChatService>,
 }
 
 /// 版本。
@@ -583,6 +586,70 @@ fn delete_session(session_id: i64, state: tauri::State<'_, AppState>) -> Result<
     state.sessions.delete_session(session_id).map_err(|e| e.to_string())
 }
 
+// ── AI 助手 ───────────────────────────────────────────────────────────
+
+/// 话题列表（最近活跃在前）。
+#[tauri::command]
+fn list_chat_threads(state: tauri::State<'_, AppState>) -> Result<Vec<talksage_session::ChatThread>, String> {
+    state.sessions.list_chat_threads(200).map_err(|e| e.to_string())
+}
+
+/// 新建话题，返回 id。
+#[tauri::command]
+fn create_chat_thread(state: tauri::State<'_, AppState>) -> Result<i64, String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    state.sessions.create_chat_thread(now).map_err(|e| e.to_string())
+}
+
+/// 话题内的全部消息。
+#[tauri::command]
+fn get_chat_messages(
+    thread_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<talksage_session::ChatMessageRecord>, String> {
+    state.sessions.get_chat_messages(thread_id).map_err(|e| e.to_string())
+}
+
+/// 重命名话题；空串 = 清除自定义名。
+#[tauri::command]
+fn rename_chat_thread(thread_id: i64, title: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.sessions.set_chat_thread_title(thread_id, &title).map_err(|e| e.to_string())
+}
+
+/// 删除话题及其消息。
+#[tauri::command]
+fn delete_chat_thread(thread_id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.sessions.delete_chat_thread(thread_id).map_err(|e| e.to_string())
+}
+
+/// 提交提问：立即返回两条消息 id，回答正文随后经 `talksage://event` 的
+/// ChatDelta 逐段推送。
+#[tauri::command]
+fn send_chat_message(
+    thread_id: i64,
+    text: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let chat = state.chat.clone();
+    let emit_app = app.clone();
+    let emit: ChatEmit = Arc::new(move |ev: DomainEvent| {
+        let _ = emit_app.emit("talksage://event", &ev);
+    });
+    let sent = chat.send(thread_id, &text, emit).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "user_message_id": sent.user_message_id,
+        "assistant_message_id": sent.assistant_message_id,
+    }))
+}
+
+/// 停止正在生成的回答（已生成的部分保留）。
+#[tauri::command]
+fn cancel_chat_message(message_id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.chat.cancel(message_id);
+    Ok(())
+}
+
 /// 读取最近日志（调试窗口用）。
 #[tauri::command]
 fn read_logs(state: tauri::State<'_, AppState>, lines: Option<usize>) -> Result<String, String> {
@@ -992,9 +1059,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
-            config,
-            sessions,
+            config: config.clone(),
+            sessions: sessions.clone(),
             service,
+            chat: Arc::new(ChatService::new(config, sessions)),
             running: Arc::new(Mutex::new(None)),
             downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
             import_cancel: Arc::new(Mutex::new(None)),
@@ -1026,6 +1094,13 @@ pub fn run() {
             get_session,
             rename_session,
             delete_session,
+            list_chat_threads,
+            create_chat_thread,
+            get_chat_messages,
+            rename_chat_thread,
+            delete_chat_thread,
+            send_chat_message,
+            cancel_chat_message,
             list_notes_templates,
             generate_notes,
             generate_trio_notes,

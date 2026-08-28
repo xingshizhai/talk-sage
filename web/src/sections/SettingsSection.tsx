@@ -77,7 +77,7 @@ const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "asr", label: "ASR 转写", desc: "引擎 / 输入增益" },
   { key: "audio", label: "音频与录音", desc: "采集 / 灵敏度 / 断句 / 降噪 / 录音" },
   { key: "terminology", label: "术语纠错", desc: "热词与误识别替换" },
-  { key: "plugins", label: "插件分析", desc: "术语 / 翻译 / 简报 / 知识库" },
+  { key: "plugins", label: "插件", desc: "术语 / 翻译 / 简报 / 要点聚合" },
   { key: "quality", label: "噪音检测", desc: "会话质量阈值" },
   { key: "voice", label: "声音标识", desc: "注册主人声音，识别说话人" },
   { key: "llm", label: "LLM", desc: "默认模型与密钥" },
@@ -349,7 +349,7 @@ export default function SettingsSection({
   function renderPluginGroup(metas: PluginMeta[]) {
     return metas.map((meta) => {
       const values = pluginValues[meta.id] ?? {};
-      const on = values.enabled !== false;
+      const userEnabled = values.enabled !== false;
       const registration = pluginStatus.find((item) => item.id === meta.id);
       const statusText = pluginStatusLabel(registration);
       const statusColor = registration?.status === "active" ? "#2e7d32"
@@ -375,7 +375,7 @@ export default function SettingsSection({
                 </label>
               );
             }
-            const dim = locked || !on;
+            const dim = locked || !userEnabled;
             return (
               <label key={f.key} style={{ ...labelBlock, marginLeft: 20, opacity: dim ? 0.5 : 1 }}>
                 {f.kind === "bool" ? (
@@ -1281,10 +1281,10 @@ export default function SettingsSection({
         </div>
       )}
 
-      {/* ── 插件分析 ── */}
+      {/* ── 插件 ── */}
       {tab === "plugins" && (
         <div>
-          <h3 style={groupTitle}>会议分析插件</h3>
+          <h3 style={groupTitle}>插件</h3>
           {pluginMeta.length === 0 ? (
             <div style={hint}>正在读取插件列表…</div>
           ) : (
