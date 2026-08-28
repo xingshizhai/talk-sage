@@ -1,7 +1,9 @@
 // 右栏：术语卡片（可展开）+ 简报（知识库命中）。支持整体折叠（偏好持久化）。
 
+import { useState } from "react";
 import type { BriefItem } from "../sections/BriefSection";
 import type { TermItem } from "../sections/TermsSection";
+import { toTermRows } from "../lib/terms";
 
 export default function AsidePanel({
   collapsed,
@@ -10,6 +12,7 @@ export default function AsidePanel({
   briefs,
   expandedTerms,
   onToggleTerm,
+  onAskTerm,
 }: {
   collapsed: boolean;
   onToggleCollapsed: () => void;
@@ -17,7 +20,33 @@ export default function AsidePanel({
   briefs: BriefItem[];
   expandedTerms: Record<string, boolean>;
   onToggleTerm: (resultId: string) => void;
+  /** 手动查词：交给 App 调后端，结果通过 Term 事件回到列表。 */
+  onAskTerm: (term: string) => Promise<void>;
 }) {
+  const termRows = toTermRows(terms);
+  // 手动查词：结果由后端以 Term 事件回来（和自动提取同一条路），
+  // 所以这里只管输入与"查询中"状态，不自己往列表里塞卡片。
+  const [asking, setAsking] = useState(false);
+  const [askDraft, setAskDraft] = useState("");
+  const [askBusy, setAskBusy] = useState(false);
+  const [askError, setAskError] = useState("");
+
+  async function submitAsk() {
+    const term = askDraft.trim();
+    if (!term || askBusy) return;
+    setAskBusy(true);
+    setAskError("");
+    try {
+      await onAskTerm(term);
+      setAsking(false);
+      setAskDraft("");
+    } catch (e) {
+      setAskError(`${e}`.replace(/^Error: /, ""));
+    } finally {
+      setAskBusy(false);
+    }
+  }
+
   // 折叠态：仅保留一条窄竖栏，点击展开
   if (collapsed) {
     return (
@@ -48,7 +77,7 @@ export default function AsidePanel({
             writingMode: "vertical-rl",
           }}
         >
-          « 术语 / 简报
+          « 专业术语 / 简报
         </button>
       </aside>
     );
@@ -91,17 +120,18 @@ export default function AsidePanel({
       <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
           <span style={{ width: 6, height: 6, borderRadius: 2, background: "var(--term)" }} />
-          <b style={{ fontSize: 13 }}>术语</b>
-          <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>{terms.length}</span>
+          <b style={{ fontSize: 13 }}>专业术语</b>
+          <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>{termRows.length}</span>
         </div>
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-          {terms.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13 }}>识别到英文缩写后将在此解释…</div>}
-          {terms.map((t) => {
+          {termRows.length === 0 && (
+            <div style={{ color: "var(--muted)", fontSize: 13 }}>
+              出现行业术语或缩写时会在这里解释；常识词不收录
+            </div>
+          )}
+          {termRows.map((t) => {
             const expanded = !!expandedTerms[t.resultId];
-            // 拆分术语与解释（"NPI = 中文全称（英文全称）..."）
-            const eq = t.content.indexOf(" = ");
-            const term = eq > 0 ? t.content.slice(0, eq).trim() : t.content;
-            const gloss = eq > 0 ? t.content.slice(eq + 3).trim() : "";
+            const { term, gloss } = t;
             return (
               <div
                 key={t.resultId}
@@ -110,19 +140,82 @@ export default function AsidePanel({
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                   <b style={{ fontSize: 13, fontFamily: "monospace", color: "var(--term)", whiteSpace: "nowrap" }}>{term}</b>
-                  <span style={{ fontSize: 11, color: "var(--text-2)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {gloss}
-                  </span>
+                  {/* 展开后解释在下面完整显示，这里再截一遍就是同一句话读两遍 */}
+                  {!expanded && (
+                    <span style={{ fontSize: 11, color: "var(--text-2)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {gloss}
+                    </span>
+                  )}
                   <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)" }}>{expanded ? "▾" : "▸"}</span>
                 </div>
                 {expanded && (
                   <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)", fontSize: 13, lineHeight: 1.6, color: "var(--text)", wordBreak: "break-word" }}>
-                    {t.content}
+                    {gloss || t.raw}
                   </div>
                 )}
               </div>
             );
           })}
+
+          {/* 空条目：点击后手动问一个词（会议里听到不懂的，直接查） */}
+          {asking ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void submitAsk();
+              }}
+              style={{ display: "flex", gap: 6, alignItems: "center" }}
+            >
+              <input
+                autoFocus
+                value={askDraft}
+                maxLength={40}
+                disabled={askBusy}
+                onChange={(e) => setAskDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setAsking(false);
+                    setAskError("");
+                  }
+                }}
+                placeholder="输入要查的词，回车提交"
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  padding: "7px 9px",
+                  fontSize: 13,
+                  borderRadius: 8,
+                  border: "1px solid var(--term)",
+                  background: "var(--surface-2)",
+                  color: "var(--text)",
+                }}
+              />
+              <button type="submit" disabled={askBusy || !askDraft.trim()} style={{ fontSize: 11, flexShrink: 0 }}>
+                {askBusy ? "查询中…" : "查询"}
+              </button>
+            </form>
+          ) : (
+            <div
+              onClick={() => {
+                setAsking(true);
+                setAskDraft("");
+                setAskError("");
+              }}
+              title="手动查询一个术语"
+              style={{
+                padding: "9px 11px",
+                borderRadius: 10,
+                cursor: "text",
+                background: "transparent",
+                border: "1px dashed var(--border)",
+                color: "var(--muted)",
+                fontSize: 12,
+              }}
+            >
+              ＋ 点这里手动查一个词…
+            </div>
+          )}
+          {askError && <div style={{ fontSize: 11, color: "var(--danger)", wordBreak: "break-word" }}>{askError}</div>}
         </div>
       </section>
 

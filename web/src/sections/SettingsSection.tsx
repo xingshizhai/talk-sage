@@ -77,7 +77,7 @@ const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "asr", label: "ASR 转写", desc: "引擎 / 输入增益" },
   { key: "audio", label: "音频与录音", desc: "采集 / 灵敏度 / 断句 / 降噪 / 录音" },
   { key: "terminology", label: "术语纠错", desc: "热词与误识别替换" },
-  { key: "plugins", label: "插件", desc: "术语 / 翻译 / 简报 / 要点聚合" },
+  { key: "plugins", label: "插件", desc: "专业术语 / 翻译 / 简报 / 要点聚合" },
   { key: "quality", label: "噪音检测", desc: "会话质量阈值" },
   { key: "voice", label: "声音标识", desc: "注册主人声音，识别说话人" },
   { key: "llm", label: "LLM", desc: "默认模型与密钥" },

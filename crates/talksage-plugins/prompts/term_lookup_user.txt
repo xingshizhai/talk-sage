@@ -1,0 +1,2 @@
+请解释这个词：{term}
+{context_section}

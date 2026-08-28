@@ -108,6 +108,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         )
         .route("/chat/threads/{id}/messages", axum::routing::post(send_chat_message_api))
         .route("/chat/cancel", axum::routing::post(cancel_chat_message_api))
+        .route("/term/explain", axum::routing::post(explain_term_api))
         .route("/session/{id}/notes", axum::routing::post(generate_notes_api))
         .route("/session/{id}/trio-notes", axum::routing::post(generate_trio_notes_api))
         .route("/session/{id}/export", get(export_session_api))
@@ -629,6 +630,47 @@ async fn delete_session_api(
     match state.sessions.delete_session(id) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ExplainTermBody {
+    term: String,
+}
+
+/// 手动查询一个专业术语。监听中走会话事件通道（顺带入库），否则单独广播。
+async fn explain_term_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ExplainTermBody>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let running_result = {
+        let guard = state.running.lock().ok();
+        guard.and_then(|g| g.as_ref().map(|r| r.explain_term(&body.term)))
+    };
+    let result = match running_result {
+        Some(r) => r,
+        None => match TalkSageService::build_llm(&state.config) {
+            Some(llm) => talksage_plugins::term_explainer::lookup_term(llm.as_ref(), &body.term, "")
+                .inspect(|content| {
+                    let _ = state.events.send(DomainEvent::Term {
+                        result_id: format!("term-manual-{}", std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0)),
+                        status: talksage_core::ResultStatus::Final,
+                        content: content.clone(),
+                    });
+                }),
+            None => Err(anyhow!("LLM 未配置（请在设置→LLM 填写 API Key）")),
+        },
+    };
+    match result {
+        Ok(content) => (StatusCode::OK, Json(serde_json::json!({ "content": content }))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
 }
 

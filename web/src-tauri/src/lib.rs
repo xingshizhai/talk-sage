@@ -462,6 +462,35 @@ fn flush_key_points(state: tauri::State<'_, AppState>) -> Result<String, String>
     }
 }
 
+/// 手动查询一个专业术语（用户点名要问的词，不做专业度筛选）。
+///
+/// 监听中走会话的事件通道（顺带入库）；未监听时直接问 LLM 并单独发事件，
+/// 界面两种情况下拿到的都是同一种 Term 事件。
+#[tauri::command]
+fn explain_term(term: String, app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    if let Ok(guard) = state.running.lock() {
+        if let Some(running) = guard.as_ref() {
+            return running.explain_term(&term).map_err(|e| e.to_string());
+        }
+    }
+    let llm = TalkSageService::build_llm(&state.config)
+        .ok_or_else(|| "LLM 未配置（请在设置→LLM 填写 API Key）".to_string())?;
+    let content = talksage_plugins::term_explainer::lookup_term(llm.as_ref(), &term, "")
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "talksage://event",
+        DomainEvent::Term {
+            result_id: format!(
+                "term-manual-{}",
+                SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+            ),
+            status: talksage_core::ResultStatus::Final,
+            content: content.clone(),
+        },
+    );
+    Ok(content)
+}
+
 /// 实时调节噪音电平阈值（0 = 关闭；无需停止监听，下一音频块即生效）。
 #[tauri::command]
 fn set_noise_level(level: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
@@ -1094,6 +1123,7 @@ pub fn run() {
             get_session,
             rename_session,
             delete_session,
+            explain_term,
             list_chat_threads,
             create_chat_thread,
             get_chat_messages,

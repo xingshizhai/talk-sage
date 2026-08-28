@@ -134,6 +134,10 @@ export const ipcApi: AppApi = {
     await invoke("rename_session", { sessionId: id, title });
   },
 
+  async explainTerm(term: string): Promise<string> {
+    return invoke("explain_term", { term });
+  },
+
   async listChatThreads(): Promise<ChatThread[]> {
     return invoke("list_chat_threads");
   },
@@ -407,6 +411,15 @@ export const httpApi: AppApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
     });
+  },
+
+  async explainTerm(term: string): Promise<string> {
+    const r = await req<{ content: string }>("/term/explain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ term }),
+    });
+    return r.content;
   },
 
   async listChatThreads(): Promise<ChatThread[]> {

@@ -5,5 +5,7 @@
 
 pub const TERM_EXPLAINER_SYSTEM: &str = include_str!("../prompts/term_explainer_system.txt");
 pub const TERM_EXPLAINER_USER: &str = include_str!("../prompts/term_explainer_user.txt");
+pub const TERM_LOOKUP_SYSTEM: &str = include_str!("../prompts/term_lookup_system.txt");
+pub const TERM_LOOKUP_USER: &str = include_str!("../prompts/term_lookup_user.txt");
 pub const TRANSLATOR_SYSTEM: &str = include_str!("../prompts/translator_system.txt");
 pub const TRANSLATOR_USER: &str = include_str!("../prompts/translator_user.txt");

@@ -45,11 +45,13 @@ impl WriteCommand {
                 duration_ms: *duration_ms,
                 rms: *rms,
             })),
+            // 撤销骨架用的是"空内容的 Final 事件"，它只该让界面收掉卡片，不该入库
+            // —— 否则历史里会攒一堆空术语记录（线上见过 61 条里 49 条是空的）。
             DomainEvent::Term {
                 status: ResultStatus::Final,
                 content,
                 ..
-            } => Some(Self::Term(content.clone())),
+            } if !content.trim().is_empty() => Some(Self::Term(content.clone())),
             DomainEvent::Translation { content, .. } => Some(Self::Translation(content.clone())),
             DomainEvent::KeyPoint {
                 result_id,
@@ -173,7 +175,13 @@ fn run_writer(
                 }
                 store.add_segment(session_id, &segment)
             }
-            WriteCommand::Term(content) => store.add_term(session_id, &content),
+            // 一次提取可能给出多条术语（每行一条）：拆开入库，历史页才能一条条列，
+            // 而不是把两三条术语整块塞进同一行记录。
+            WriteCommand::Term(content) => content
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .try_for_each(|line| store.add_term(session_id, line)),
             WriteCommand::Translation(content) => {
                 store.add_translation(session_id, "translate", &content)
             }

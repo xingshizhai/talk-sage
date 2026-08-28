@@ -115,7 +115,7 @@ enabled = false   # 已有 LLM 版本时建议关闭本地规则
 enabled          = true
 llm_extract      = true   # LLM 自动识别专业术语
 cooldown_seconds = 20.0   # LLM 提取的冷却间隔（秒）
-min_chars        = 15     # 段落最短字符数，低于此值不触发 LLM 提取
+min_chars        = 25     # 段落最短字符数，低于此值不触发 LLM 提取（太短的口语段落不会有专业术语）
 user_terms       = ""     # 用户自定义关注词（逗号分隔），出现即解释，例："NPI,MOQ,API"
 
 [translator]

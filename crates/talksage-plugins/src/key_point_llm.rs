@@ -68,7 +68,7 @@ impl State {
     fn fingerprint(content: &str) -> String {
         content
             .chars()
-            .filter(|c| !c.is_whitespace() && !matches!(c, '，' | '。' | '、' | '；' | '：' | ',' | '.' | '?' | '？' | '!' | '！' | '"' | '"' | '"' | ' '))
+            .filter(|c| !c.is_whitespace() && !matches!(c, '，' | '。' | '、' | '；' | '：' | ',' | '.' | '?' | '？' | '!' | '！' | '"' | '“' | '”' | ' '))
             .flat_map(|c| c.to_lowercase())
             .collect()
     }

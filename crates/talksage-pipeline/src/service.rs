@@ -138,6 +138,23 @@ impl RunningListen {
         "已启动后台整理".into()
     }
 
+    /// 手动查询一个术语：发 Term 事件，界面显示的同时也随会话入库
+    /// （走的是和自动提取同一条 sink，所以落库/展示都不用另写一套）。
+    pub fn explain_term(&self, term: &str) -> anyhow::Result<String> {
+        let llm = self
+            .plugin_ctx
+            .llm
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("LLM 未配置（请在设置→LLM 填写 API Key）"))?;
+        let content = talksage_plugins::term_explainer::lookup_term(llm.as_ref(), term, "")?;
+        (self.emit)(DomainEvent::Term {
+            result_id: format!("term-manual-{}", unix_secs()),
+            status: talksage_core::ResultStatus::Final,
+            content: content.clone(),
+        });
+        Ok(content)
+    }
+
     pub fn session_id(&self) -> Option<i64> {
         self.session_id
     }

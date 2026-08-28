@@ -36,6 +36,15 @@ const SPEAKER_STYLE: Record<string, { color: string; engine: string }> = {
 // 动态说话人（客户1/客户2…）循环配色
 const CLIENT_COLORS = ["var(--client)", "var(--term)", "var(--brief)", "var(--live)", "var(--danger)", "var(--me)"];
 
+/** 页头标题：与左侧导航项一一对应（语音转写页保留"会议辅助"这个业务名）。 */
+const PAGE_TITLES: Record<string, string> = {
+  transcript: "会议辅助",
+  history: "历史会话",
+  chat: "AI 助手",
+  models: "模型管理",
+  settings: "设置",
+};
+
 const SCENE_LABELS: Record<SceneMode, string> = {
   dictation: "单人听写",
   conversation: "一对一会话",
@@ -320,7 +329,15 @@ export default function App() {
   // 运行状态行：场景置顶，监听过程中始终可见。
   const healthRows: HealthRow[] = [
     { dot: "var(--term)", label: "场景", value: currentSceneLabel },
-    { dot: paused ? "var(--brief)" : listening ? "var(--live)" : "var(--muted)", label: "监听", value: paused ? "暂停" : listening ? "活跃" : "待机" },
+    {
+      dot: paused ? "var(--brief)" : listening ? "var(--live)" : "var(--muted)",
+      label: "监听",
+      value: paused
+        ? "暂停"
+        : listening
+          ? `活跃 ${String(Math.floor(listenElapsed / 60)).padStart(2, "0")}:${String(listenElapsed % 60).padStart(2, "0")}`
+          : "待机",
+    },
     { dot: "var(--client)", label: "客户流(VAD)", value: "双流" },
     { dot: "var(--me)", label: "用户流", value: "qwen3-asr" },
     { dot: gpuStatus?.route_error ? "var(--danger)" : gpuStatus?.is_accelerated ? "var(--live)" : "var(--brief)", label: "ASR", value: asrBackendLabel },
@@ -759,9 +776,16 @@ export default function App() {
 
       {/* 主区：不滚动，滚动交给内部子区域（转写/要点/历史/设置各自 flex+overflow） */}
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", padding: 14, gap: 12, overflow: "hidden", position: "relative" }}>
-        {/* 页头 */}
+        {/* 页头：五个页面共用同一层级的标题；场景按钮与计时徽章只属于语音转写
+            （它们说的是"这场会"，在历史/助手/模型/设置页没有意义） */}
         <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-          <h1 style={{ fontSize: 18, margin: 0 }}>会议辅助</h1>
+          <h1 style={{ fontSize: 18, margin: 0 }}>{PAGE_TITLES[navPage] ?? "会议辅助"}</h1>
+          {navPage === "chat" && (
+            <span style={{ fontSize: 11, color: "var(--muted)" }}>
+              多轮对话，回答由「设置 → LLM」配置的模型生成
+            </span>
+          )}
+          {navPage === "transcript" && (
           <button
             type="button"
             onClick={() => setNavPage("settings")}
@@ -779,6 +803,8 @@ export default function App() {
           >
             场景 · {currentSceneLabel}
           </button>
+          )}
+          {navPage === "transcript" && (
           <span
             style={{
               marginLeft: "auto",
@@ -791,6 +817,7 @@ export default function App() {
           >
             {listening ? `● ${currentSceneLabel} · ${String(Math.floor(listenElapsed / 60)).padStart(2, "0")}:${String(listenElapsed % 60).padStart(2, "0")}` : status}
           </span>
+          )}
         </div>
 
         {navPage === "transcript" && (
@@ -949,9 +976,6 @@ export default function App() {
 
         {navPage === "history" && (
           <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-            <div style={{ padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
-              <b style={{ fontSize: 13 }}>历史会话</b>
-            </div>
             <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--pad)" }}>
               <HistorySection
                 sessions={sessions}
@@ -979,12 +1003,6 @@ export default function App() {
 
         {navPage === "chat" && (
           <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-            <div style={{ padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
-              <b style={{ fontSize: 13 }}>AI 助手</b>
-              <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 8 }}>
-                多轮对话，回答由「设置 → LLM」配置的模型生成
-              </span>
-            </div>
             <div style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "var(--pad)", display: "flex", flexDirection: "column" }}>
               <ChatSection onOpenSettings={() => setNavPage("settings")} />
             </div>
@@ -993,9 +1011,6 @@ export default function App() {
 
         {navPage === "models" && (
           <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-            <div style={{ padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
-              <b style={{ fontSize: 13 }}>模型管理</b>
-            </div>
             <div style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "var(--pad)", display: "flex", flexDirection: "column" }}>
               <ModelsSection listening={listening} />
             </div>
@@ -1004,9 +1019,6 @@ export default function App() {
 
         {navPage === "settings" && (
           <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-            <div style={{ padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
-              <b style={{ fontSize: 13 }}>设置</b>
-            </div>
             <div style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "var(--pad)", display: "flex", flexDirection: "column" }}>
               <SettingsSection
                 config={config}
@@ -1034,6 +1046,10 @@ export default function App() {
           briefs={briefs}
           expandedTerms={expandedTerms}
           onToggleTerm={(id) => setExpandedTerms((prev) => ({ ...prev, [id]: !prev[id] }))}
+          onAskTerm={async (term) => {
+            // 结果由后端以 Term 事件推回来（监听中还会一并入库），这里不手动插卡片
+            await api.explainTerm(term);
+          }}
         />
       )}
 

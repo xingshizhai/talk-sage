@@ -594,7 +594,7 @@ export default function HistorySection({
           </div>
           {detail.terms.length > 0 && (
             <div style={{ marginTop: 6, color: "var(--text-2)" }}>
-              <b>术语：</b>
+              <b>专业术语：</b>
               {detail.terms.join("；")}
             </div>
           )}
@@ -768,7 +768,7 @@ export default function HistorySection({
               </div>
               <div style={{ color: "var(--muted)", marginLeft: 24 }}>
                 {s.title ? `#${s.id} · ${formatTime(s.started_at)} · ` : ""}
-                {s.segment_count} 段 · {s.term_count} 术语
+                {s.segment_count} 段 · {s.term_count} 专业术语
                 {s.duration_ms ? ` · ${Math.round(s.duration_ms / 1000)}s` : ""}
                 {s.speech_ratio !== undefined ? ` · 语音 ${Math.round(s.speech_ratio * 100)}%` : ""}
               </div>
