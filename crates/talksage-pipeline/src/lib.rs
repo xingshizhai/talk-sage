@@ -385,12 +385,170 @@ impl InputKind {
     }
 }
 
+/// 段结束时随请求送去 ASR 线程的上下文；结果回来时原样带回，
+/// 这样发段所需的时间戳/时长/音频都不必在两条线程间共享可变状态。
+struct FinishMeta {
+    end_sample: u64,
+    duration_ms: u64,
+    ts_ms: u64,
+    rms: f32,
+    seg_start_sample: u64,
+    /// 说话人识别用的段内音频（未启用声纹时为空）。
+    seg_audio: Vec<f32>,
+}
+
+enum AsrCmd {
+    /// 音频块 + 所属段代号（结果回来时带回，用于丢弃已切段的旧 partial）。
+    Accept(Vec<f32>, u64),
+    Finish(Box<FinishMeta>),
+    Reset,
+    Stop,
+}
+
+enum AsrOut {
+    /// 流式引擎的增量文本 + 它所属的段代号。
+    Partial(String, u64),
+    /// 段最终结果：已做术语纠正、标点分段与说话人判定。
+    Final {
+        subs: Vec<(String, u64)>,
+        text: String,
+        /// 声纹判定也是一次模型推理，同样不该占主线程；commit 留到主线程做。
+        assignment: Option<SpeakerAssignment>,
+        meta: Box<FinishMeta>,
+    },
+}
+
+/// 一条流的 ASR 线程句柄。
+///
+/// 引擎与标点模型都住在那条线程上：段级推理（whisper 一次 2~3s）和标点恢复
+/// 因此不再占用采集/VAD 那条线程，界面不会再"卡一下、再一批吐出来"。
+struct AsrChannel {
+    tx: mpsc::Sender<AsrCmd>,
+    rx: mpsc::Receiver<AsrOut>,
+    handle: Option<std::thread::JoinHandle<Option<Box<dyn talksage_asr::SegmentEngine>>>>,
+    /// 已请求但结果尚未回收的段数（收尾时要等它们回来）。
+    pending: usize,
+}
+
+impl AsrChannel {
+    #[allow(clippy::too_many_arguments)]
+    fn spawn(
+        label: &str,
+        mut engine: Box<dyn talksage_asr::SegmentEngine>,
+        punct: Option<talksage_asr::PunctuationRestorer>,
+        terminology: talksage_config::TerminologyConfig,
+        speaker: Option<speaker::SharedSpeaker>,
+        speaker_id: u32,
+        audio_source: talksage_core::AudioSource,
+        speaker_label: String,
+        recognize_owner: bool,
+    ) -> Option<Self> {
+        let (tx_cmd, rx_cmd) = mpsc::channel::<AsrCmd>();
+        let (tx_out, rx_out) = mpsc::channel::<AsrOut>();
+        let handle = std::thread::Builder::new()
+            .name(format!("talksage-asr-{label}"))
+            .spawn(move || {
+                while let Ok(cmd) = rx_cmd.recv() {
+                    match cmd {
+                        AsrCmd::Accept(chunk, gen) => {
+                            if let Some(text) = engine.accept(&chunk) {
+                                let text = terminology.correct(text.trim());
+                                if tx_out.send(AsrOut::Partial(text, gen)).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        AsrCmd::Reset => engine.reset(),
+                        AsrCmd::Finish(meta) => {
+                            let text = terminology.correct(engine.finish().trim());
+                            let subs = match &punct {
+                                // 标点恢复同样是一次模型推理，一并留在这条线程上
+                                Some(r) => r.restore_and_split(&text, meta.duration_ms, 3),
+                                None => vec![(text.clone(), meta.duration_ms)],
+                            };
+                            // 空文本不会发段，也就不必跑声纹
+                            let assignment = (!text.is_empty()).then(|| {
+                                SpeakerAssignment::resolve(
+                                    speaker.clone(),
+                                    &meta.seg_audio,
+                                    speaker_id,
+                                    audio_source,
+                                    &speaker_label,
+                                    recognize_owner,
+                                )
+                            });
+                            if tx_out.send(AsrOut::Final { subs, text, assignment, meta }).is_err() {
+                                break;
+                            }
+                        }
+                        AsrCmd::Stop => break,
+                    }
+                }
+                Some(engine)
+            })
+            .map_err(|e| log::error!("ASR 线程创建失败: {e}"))
+            .ok()?;
+        Some(Self { tx: tx_cmd, rx: rx_out, handle: Some(handle), pending: 0 })
+    }
+
+    fn accept(&self, chunk: Vec<f32>, generation: u64) {
+        let _ = self.tx.send(AsrCmd::Accept(chunk, generation));
+    }
+
+    fn reset(&self) {
+        let _ = self.tx.send(AsrCmd::Reset);
+    }
+
+    /// 请求收尾当前段；结果稍后从 [`Self::try_recv`] 取回。
+    fn request_finish(&mut self, meta: FinishMeta) {
+        if self.tx.send(AsrCmd::Finish(Box::new(meta))).is_ok() {
+            self.pending += 1;
+        }
+    }
+
+    fn try_recv(&mut self) -> Option<AsrOut> {
+        match self.rx.try_recv() {
+            Ok(out) => {
+                if matches!(out, AsrOut::Final { .. }) {
+                    self.pending = self.pending.saturating_sub(1);
+                }
+                Some(out)
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// 阻塞等一个结果（收尾时用，带超时兜底）。
+    fn recv_timeout(&mut self, timeout: Duration) -> Option<AsrOut> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(out) => {
+                if matches!(out, AsrOut::Final { .. }) {
+                    self.pending = self.pending.saturating_sub(1);
+                }
+                Some(out)
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// 停线程并取回引擎（归还引擎池用）。
+    fn stop(&mut self) -> Option<Box<dyn talksage_asr::SegmentEngine>> {
+        let _ = self.tx.send(AsrCmd::Stop);
+        self.handle.take().and_then(|h| h.join().ok()).flatten()
+    }
+}
+
 /// 单条流的运行时状态。
 struct StreamWorker {
     vad: VoiceActivityDetector,
-    /// ASR 引擎（Option 以便归还引擎池）。
-    /// ASR 引擎（流式 或 离线段级；Option 以便归还引擎池）。
+    /// 构造期暂存的 ASR 引擎；`spawn_asr` 把它移交给 ASR 线程后为 None。
     engine: Option<Box<dyn talksage_asr::SegmentEngine>>,
+    /// 引擎种类（流式与否等判断用）。引擎本体在 ASR 线程上，这里留一份种类。
+    engine_kind: talksage_asr::EngineKind,
+    /// ASR 线程句柄：accept / finish / 标点恢复都在那边跑。
+    asr: Option<AsrChannel>,
+    /// 当前段代号：每次收尾自增，用来丢弃切段后才回来的旧 partial。
+    asr_generation: u64,
     preprocessor: Preprocessor,
     mic_device: Option<String>,
     input_kind: InputKind,
@@ -610,13 +768,39 @@ impl StreamWorker {
             engine_pool: pooled.then_some(engine_pool).flatten(),
             engine_dir: pooled.then(|| cfg.model_dir.clone()),
             engine_options: effective_options,
+            engine_kind: cfg.engine_kind,
             engine: Some(engine),
+            asr: None,
+            asr_generation: 0,
             hooks,
             punct_restorer: None,
             clock: AudioClock::new(talksage_audio::TARGET_SAMPLE_RATE),
             origin_ms,
             force_segment_ms: 0,
         })
+    }
+
+    /// 把引擎与标点模型移交给本流的 ASR 线程。
+    ///
+    /// 之前这两样都在采集/VAD 那条线程上同步跑：whisper 段级推理一次 2~3s、
+    /// 云端收尾还要等网络，期间转写不出字、另一条流也被拖住。
+    fn spawn_asr(&mut self) {
+        let Some(engine) = self.engine.take() else { return };
+        let punct = self.punct_restorer.take();
+        match AsrChannel::spawn(
+            &self.speaker_label,
+            engine,
+            punct,
+            self.terminology.clone(),
+            self.speaker.clone(),
+            self.speaker_id,
+            self.input_kind.audio_source(),
+            self.speaker_label.clone(),
+            self.speaker_recognize_owner,
+        ) {
+            Some(ch) => self.asr = Some(ch),
+            None => log::error!("流[{}] ASR 线程启动失败，本流将不产出文本", self.speaker_label),
+        }
     }
 
     /// 启动音频输入（麦克风/回环）。
@@ -653,6 +837,9 @@ impl StreamWorker {
 
     /// 处理一步：取一块音频并处理。返回 Ok(false) 表示本步无数据（继续轮询）。
     fn tick(&mut self, emit: &EventSink) -> anyhow::Result<bool> {
+        // 先收 ASR 线程的结果：没有新音频时也要收，否则静音期间做完的段
+        // 要等下一块音频到了才发出来。
+        let drained = self.drain_asr(emit);
         let chunk: Option<Vec<f32>> = if let Some(rx) = &self.rx_audio {
             match poll_audio(rx) {
                 AudioPoll::Chunk(chunk) => Some(chunk),
@@ -733,8 +920,8 @@ impl StreamWorker {
             self.in_speech = true;
             just_started = true;
             self.segment.begin();
-            if let Some(e) = &mut self.engine {
-                e.reset();
+            if let Some(asr) = &self.asr {
+                asr.reset();
             }
             self.seg_start_sample = chunk_start;
             self.statistics.start_segment();
@@ -749,8 +936,8 @@ impl StreamWorker {
                     let remain = MAX_SEG_AUDIO.saturating_sub(self.seg_audio.len());
                     self.seg_audio.extend_from_slice(&buffered[..buffered.len().min(remain)]);
                 }
-                if let Some(engine) = &mut self.engine {
-                    let _ = engine.accept(&buffered);
+                if let Some(asr) = &self.asr {
+                    asr.accept(buffered.clone(), self.asr_generation);
                 }
             }
             self.pre_roll_samples = 0;
@@ -761,7 +948,7 @@ impl StreamWorker {
             self.segment.advance_pending(chunk.len() as u64);
             self.statistics.observe_speech(&chunk);
             // 段级引擎（whisper.cpp）：超过强制切分阈值时立即提交，避免 30s+ 积累延迟
-            if self.force_segment_ms > 0 && !self.engine.as_ref().is_some_and(|e| e.kind().is_streaming()) {
+            if self.force_segment_ms > 0 && !self.engine_kind.is_streaming() {
                 let elapsed_ms = AudioClock::samples_to_ms(
                     talksage_audio::TARGET_SAMPLE_RATE,
                     self.statistics.segment_samples(),
@@ -786,31 +973,14 @@ impl StreamWorker {
                     self.seg_audio.extend_from_slice(&chunk[..chunk.len().min(remain)]);
                 }
             }
-            let mut partial_update = PartialUpdate::Empty;
-            if let Some(engine) = &mut self.engine {
-                if let Some(text) = engine.accept(&chunk) {
-                    let text = self.terminology.correct(text.trim());
-                    partial_update = self.segment.accept_partial(&text);
-                    if partial_update == PartialUpdate::Changed {
-                        emit(DomainEvent::Segment {
-                            speaker_id: self.speaker_id,
-                            speaker_label: self.speaker_label.clone(),
-                            speaker_attribution: Some(talksage_core::SpeakerAttribution::from_legacy(
-                                self.input_kind.audio_source(),
-                                &self.speaker_label,
-                            )),
-                            text,
-                            is_partial: true,
-                            ts_ms: self.origin_ms + self.clock.ms(),
-                            duration_ms: 0,
-                            rms: 0.0,
-                            revision: 0,
-                            start_sample: self.seg_start_sample,
-                            end_sample: self.clock.accepted(),
-                        });
-                    }
-                }
+            if let Some(asr) = &self.asr {
+                asr.accept(chunk.clone(), self.asr_generation);
             }
+            // 送完这块再收一次：刚才那次 accept 可能已经产出 partial
+            let partial_update = match self.drain_asr(emit) {
+                PartialUpdate::Empty => drained,
+                update => update,
+            };
 
             // partial 文字保持低延迟；声纹标签允许稍后确认。连续两个窗口偏离
             // 当前讲话者时，复用 finish_speech 安全收尾；下一块音频开始新段。
@@ -826,7 +996,7 @@ impl StreamWorker {
                 self.finish_speech(emit);
                 return Ok(true);
             }
-            endpoint_ready = self.engine.as_ref().is_some_and(|e| e.kind().is_streaming())
+            endpoint_ready = self.engine_kind.is_streaming()
                 && self.segment.observe_endpoint(
                     partial_update,
                     block_rms,
@@ -842,7 +1012,7 @@ impl StreamWorker {
             self.segment.mark_vad_endpoint();
         }
 
-        let is_streaming = self.engine.as_ref().is_some_and(|e| e.kind().is_streaming());
+        let is_streaming = self.engine_kind.is_streaming();
         let realtime_input = self.input_kind != InputKind::File;
         let decision =
             self.segment
@@ -863,33 +1033,107 @@ impl StreamWorker {
         Ok(true)
     }
 
+    /// 收取 ASR 线程的结果：partial 直接发事件，final 走完整的发段流程。
+    /// 返回本轮最后一次 partial 的更新状态（端点判定用）。
+    fn drain_asr(&mut self, emit: &EventSink) -> PartialUpdate {
+        let mut update = PartialUpdate::Empty;
+        loop {
+            let Some(out) = self.asr.as_mut().and_then(AsrChannel::try_recv) else { break };
+            match out {
+                AsrOut::Partial(text, generation) => {
+                    if generation != self.asr_generation {
+                        continue; // 这条 partial 属于已经切走的段，丢弃
+                    }
+                    update = self.segment.accept_partial(&text);
+                    if update == PartialUpdate::Changed {
+                        emit(DomainEvent::Segment {
+                            speaker_id: self.speaker_id,
+                            speaker_label: self.speaker_label.clone(),
+                            speaker_attribution: Some(talksage_core::SpeakerAttribution::from_legacy(
+                                self.input_kind.audio_source(),
+                                &self.speaker_label,
+                            )),
+                            text,
+                            is_partial: true,
+                            ts_ms: self.origin_ms + self.clock.ms(),
+                            duration_ms: 0,
+                            rms: 0.0,
+                            revision: 0,
+                            start_sample: self.seg_start_sample,
+                            end_sample: self.clock.accepted(),
+                        });
+                    }
+                }
+                AsrOut::Final { subs, text, assignment, meta } => {
+                    self.emit_final(emit, text, subs, assignment, *meta)
+                }
+            }
+        }
+        update
+    }
+
+    /// 等待所有已请求但未回收的 final（暂停 / 停止监听时用）。
+    ///
+    /// 段级引擎一次推理 2~3s，收尾时必须等它回来，否则最后一句话会丢。
+    fn drain_asr_blocking(&mut self, emit: &EventSink, budget: Duration) {
+        let deadline = std::time::Instant::now() + budget;
+        while self.asr.as_ref().is_some_and(|a| a.pending > 0) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                let pending = self.asr.as_ref().map(|a| a.pending).unwrap_or(0);
+                log::warn!("流[{}] 收尾等待 ASR 超时，放弃 {} 段", self.speaker_label, pending);
+                break;
+            }
+            let Some(out) = self.asr.as_mut().and_then(|a| a.recv_timeout(left)) else { break };
+            match out {
+                AsrOut::Partial(..) => {}
+                AsrOut::Final { subs, text, assignment, meta } => {
+                    self.emit_final(emit, text, subs, assignment, *meta)
+                }
+            }
+        }
+    }
+
     /// 结束当前语音段并发送 final 事件（VAD 段完成或输入结束时调用）。
-    fn finish_speech(&mut self, emit: &EventSink) {
+    /// 请求收尾当前段：把上下文交给 ASR 线程，本线程立刻返回。
+    ///
+    /// 结果（含推理与标点恢复）稍后由 [`Self::drain_asr`] 取回并发段——
+    /// 这正是"不再卡住"的关键：推理期间采集与 VAD 继续跑。
+    fn finish_speech(&mut self, _emit: &EventSink) {
         if !self.in_speech {
             return;
         }
         self.in_speech = false;
-        let final_text = match &mut self.engine {
-            Some(engine) => engine.finish().trim().to_string(),
-            None => String::new(),
-        };
-        let final_text = self.terminology.correct(&final_text);
-        if !final_text.is_empty() {
-            let end_sample = self.clock.accepted();
-            let duration_ms = AudioClock::samples_to_ms(
+        let meta = FinishMeta {
+            end_sample: self.clock.accepted(),
+            duration_ms: AudioClock::samples_to_ms(
                 self.clock.sample_rate(),
                 self.statistics.segment_samples(),
-            );
-            let ts_ms = self.origin_ms + AudioClock::samples_to_ms(self.clock.sample_rate(), end_sample);
-            let rms = self.statistics.segment_rms();
-            let assignment = SpeakerAssignment::resolve(
-                self.speaker.clone(),
-                &self.seg_audio,
-                self.speaker_id,
-                self.input_kind.audio_source(),
-                &self.speaker_label,
-                self.speaker_recognize_owner,
-            );
+            ),
+            ts_ms: self.origin_ms
+                + AudioClock::samples_to_ms(self.clock.sample_rate(), self.clock.accepted()),
+            rms: self.statistics.segment_rms(),
+            seg_start_sample: self.seg_start_sample,
+            seg_audio: std::mem::take(&mut self.seg_audio),
+        };
+        if let Some(asr) = &mut self.asr {
+            asr.request_finish(meta);
+        }
+        self.asr_generation = self.asr_generation.wrapping_add(1);
+        self.reset_segment_state();
+    }
+
+    /// ASR 线程返回结果后的发段流程（说话人判定 → filter → 事件 → 插件）。
+    fn emit_final(
+        &mut self,
+        emit: &EventSink,
+        final_text: String,
+        sub_segments: Vec<(String, u64)>,
+        assignment: Option<SpeakerAssignment>,
+        meta: FinishMeta,
+    ) {
+        if let (false, Some(assignment)) = (final_text.is_empty(), assignment) {
+            let FinishMeta { end_sample, duration_ms, ts_ms, rms, seg_start_sample, seg_audio: _ } = meta;
             log::info!(
                 "段完成[{}] 说话人判定=[{}] attribution={:?} 声纹={:?} 时长={}ms rms={rms:.4} 字数={} 文本={}",
                 self.speaker_label,
@@ -900,13 +1144,6 @@ impl StreamWorker {
                 final_text.chars().count(),
                 final_text.chars().take(60).collect::<String>(),
             );
-
-            // 标点恢复 + 语义分段：有 restorer 时把一条长段切成若干子段，
-            // 每个子段独立发出；无 restorer 时退化为单段。
-            let sub_segments: Vec<(String, u64)> = match &self.punct_restorer {
-                Some(restorer) => restorer.restore_and_split(&final_text, duration_ms, 3),
-                None => vec![(final_text.clone(), duration_ms)],
-            };
 
             // 预先提取说话人信息，以便在循环中复用（commit 会消耗所有权）。
             let spk_id = assignment.source_id();
@@ -948,7 +1185,7 @@ impl StreamWorker {
                     duration_ms: seg.duration_ms,
                     rms: seg.rms,
                     revision: 0,
-                    start_sample: self.seg_start_sample,
+                    start_sample: seg_start_sample,
                     end_sample,
                 };
                 if let Some(ev) = self.hooks.apply_filters(ev) {
@@ -971,14 +1208,13 @@ impl StreamWorker {
                 }
             }
         }
-        self.reset_segment_state();
     }
 
     /// 所有 final 路径（空文本、filter 吞掉、正常提交）共用同一个收尾出口。
     fn reset_segment_state(&mut self) {
         self.segment.reset();
-        if let Some(e) = &mut self.engine {
-            e.reset();
+        if let Some(asr) = &self.asr {
+            asr.reset();
         }
         self.seg_audio.clear();
         if let Some(detector) = &mut self.speaker_change {
@@ -1021,6 +1257,13 @@ impl StreamWorker {
     }
 
     /// 关闭流：收尾未完成的语音段 + 结束录音 + 归还引擎（停止监听/输入结束时调用）。
+    /// 收尾：等 ASR 把已请求的段做完（段级推理一次 2~3s），再停线程取回引擎。
+    fn finish_and_wait(&mut self, emit: &EventSink) {
+        self.finish_speech(emit);
+        self.drain_asr(emit);
+        self.drain_asr_blocking(emit, Duration::from_secs(10));
+    }
+
     fn shutdown(&mut self, emit: &EventSink) {
         let overruns = self.capture_overruns();
         if overruns > 0 {
@@ -1031,10 +1274,12 @@ impl StreamWorker {
                 talksage_audio::CAPTURE_QUEUE_CAP
             );
         }
-        self.finish_speech(emit);
+        // 先把最后一段做完（含等待推理），否则收尾时会丢掉最后一句
+        self.finish_and_wait(emit);
         self.stop();
-        // 归还 ASR 引擎到池（常驻复用；下次监听热启动）
-        if let (Some(pool), Some(dir), Some(engine)) = (self.engine_pool.take(), self.engine_dir.take(), self.engine.take()) {
+        // 停 ASR 线程并取回引擎，再归还引擎池（常驻复用；下次监听热启动）
+        let engine = self.asr.as_mut().and_then(AsrChannel::stop).or_else(|| self.engine.take());
+        if let (Some(pool), Some(dir), Some(engine)) = (self.engine_pool.take(), self.engine_dir.take(), engine) {
             pool.release_with_options(engine.kind(), &dir, &self.engine_options, engine);
             log::debug!("流[{}] ASR 引擎已归还引擎池", self.speaker_label);
         }
@@ -1057,7 +1302,8 @@ impl StreamWorker {
 
     /// 暂停边界：提交已开始的句子并清空 VAD/预滚，恢复后从新句开始。
     fn pause(&mut self, emit: &EventSink) {
-        self.finish_speech(emit);
+        // 暂停也要等最后一段出来，否则暂停前那句话会消失
+        self.finish_and_wait(emit);
         self.vad.reset();
         self.pre_roll.clear();
         self.pre_roll_samples = 0;
@@ -1220,6 +1466,8 @@ fn run_loop(
                 }
             }
         }
+        // 引擎与标点模型都就位后再开线程：此后主线程不再直接碰它们
+        w.spawn_asr();
         w.start_input(cfg.chunk_ms)?;
         log::info!(
             "流[{}] 就绪: engine={} model={} 加载耗时={:?}",
