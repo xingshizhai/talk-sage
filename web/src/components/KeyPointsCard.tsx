@@ -12,7 +12,7 @@ const KIND_COLOR: Record<string, { fg: string; bg: string }> = {
   其他: { fg: "var(--muted)", bg: "var(--surface-2)" },
 };
 
-type FlushRecord = { time: string; pointsBefore: number; msg: string };
+type FlushRecord = { time: string; pointsBefore: number; msg: string; done?: boolean };
 
 export default function KeyPointsCard({
   points,
@@ -112,15 +112,19 @@ export default function KeyPointsCard({
         )}
         {rows.map((row) => {
           if (row.kind === "flush") {
-            const ok = row.record.msg.startsWith("已");
+            // 结论在后端跑完才回来；没到之前显示"整理中…"，别让用户以为点了没反应
+            const { msg, done } = row.record;
+            const added = /^新增/.test(msg);
+            const failed = done === true && !added && !/^未发现|^没有新要点|^这 \d+ 段|^最近没有/.test(msg);
+            const color = !done ? "var(--muted)" : added ? "var(--live)" : failed ? "var(--danger)" : "var(--brief)";
             return (
               <div
                 key={row.key}
                 style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--muted)", fontSize: 10, userSelect: "none" }}
               >
                 <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
-                <span title={row.record.msg} style={{ color: ok ? "var(--live)" : "var(--danger)", whiteSpace: "nowrap" }}>
-                  ⚡ {row.record.time} 整理{ok ? "" : `（${row.record.msg}）`}
+                <span title={msg} style={{ color, whiteSpace: "nowrap" }}>
+                  ⚡ {row.record.time} 整理 · {msg}
                 </span>
                 <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
               </div>

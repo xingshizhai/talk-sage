@@ -205,6 +205,16 @@ pub enum DomainEvent {
     Nudge {
         nudge: Nudge,
     },
+    /// 手动「立即整理」的结果回执。
+    ///
+    /// 整理是后台线程跑的，命令在 LLM 返回前就已返回，界面只能靠这个事件知道
+    /// 结果 —— 没有它，用户分不清"没提炼出要点"和"功能坏了"。
+    KeyPointFlush {
+        /// 本次新增的要点条数。
+        added: usize,
+        /// 给用户看的一句话结论。
+        message: String,
+    },
     /// AI 助手回答增量（流式逐字输出；按 message_id 追加）。
     ChatDelta {
         /// 所属话题 id。
@@ -269,6 +279,8 @@ impl DomainEvent {
             | DomainEvent::ModelProgress { .. } => DeliveryClass::Replayable,
             // 增量只在生成过程中有意义：漏了就重开一次；完整回答落在 chat_messages 表里
             DomainEvent::ChatDelta { .. } => DeliveryClass::Ephemeral,
+            // 一次性回执，只对当下那次点击有意义
+            DomainEvent::KeyPointFlush { .. } => DeliveryClass::Ephemeral,
         }
     }
 }

@@ -225,6 +225,12 @@ export type DomainEvent =
       done: boolean;
       error?: string;
     }
+  | {
+      /** 手动「立即整理」的结果回执（整理在后台跑，命令先于结果返回）。 */
+      type: "key_point_flush";
+      added: number;
+      message: string;
+    }
   | { type: "metrics"; metrics: ConversationMetrics }
   | { type: "nudge"; nudge: NudgeEvent }
   | {

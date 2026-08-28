@@ -86,7 +86,8 @@ export default function App() {
   const [mode, setMode] = useState<TranscriptMode>(() => loadTranscriptMode());
   const [lines, setLines] = useState<TimelineLine[]>([]);
   const [points, setPoints] = useState<readonly KeyPoint[]>([]);
-  const [flushRecords, setFlushRecords] = useState<readonly { time: string; pointsBefore: number; msg: string }[]>([]);
+  // done = 已收到后端回执（msg 才是最终结论，此前只是"整理中…"）
+  const [flushRecords, setFlushRecords] = useState<readonly { time: string; pointsBefore: number; msg: string; done?: boolean }[]>([]);
   const [terms, setTerms] = useState<TermItem[]>([]);
   const [expandedTerms, setExpandedTerms] = useState<Record<string, boolean>>({});
   const [briefs, setBriefs] = useState<BriefItem[]>([]);
@@ -276,6 +277,15 @@ export default function App() {
       }
       if (ev.type === "metrics") {
         setMetrics(ev.metrics);
+      }
+      if (ev.type === "key_point_flush") {
+        // 命令在 LLM 返回前就已返回，这里才是真正的结果：补到最后一条整理记录上
+        setFlushRecords((prev) =>
+          prev.length === 0
+            ? prev
+            : prev.map((r, i) => (i === prev.length - 1 ? { ...r, msg: ev.message, done: true } : r)),
+        );
+        return;
       }
       if (ev.type === "nudge") {
         setNudges((prev) => applyIncomingNudge(prev, ev.nudge));
@@ -960,9 +970,20 @@ export default function App() {
                   const now = new Date();
                   const time = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
                   const pointsBefore = points.length;
+                  // 后端只回"已启动"，真正的结论随后由 key_point_flush 事件补上
                   let msg = "整理中…";
-                  try { msg = await api.flushKeyPoints() ?? "已触发"; } catch (e) { msg = String(e); }
-                  setFlushRecords((prev) => [...prev, { time, pointsBefore, msg }]);
+                  let done = false;
+                  try {
+                    const started = await api.flushKeyPoints();
+                    if (started && !started.startsWith("已启动")) {
+                      msg = started; // 未在监听 / 插件未启用 / 无 LLM：这就是最终结论
+                      done = true;
+                    }
+                  } catch (e) {
+                    msg = String(e).replace(/^Error: /, "");
+                    done = true;
+                  }
+                  setFlushRecords((prev) => [...prev, { time, pointsBefore, msg, done }]);
                 }}
                 pluginLabel={(() => {
                   const llmEnabled = config?.plugins?.["key_point_llm"]?.enabled !== false;
