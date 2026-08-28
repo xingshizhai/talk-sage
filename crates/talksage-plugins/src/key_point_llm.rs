@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use serde::Deserialize;
+use serde::de::{MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::json;
 use talksage_core::{DomainEvent, KeyPointCategory, ResultStatus, TranscriptSegment};
 
@@ -516,8 +517,9 @@ fn build_prompt(texts: &[String], existing: &[String]) -> String {
 3. 跳过寒暄、确认应答、语气词、不完整的半句话；\n\
 4. 宁可少而精，不要多而碎；\n\
 5. 内容有误字时（ASR 错误）先纠正再概括；\n\
-6. 已提取的要点不要重复，语义相同或高度相似的内容直接跳过。\n\n\
-示例：[{{\"category\":\"technical\",\"content\":\"瞒天过海：利用处于优势地位时麻痹对方，暗中行动\",\"keywords\":[{{\"term\":\"瞒天过海\",\"gloss\":\"三十六计之一，以常态掩护真实意图\"}}]}}]\n\
+6. 已提取的要点不要重复，语义相同或高度相似的内容直接跳过；\n\
+7. 每个 JSON 对象中每个字段只能出现一次，不得重复输出 keywords 或其他字段。\n\n\
+完整示例：[{{\"category\":\"technical\",\"content\":\"瞒天过海：利用常态麻痹对方并暗中行动\",\"owner\":null,\"due_date\":null,\"source_refs\":[1,2],\"keywords\":[{{\"term\":\"瞒天过海\",\"gloss\":\"三十六计之一\"}}]}}]\n\
 若无新的实质性内容返回空数组 []"
     )
 }
@@ -541,18 +543,66 @@ impl RawKeyword {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Default)]
 struct RawPoint {
     category: String,
     content: String,
-    #[serde(default)]
     keywords: Vec<RawKeyword>,
-    #[serde(default)]
     owner: Option<String>,
-    #[serde(default)]
     due_date: Option<String>,
-    #[serde(default)]
     source_refs: Vec<usize>,
+}
+
+/// 容错接收 LLM 生成的对象。LLM 偶尔会重复输出字段；Serde
+/// 派生的结构体反序列化会拒绝整批结果，这里对 keywords/source_refs
+/// 合并，其他标量字段保留最后一个有效值。
+impl<'de> Deserialize<'de> for RawPoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawPointVisitor;
+        impl<'de> Visitor<'de> for RawPointVisitor {
+            type Value = RawPoint;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("要点 JSON 对象")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<RawPoint, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut point = RawPoint::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    let value = map.next_value::<serde_json::Value>()?;
+                    match key.as_str() {
+                        "category" => {
+                            if let Some(v) = value.as_str() { point.category = v.into(); }
+                        }
+                        "content" => {
+                            if let Some(v) = value.as_str() { point.content = v.into(); }
+                        }
+                        "owner" => point.owner = value.as_str().map(str::to_owned),
+                        "due_date" => point.due_date = value.as_str().map(str::to_owned),
+                        "source_refs" => {
+                            if let Ok(mut values) = serde_json::from_value::<Vec<usize>>(value) {
+                                point.source_refs.append(&mut values);
+                            }
+                        }
+                        "keywords" => {
+                            if let Ok(mut values) = serde_json::from_value::<Vec<RawKeyword>>(value) {
+                                point.keywords.append(&mut values);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(point)
+            }
+        }
+        deserializer.deserialize_map(RawPointVisitor)
+    }
 }
 
 fn parse_category(s: &str) -> KeyPointCategory {
@@ -726,6 +776,36 @@ mod tests {
         assert_eq!(pts[0].owner.as_deref(), Some("张三"));
         assert_eq!(pts[0].due_date.as_deref(), Some("周五"));
         assert_eq!(pts[0].source_refs, vec![2, 3]);
+    }
+
+    #[test]
+    fn parse_response_merges_duplicate_keywords_instead_of_rejecting_batch() {
+        // 来自 2026-08-28 实际会话日志的失败形式：同一对象两次输出 keywords。
+        let resp = r#"[{
+            "category":"technical",
+            "content":"镜片可降低蓝光25%以上",
+            "keywords":[{"term":"GB39552.1-2020","gloss":"太阳镜国家标准"}],
+            "owner":null,
+            "due_date":null,
+            "source_refs":[22,23],
+            "keywords":[]
+        }]"#;
+        let (pts, kws) = parse_response_checked(resp).expect("重复字段应容错");
+        assert_eq!(pts.len(), 1);
+        assert_eq!(pts[0].source_refs, vec![22, 23]);
+        assert_eq!(kws, vec!["GB39552.1-2020：太阳镜国家标准"]);
+    }
+
+    #[test]
+    fn parse_response_skips_incomplete_object_but_keeps_valid_points() {
+        let resp = r#"[
+            {"category":"technical","keywords":"invalid"},
+            {"category":"decision","content":"预算不超过20万","source_refs":[4],"keywords":[]}
+        ]"#;
+        let (pts, kws) = parse_response_checked(resp).expect("单个对象字段异常不应拖垮整批");
+        assert_eq!(pts.len(), 1);
+        assert_eq!(pts[0].content, "预算不超过20万");
+        assert!(kws.is_empty());
     }
 
     #[test]
