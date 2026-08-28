@@ -46,6 +46,10 @@ impl PunctuationRestorer {
     }
 
     /// Add punctuation then split on strong sentence-ending marks (。！？!?).
+    ///
+    /// 已经带标点的文本直接跳过标点恢复：CT-Transformer 假定输入是无标点裸文本，
+    /// 而 whisper / qwen3-asr / 阿里云都会自己输出标点 —— 再喂一遍会把每个标点
+    /// 翻一倍（实测「抓住了庞涓。」→「抓住了庞涓。。」），线上 635 段里 348 段中招。
     /// Each returned segment carries its proportional share of `total_duration_ms`.
     /// Sub-segments shorter than `min_chars` are merged into the previous one.
     pub fn restore_and_split(
@@ -54,9 +58,23 @@ impl PunctuationRestorer {
         total_duration_ms: u64,
         min_chars: usize,
     ) -> Vec<(String, u64)> {
-        let punctuated = self.add_punctuation(text);
+        let punctuated = if already_punctuated(text) {
+            text.to_string()
+        } else {
+            self.add_punctuation(text)
+        };
         split_on_strong_boundaries(&punctuated, total_duration_ms, min_chars)
     }
+}
+
+/// 文本是否已经带标点。
+///
+/// 用于决定要不要再跑标点恢复：带标点的 ASR 输出（whisper / qwen3-asr / 阿里云）
+/// 再跑一遍就是双标点。只要出现一个句读符号就认定为"已带标点"——ASR 不会只在
+/// 一句话中间偶然吐出一个标点。
+pub fn already_punctuated(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '。' | '，' | '、' | '；' | '！' | '？' | ',' | '.' | ';' | '!' | '?'))
 }
 
 /// Split `text` on 。！？!? boundaries, allocating duration proportionally by char count.
@@ -91,7 +109,8 @@ pub fn split_on_strong_boundaries(
     // Merge fragments shorter than min_chars into the previous segment.
     let mut merged: Vec<String> = Vec::new();
     for seg in raw {
-        let seg = seg.trim().to_string();
+        // 切点后残留的句读符号会让下一段以「，」开头，读起来像半句话
+        let seg = seg.trim().trim_start_matches(['，', '、', '；', ',', ';']).trim().to_string();
         if seg.is_empty() {
             continue;
         }
@@ -147,6 +166,28 @@ mod tests {
     fn is_punct_model_available_false_when_missing() {
         let tmp = std::env::temp_dir().join("talksage-punct-test-absent");
         assert!(!is_punct_model_available(&tmp));
+    }
+
+    /// 线上现象：whisper 自带标点，再跑一遍标点恢复就变成「。。」「，，」。
+    /// 这里锁住"已带标点就不再恢复"的判定。
+    #[test]
+    fn already_punctuated_detects_asr_output_that_has_marks() {
+        assert!(already_punctuated("抓住了庞涓。"));
+        assert!(already_punctuated("这赵国扛不住了啊，就找齐国求救"));
+        assert!(already_punctuated("We shipped it, finally."));
+        // 裸文本（paraformer / zipformer 的输出形态）才需要跑标点恢复
+        assert!(!already_punctuated("抓住了庞涓"));
+        assert!(!already_punctuated("we need npi samples by friday"));
+        assert!(!already_punctuated(""));
+    }
+
+    /// 切点后残留的逗号不该留给下一段当开头（线上见过「，迫使敌人分散兵力」）。
+    #[test]
+    fn split_trims_leading_separator_punctuation() {
+        let out = split_on_strong_boundaries("敌阳不如敌阴。，迫使敌人分散兵力。", 1000, 3);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, "敌阳不如敌阴。");
+        assert_eq!(out[1].0, "迫使敌人分散兵力。", "下一段不该以逗号开头");
     }
 
     #[test]
