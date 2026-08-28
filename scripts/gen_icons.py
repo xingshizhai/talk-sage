@@ -6,7 +6,7 @@
   web/src-tauri/icons/icon.ico  (PNG-in-ICO, Windows)
   web/src-tauri/icons/icon.icns (ic07/ic08/ic09/ic10, macOS)
 
-图案: 深色圆角方块 + 青色对话气泡点（极简品牌）。
+图案: 深色圆角方块 + 蓝青双色交叠圆（与 logo/talksage-icon.svg 一致）。
 """
 import os
 import struct
@@ -15,12 +15,13 @@ from pathlib import Path
 
 OUT = Path(__file__).resolve().parent.parent / "web" / "src-tauri" / "icons"
 
-BG = (15, 23, 42, 255)      # #0f172a 深蓝黑
-FG = (45, 212, 191, 255)    # #2dd4bf 青色（与旧版术语强调色一致）
+BG = (16, 35, 63, 255)       # #10233F
+LEFT = (126, 166, 255, 255)  # #7EA6FF
+RIGHT = (79, 216, 221, 255)  # #4FD8DD
 
 
 def make_rgba(size: int, artwork_scale: float = 1.0) -> bytes:
-    """生成 size×size RGBA 像素: 圆角方块 + 居中气泡点。
+    """生成 size×size RGBA 像素: 圆角方块 + 蓝青双色交叠圆。
 
     ``artwork_scale`` 用于给 macOS 图标保留系统视觉安全区。Dock 会把 ICNS
     的整个画布当作图标尺寸；如果底板铺满画布，会比系统图标显得大一圈。
@@ -30,10 +31,9 @@ def make_rgba(size: int, artwork_scale: float = 1.0) -> bytes:
     inset = (size - artwork_size) / 2
     radius = max(2, artwork_size / 8)
     cx, cy = size / 2, size / 2
-    r_dot = artwork_size * 0.22
-    # 气泡: 大圆 + 小尾巴圆
-    tail_x, tail_y = cx + artwork_size * 0.16, cy + artwork_size * 0.24
-    r_tail = artwork_size * 0.09
+    left_x = cx - artwork_size * 0.125
+    right_x = cx + artwork_size * 0.125
+    circle_radius = artwork_size * 17 / 64
     for y in range(size):
         row = bytearray()
         for x in range(size):
@@ -43,11 +43,15 @@ def make_rgba(size: int, artwork_scale: float = 1.0) -> bytes:
             if dx * dx + dy * dy > radius * radius:
                 row += bytes(BG[:3] + (0,))  # 圆角外透明
                 continue
-            # 气泡点
-            d1 = (x - cx) ** 2 + (y - cy) ** 2
-            d2 = (x - tail_x) ** 2 + (y - tail_y) ** 2
-            if d1 <= r_dot * r_dot or d2 <= r_tail * r_tail:
-                row += bytes(FG)
+            # 与 talksage-icon.svg 相同：两个圆的交叠区域露出深色底板。
+            in_left = (x - left_x) ** 2 + (y - cy) ** 2 <= circle_radius**2
+            in_right = (x - right_x) ** 2 + (y - cy) ** 2 <= circle_radius**2
+            if in_left and in_right:
+                row += bytes(BG)
+            elif in_left:
+                row += bytes(LEFT)
+            elif in_right:
+                row += bytes(RIGHT)
             else:
                 row += bytes(BG)
         rows.append(bytes(row))
