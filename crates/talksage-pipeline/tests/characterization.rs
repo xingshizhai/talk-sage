@@ -104,8 +104,6 @@ fn run_and_collect(cfg: LivePipelineConfig) -> Vec<DomainEvent> {
 
 fn zh_pipeline(root: &Path, wav: &Path, min_commit_ms: u64) -> LivePipelineConfig {
     LivePipelineConfig {
-        // 流式引擎不做段级强制切分，与 service.rs 对流式引擎的取值一致
-        force_segment_ms: 0,
         vad_model: root.join("silero-vad").join("silero_vad.onnx"),
         chunk_ms: 100,
         vad: talksage_config::VadConfig::default(),
