@@ -375,8 +375,15 @@ export default function App() {
 
   const handleSaveConfig = useCallback(async (updates: Record<string, unknown>) => {
     await api.saveConfig(updates);
-    const newCfg = await api.getConfig();
+    // ASR 路由状态依赖刚保存的 asr_mode/backend/云端凭据。
+    // 设置页有自己的状态用于就地预览，但左侧运行状态读取的是
+    // App 层 gpuStatus，因此保存后必须同时刷新两者。
+    const [newCfg, runtimeStatus] = await Promise.all([
+      api.getConfig(),
+      api.getAsrRuntimeStatus(),
+    ]);
     setConfig(newCfg);
+    setGpuStatus(runtimeStatus);
     setAudioSource(newCfg.audio?.audio_source ?? "mic");
   }, []);
 
