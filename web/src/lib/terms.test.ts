@@ -31,6 +31,16 @@ describe("toTermRows", () => {
     expect(rows[0].isFinal).toBe(false);
   });
 
+  it("同一个术语只显示一条（自动提取与手动查词都算）", () => {
+    const rows = toTermRows([
+      { resultId: "auto", content: "付鹏：经济学家，以直白敢言著称", isFinal: true },
+      { resultId: "kw", content: "付鹏：指东北证券首席经济学家", isFinal: true },
+      { resultId: "manual", content: "MOQ：最小起订量", isFinal: true },
+      { resultId: "manual2", content: "moq: minimum order quantity", isFinal: true },
+    ]);
+    expect(rows.map((r) => r.resultId)).toEqual(["auto", "manual"]);
+  });
+
   it("空内容不产生卡片（撤销骨架的事件）", () => {
     expect(toTermRows([{ resultId: "t", content: "", isFinal: true }])).toHaveLength(0);
     expect(toTermRows([{ resultId: "t", content: "  \n  ", isFinal: true }])).toHaveLength(0);

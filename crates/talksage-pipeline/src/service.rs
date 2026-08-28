@@ -172,6 +172,39 @@ pub struct TalkSageService {
     engines: Arc<EnginePool>,
 }
 
+/// 会话级术语去重：同一个术语只放行第一条。
+///
+/// 只拦"有内容的 Final"——骨架和撤销骨架的空事件必须原样通过，否则界面上的
+/// "识别中…"卡片会永远留在那里。
+#[derive(Default)]
+struct TermDedup {
+    seen: Mutex<std::collections::HashSet<String>>,
+}
+
+impl TermDedup {
+    fn allow(&self, ev: &DomainEvent) -> bool {
+        let DomainEvent::Term { status: talksage_core::ResultStatus::Final, content, .. } = ev else {
+            return true;
+        };
+        if content.trim().is_empty() {
+            return true;
+        }
+        // 一个事件可能带多条术语（每行一条）：逐行判断，全是重复才拦下
+        let mut seen = self.seen.lock().unwrap();
+        let mut has_new = false;
+        for line in content.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let key = talksage_core::term_key(line);
+            if key.is_empty() || seen.insert(key) {
+                has_new = true;
+            }
+        }
+        if !has_new {
+            log::debug!("术语去重：整条都已出现过，跳过 {content}");
+        }
+        has_new
+    }
+}
+
 /// [`TalkSageService::recover_on_startup`] 的结果汇总。
 #[derive(Debug, Default)]
 pub struct RecoveryReport {
@@ -706,7 +739,14 @@ impl TalkSageService {
             _ => None,
         };
         let writer_tx = session_writer.as_ref().map(SessionWriter::sender);
+        // 专业术语有三个来源（term_explainer / key_point_llm 关键词 / 手动查词），
+        // 它们互不知情。这里是三条路唯一的共同出口，去重放在这一层，界面和入库
+        // 就都不会出现同一个词的两条解释。
+        let term_dedup = TermDedup::default();
         let sink: EventSink = Arc::new(move |ev: DomainEvent| {
+            if !term_dedup.allow(&ev) {
+                return;
+            }
             if let Some(writer) = &writer_tx {
                 writer.enqueue(&ev);
             }
@@ -1269,6 +1309,48 @@ mod tests {
         assert_eq!(detail.segments.len(), 1);
         assert_eq!(detail.segments[0].text, "定稿");
         assert_eq!(texts.lock().unwrap().as_slice(), ["定稿"]);
+    }
+
+    /// 三个来源（自动提取 / 要点关键词 / 手动查词）各自解释同一个词时，
+    /// 只有第一条能出去 —— 线上见过「付鹏」「雷曼兄弟」各两条、解释还不一样。
+    #[test]
+    fn term_dedup_keeps_only_the_first_explanation() {
+        let dedup = TermDedup::default();
+        let term = |content: &str| DomainEvent::Term {
+            result_id: "t".into(),
+            status: talksage_core::ResultStatus::Final,
+            content: content.into(),
+        };
+
+        assert!(dedup.allow(&term("付鹏：经济学家，以直白敢言著称")));
+        assert!(!dedup.allow(&term("付鹏：指东北证券首席经济学家")), "同一个词的第二条解释应被拦下");
+        assert!(dedup.allow(&term("雷曼兄弟：美国投资银行")), "不同的词照常放行");
+        assert!(dedup.allow(&term("MOQ：最小起订量")), "首次出现应放行");
+        assert!(!dedup.allow(&term("moq: minimum order quantity")), "大小写/中英冒号不影响判重");
+
+        // 一个事件里多条术语：只要有一条是新的就整条放行
+        assert!(dedup.allow(&term("付鹏：经济学家\nSLA：服务等级协议")));
+        assert!(!dedup.allow(&term("付鹏：经济学家\nSLA：服务等级协议")), "全部重复才拦下");
+    }
+
+    /// 骨架与撤销骨架的空事件必须原样通过，否则"识别中…"会永远挂在界面上。
+    #[test]
+    fn term_dedup_never_blocks_skeletons() {
+        let dedup = TermDedup::default();
+        let skeleton = DomainEvent::Term {
+            result_id: "t".into(),
+            status: talksage_core::ResultStatus::Skeleton,
+            content: "专业术语识别中…".into(),
+        };
+        let dismiss = DomainEvent::Term {
+            result_id: "t".into(),
+            status: talksage_core::ResultStatus::Final,
+            content: String::new(),
+        };
+        assert!(dedup.allow(&skeleton));
+        assert!(dedup.allow(&skeleton), "骨架可以重复出现");
+        assert!(dedup.allow(&dismiss));
+        assert!(dedup.allow(&dismiss));
     }
 
     /// 专业术语要跟着会话一起入库，且只入「有内容的 Final」：

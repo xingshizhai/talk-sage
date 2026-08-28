@@ -285,6 +285,22 @@ impl DomainEvent {
     }
 }
 
+/// 术语去重键：取「术语：解释」的术语部分并归一化。
+///
+/// 专业术语有三个来源（term_explainer、key_point_llm 的关键词、手动查词），
+/// 三者互不知情，同一个词会被各自解释一遍（线上见过「付鹏」「雷曼兄弟」各两条，
+/// 解释还不一样）。归一化后作为去重键，同一个词只保留最先到的那条解释。
+pub fn term_key(content: &str) -> String {
+    let head = content
+        .split(['：', ':'])
+        .next()
+        .unwrap_or(content);
+    head.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 /// 渐进结果状态（骨架先显示，最终填充）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -532,6 +548,16 @@ pub fn text_noise_score(text: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 三个来源各自提取时，同一个词要能被认成同一个 —— 解释不同也算重复。
+    #[test]
+    fn term_key_normalizes_across_sources() {
+        assert_eq!(term_key("付鹏：经济学家，以直白敢言著称"), term_key("付鹏：指东北证券首席经济学家"));
+        assert_eq!(term_key("MOQ：最小起订量"), term_key("moq: minimum order quantity"));
+        assert_eq!(term_key(" NPI "), term_key("NPI：新产品导入"));
+        assert_ne!(term_key("雷曼兄弟：投行"), term_key("贝尔斯登：投行"));
+        assert!(term_key("：只有解释没有词").is_empty(), "取不出术语时返回空键，交由调用方放行");
+    }
 
     #[test]
     fn event_roundtrips_via_json() {
