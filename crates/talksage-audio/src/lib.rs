@@ -30,11 +30,16 @@ pub struct CaptureTx {
     tx: mpsc::SyncSender<Vec<f32>>,
     overruns: Arc<AtomicU64>,
     closed: Arc<AtomicBool>,
+    /// 最近一次入队时刻（毫秒时间戳）。消费端据此判断"是设备断流还是自己卡住"——
+    /// 两者在界面上长得一模一样（电平不动、没有转写），日志里必须分得开。
+    last_push_ms: Arc<AtomicU64>,
 }
 
 impl CaptureTx {
     /// 尝试入队一帧。队列满则丢弃并累计 overrun，立即返回 `false`（不阻塞）。
     pub fn try_push(&self, chunk: Vec<f32>) -> bool {
+        // 满或不满都算"设备还在给数据"：这里记的是采集侧的活跃度
+        self.last_push_ms.store(now_ms(), Ordering::Relaxed);
         match self.tx.try_send(chunk) {
             Ok(()) => true,
             Err(mpsc::TrySendError::Full(_)) => {
@@ -55,10 +60,25 @@ impl CaptureTx {
         self.overruns.load(Ordering::Relaxed)
     }
 
+    /// 距上次入队过去了多少毫秒；从未入队时返回 None。
+    pub fn since_last_push_ms(&self) -> Option<u64> {
+        match self.last_push_ms.load(Ordering::Relaxed) {
+            0 => None,
+            last => Some(now_ms().saturating_sub(last)),
+        }
+    }
+
     /// 接收端已断开（停止切块，避免空转）。
     pub fn closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// 创建有界采集通道（容量 [`CAPTURE_QUEUE_CAP`]）。
@@ -69,6 +89,7 @@ pub fn capture_channel() -> (CaptureTx, mpsc::Receiver<Vec<f32>>) {
             tx,
             overruns: Arc::new(AtomicU64::new(0)),
             closed: Arc::new(AtomicBool::new(false)),
+            last_push_ms: Arc::new(AtomicU64::new(0)),
         },
         rx,
     )
@@ -373,6 +394,11 @@ impl AudioHub {
     pub fn overruns(&self) -> u64 {
         self.tx.overruns()
     }
+
+    /// 距上次采集入队的毫秒数（诊断"设备断流"用）。
+    pub fn since_last_push_ms(&self) -> Option<u64> {
+        self.tx.since_last_push_ms()
+    }
 }
 
 /// 是否为「瞬时性」音频后端错误（值得自动重试）。
@@ -487,6 +513,24 @@ mod tests {
         assert!(!is_transient_audio_backend_error(&anyhow::anyhow!(
             "设备被其他应用独占: 0x88890004"
         )));
+    }
+
+    /// 采集心跳：用来区分"设备断流"和"消费端卡住"——两者在界面上都是电平不动。
+    #[test]
+    fn capture_heartbeat_tracks_pushes_even_when_queue_is_full() {
+        let (tx, _rx) = capture_channel();
+        assert!(tx.since_last_push_ms().is_none(), "还没推过时不该有心跳");
+
+        assert!(tx.try_push(vec![0.0; 16]));
+        assert!(tx.since_last_push_ms().is_some_and(|ms| ms < 1000), "推过之后应有心跳");
+
+        // 队列填满后继续推：帧会被丢弃，但"设备还在给数据"这件事必须照常记录，
+        // 否则消费端卡住时会被误判成设备断流。
+        for _ in 0..CAPTURE_QUEUE_CAP + 8 {
+            tx.try_push(vec![0.0; 16]);
+        }
+        assert!(tx.overruns() > 0, "队列应已溢出");
+        assert!(tx.since_last_push_ms().is_some_and(|ms| ms < 1000), "溢出时仍要记心跳");
     }
 
     #[test]

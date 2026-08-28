@@ -75,6 +75,11 @@ impl LoopbackCapture {
         self.tx.overruns()
     }
 
+    /// 距上次采集入队的毫秒数（诊断"设备断流"用）。
+    pub fn since_last_push_ms(&self) -> Option<u64> {
+        self.tx.since_last_push_ms()
+    }
+
     /// 停止采集。
     pub fn stop(&mut self) {
         if let Some(tx) = self.tx_stop.take() {

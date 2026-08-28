@@ -37,6 +37,13 @@ enum SessionCmd {
     Stop,
 }
 
+/// 段结束后等待云端 final 结果的宽限期。
+///
+/// 原来是 15s，且实际会一直等到 WebSocket 的 10s 读超时——而这段等待发生在
+/// 单线程事件循环里，界面表现就是"转写停十几秒再一批吐出来"。final 正常几百毫秒
+/// 就回来，超时用 partial 兜底即可。
+const FINISH_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
 impl AliyunEngine {
     pub fn new(
         app_key: impl Into<String>,
@@ -189,12 +196,17 @@ impl crate::SegmentEngine for AliyunEngine {
         if let Some(ref sess) = self.session {
             let _ = sess.tx.try_send(SessionCmd::Stop);
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        // 这里跑在**单线程事件循环**上：等多久，转写、另一条流、采集消费就停多久
+        // （实测卡 10s 是等到了 WebSocket 的读超时）。云端 final 正常都在几百毫秒内
+        // 回来，等不到就用已有的 partial —— 那通常已经是完整句子，比让界面停十秒强。
+        let started = std::time::Instant::now();
+        let deadline = started + FINISH_GRACE;
         let mut final_text = self.current_partial.clone();
+        let mut got_final = false;
         if let Some(ref mut sess) = self.session {
             while std::time::Instant::now() < deadline {
                 match sess.rx.try_recv() {
-                    Ok(AliyunEvent::Final(t)) => { final_text = t; break; }
+                    Ok(AliyunEvent::Final(t)) => { final_text = t; got_final = true; break; }
                     Ok(AliyunEvent::Partial(t)) => { final_text = t; }
                     Ok(AliyunEvent::Error(e)) => {
                         // IDLE_TIMEOUT 在无语音段时属正常结束，不需要警告
@@ -207,6 +219,15 @@ impl crate::SegmentEngine for AliyunEngine {
                     Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
                 }
             }
+        }
+        // 只在真的等满宽限期时才告警：收到 Error（如 IDLE_TIMEOUT）提前退出属正常
+        if !got_final && started.elapsed() >= FINISH_GRACE {
+            log::warn!(
+                "阿里云 final 未在 {}ms 内返回（等待 {}ms），改用 partial：{} 字",
+                FINISH_GRACE.as_millis(),
+                started.elapsed().as_millis(),
+                final_text.chars().count()
+            );
         }
         // 段结束后总是重置 session，下段建立新连接，避免复用已关闭的后台 task
         self.session = None;

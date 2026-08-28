@@ -137,6 +137,14 @@ pub struct StreamConfig {
     pub terminology: talksage_config::TerminologyConfig,
 }
 
+/// 单次 tick 超过这个时长就告警：事件循环是单线程的，这段时间里转写、另一条流、
+/// 采集消费全都停着，采集队列在后面堆积（512 帧 ≈ 51s，超了开始丢语音）。
+/// 阿里云引擎收尾最多等 1.5s（见 FINISH_GRACE），所以阈值取在它之上，
+/// 避免把"已知的最坏情况"刷成噪音；真正的长阻塞（10s 量级）照样会报出来。
+const LOOP_BLOCK_WARN_MS: u64 = 2000;
+/// 采集侧超过这个时长没有新帧就告警 —— 那是设备断流，不是消费端卡住。
+const CAPTURE_STALL_WARN_MS: u64 = 1500;
+
 /// 实时管道配置。
 #[derive(Clone)]
 pub struct LivePipelineConfig {
@@ -999,6 +1007,19 @@ impl StreamWorker {
         0
     }
 
+    /// 距上次采集入队的毫秒数。用来区分两种同样表现为"界面冻住"的故障：
+    /// 采集还在推数据 → 是消费端（ASR 推理）卡了；采集也停了 → 是设备断流。
+    fn since_last_capture_ms(&self) -> Option<u64> {
+        if let Some(h) = &self.hub {
+            return h.since_last_push_ms();
+        }
+        #[cfg(windows)]
+        if let Some(l) = &self.loopback {
+            return l.since_last_push_ms();
+        }
+        None
+    }
+
     /// 关闭流：收尾未完成的语音段 + 结束录音 + 归还引擎（停止监听/输入结束时调用）。
     fn shutdown(&mut self, emit: &EventSink) {
         let overruns = self.capture_overruns();
@@ -1246,9 +1267,33 @@ fn run_loop(
     });
     log::info!("管道进入事件循环: {} 条流", workers.len());
 
+    // 电平推送独立成线程：它只读两个 atomic，不该被事件循环里的 ASR 推理拖住。
+    // 之前挂在循环里，一次长推理会让界面电平也冻住，用户以为整个程序死了。
+    let level_stop = Arc::new(AtomicBool::new(false));
+    let level_thread = {
+        let emit = emit.clone();
+        let mic_level = mic_level.clone();
+        let loopback_level = loopback_level.clone();
+        let paused = cfg.runtime.paused.clone();
+        let stop = level_stop.clone();
+        std::thread::Builder::new()
+            .name("talksage-level".into())
+            .spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if !paused.load(Ordering::Acquire) {
+                        let mic = f32::from_bits(mic_level.load(Ordering::Relaxed));
+                        let loopback = f32::from_bits(loopback_level.load(Ordering::Relaxed));
+                        fire(&emit, DomainEvent::Level { mic_rms: mic, loopback_rms: loopback });
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            })
+            .ok()
+    };
+
     // 事件循环：轮询各流（出错时先收尾再返回，保证录音完成）
     let mut tick_err: Option<anyhow::Error> = None;
-    let mut last_level_at = std::time::Instant::now();
+    let mut last_stall_check = std::time::Instant::now();
     let mut was_paused = false;
     let mut poll_cursor = RoundRobin::default();
     loop {
@@ -1286,12 +1331,21 @@ fn run_loop(
             continue;
         }
 
-        // 电平指示：节流 100ms 推送（麦克风 / 回环 RMS）
-        if last_level_at.elapsed() >= Duration::from_millis(100) {
-            let mic = f32::from_bits(mic_level.load(Ordering::Relaxed));
-            let loopback = f32::from_bits(loopback_level.load(Ordering::Relaxed));
-            fire(&emit, DomainEvent::Level { mic_rms: mic, loopback_rms: loopback });
-            last_level_at = std::time::Instant::now();
+        // 采集断流巡检：每秒看一次。采集停了 → 设备侧问题；采集在推而这里迟迟
+        // 没轮到 → 是消费端（ASR 推理）卡住。两者界面表现一样，日志必须分得开。
+        if last_stall_check.elapsed() >= Duration::from_secs(1) {
+            for worker in workers.iter() {
+                if let Some(idle_ms) = worker.since_last_capture_ms() {
+                    if idle_ms >= CAPTURE_STALL_WARN_MS {
+                        log::warn!(
+                            "流[{}] 采集断流 {}ms（设备侧无数据，非 ASR 阻塞）",
+                            worker.speaker_label,
+                            idle_ms
+                        );
+                    }
+                }
+            }
+            last_stall_check = std::time::Instant::now();
         }
 
         let mut any_alive = false;
@@ -1305,7 +1359,19 @@ fn run_loop(
                 continue;
             }
             any_alive = true;
-            match worker.tick(&emit) {
+            let tick_started = std::time::Instant::now();
+            let tick_result = worker.tick(&emit);
+            let tick_ms = tick_started.elapsed().as_millis() as u64;
+            if tick_ms >= LOOP_BLOCK_WARN_MS {
+                // 事件循环是单线程的：这段时间里电平之外的一切都停了，
+                // 采集队列同时在堆积（512 帧 ≈ 51s，超了就丢帧丢语音）。
+                log::warn!(
+                    "事件循环被流[{}] 阻塞 {}ms（采集队列在此期间持续堆积）",
+                    worker.speaker_label,
+                    tick_ms
+                );
+            }
+            match tick_result {
                 Ok(processed) => processed_any |= processed,
                 Err(e) => {
                     tick_err = Some(e);
@@ -1320,6 +1386,14 @@ fn run_loop(
         if !processed_any {
             // 所有输入暂时为空时让出 CPU；不再由每个流各阻塞 50ms。
             std::thread::park_timeout(Duration::from_millis(2));
+        }
+    }
+
+    // 电平线程先停：它还在往 emit 上推事件，收尾期间没必要再推
+    level_stop.store(true, Ordering::Relaxed);
+    if let Some(t) = level_thread {
+        if !join_owned_with_timeout(t, Duration::from_millis(500)) {
+            log::warn!("电平推送线程未在 500ms 内退出，放弃等待");
         }
     }
 
