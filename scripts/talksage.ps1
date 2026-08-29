@@ -87,6 +87,20 @@ if ($env:TALKSAGE_BUILD_KEEP_PROXY -ne "1") {
     $env:HTTP_PROXY = ""; $env:HTTPS_PROXY = ""; $env:http_proxy = ""; $env:https_proxy = ""
 }
 $env:CARGO_HOME = Join-Path $Root ".cargo-home"
+# CARGO_HOME 被隔离到项目内后，cargo 只读 $CARGO_HOME/config.toml，不再读
+# ~/.cargo/config.toml —— 用户全局配置里的国内镜像（rsproxy 等）会因此丢失，
+# 导致 "Updating crates.io index" 直连 crates.io 超时。首次自动继承全局配置。
+$CargoHomeConfig = Join-Path $env:CARGO_HOME "config.toml"
+if (-not (Test-Path $CargoHomeConfig)) {
+    foreach ($src in @((Join-Path $env:USERPROFILE ".cargo\config.toml"), (Join-Path $env:USERPROFILE ".cargo\config"))) {
+        if (Test-Path $src) {
+            New-Item -ItemType Directory -Force $env:CARGO_HOME | Out-Null
+            Copy-Item $src $CargoHomeConfig
+            Write-Host "  [cargo] 已继承用户全局 cargo 配置（含镜像）: $CargoHomeConfig" -ForegroundColor DarkGray
+            break
+        }
+    }
+}
 $env:SHERPA_ONNX_ARCHIVE_DIR = Join-Path $Root ".tools\sherpa-onnx-archives"
 # TALKSAGE_* 目录分离（v0.2+）：配置 / 数据 / 日志互不混放。
 #   优先级：外部已设 → 沿用；未设 → 脚本指定项目内目录（不入库）。
@@ -324,9 +338,19 @@ function Cmd-Deps {
     Write-Host "`n依赖就绪。"
 }
 
+# 前端依赖就绪检查：npx tauri / npm run 都依赖 web\node_modules（clean 后会被删除）。
+function Test-FrontendDeps {
+    if (-not (Test-Path (Join-Path $Root "web\node_modules"))) {
+        Write-Host "缺少前端依赖 web\node_modules，请先运行: .\scripts\talksage.ps1 deps（或 cd web; npm install）" -ForegroundColor Yellow
+        return $false
+    }
+    return $true
+}
+
 function Cmd-Build {
     $release = $Rest -contains "--release" -or $Rest -contains "-release"
     Ensure-VulkanEnv
+    if (-not (Test-FrontendDeps)) { return 1 }
     if ($release) {
         Write-Step "全量编译（release + 前端，不打包安装器）"
     } else {
@@ -462,6 +486,7 @@ function Start-App([string]$exe) {
 
 function Cmd-Dev {
     Ensure-DevData
+    if (-not (Test-FrontendDeps)) { return 1 }
     Ensure-VulkanEnv
     # 恢复代理：应用内 HuggingFace 模型下载需要（cargo build 阶段已结束，不再有镜像冲突）
     if ($_SavedHttpProxy)  { $env:HTTP_PROXY  = $_SavedHttpProxy }
@@ -646,6 +671,7 @@ function Ensure-UpdaterKeys {
 
 function Cmd-Package {
     Ensure-VulkanEnv
+    if (-not (Test-FrontendDeps)) { return 1 }
     Ensure-UpdaterKeys
     Write-Step "打包（tauri build：NSIS/MSI + 升级签名）"
     Push-Location (Join-Path $Root "web")
