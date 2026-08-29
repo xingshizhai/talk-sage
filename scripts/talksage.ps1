@@ -628,8 +628,13 @@ function Ensure-UpdaterKeys {
             if (-not $conf.plugins.updater) { $conf.plugins | Add-Member -NotePropertyName updater -NotePropertyValue ([pscustomobject]@{}) }
             if ($conf.plugins.updater.pubkey -ne $pub) {
                 $conf.plugins.updater | Add-Member -NotePropertyName pubkey -NotePropertyValue $pub -Force
-                $conf | ConvertTo-Json -Depth 20 | Set-Content -Path $confPath -Encoding UTF8
-                Write-Host "  [updater] 已把签名公钥写入 web\src-tauri\tauri.conf.json" -ForegroundColor Green
+                # 关键：必须无 BOM 的 UTF-8。Windows PowerShell 5.1 的
+                # Set-Content -Encoding UTF8 会写 BOM，tauri-build 的
+                # serde_json 严格按 JSON 标准解析、不接受 BOM（报
+                # "expected value at line 1 column 1"）。
+                $json = $conf | ConvertTo-Json -Depth 20
+                [System.IO.File]::WriteAllText($confPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+                Write-Host "  [updater] 已把签名公钥写入 web\src-tauri\tauri.conf.json（无 BOM）" -ForegroundColor Green
             } else {
                 Write-Host "  [updater] 签名公钥已就绪" -ForegroundColor DarkGray
             }
