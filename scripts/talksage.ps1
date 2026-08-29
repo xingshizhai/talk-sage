@@ -637,8 +637,9 @@ function Ensure-UpdaterKeys {
             return
         }
     }
-    # 注意：tauri bundler 读的是 TAURI_SIGNING_PRIVATE_KEY_PATH（密钥文件路径）
-    # 和 TAURI_SIGNING_PRIVATE_KEY（密钥内容字符串，二选一）；密码可选。
+    # tauri bundler 实测只认 TAURI_SIGNING_PRIVATE_KEY（密钥内容字符串）；
+    # TAURI_SIGNING_PRIVATE_KEY_PATH（路径）与密码一并设置作为兜底。
+    $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content $keyPath -Raw).Trim()
     $env:TAURI_SIGNING_PRIVATE_KEY_PATH = $keyPath
     if (Test-Path $pwFile) {
         $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content $pwFile -Raw).Trim()
