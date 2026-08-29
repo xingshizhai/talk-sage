@@ -73,12 +73,17 @@ pub struct EngineOptions {
     pub hotword_score: f32,
     /// sherpa-onnx provider: "cpu" | "cuda" | "coreml". Empty string defaults to "cpu".
     pub provider: String,
+    /// 固定解码语言（whisper.cpp 等支持语言参数的引擎使用）：
+    /// `Some("zh")` / `Some("en")` 固定该语言（按场景设定，避免语言漂移）；
+    /// `None` 由模型自动检测。
+    pub language: Option<String>,
 }
 
 impl EngineOptions {
     fn signature(&self) -> String {
         let provider = if self.provider.is_empty() { "cpu" } else { &self.provider };
-        format!("{:.3}|{}|{}", self.hotword_score, self.hotwords.join("\u{1f}"), provider)
+        let lang = self.language.clone().unwrap_or_else(|| "auto".into());
+        format!("{:.3}|{}|{}|{}", self.hotword_score, self.hotwords.join("\u{1f}"), provider, lang)
     }
 }
 
@@ -898,6 +903,18 @@ mod pool_tests {
         let cuda = EngineOptions { provider: "cuda".into(), ..Default::default() };
         assert_ne!(EnginePool::key(EngineKind::Qwen3Asr, dir, &cpu), EnginePool::key(EngineKind::Qwen3Asr, dir, &coreml));
         assert_ne!(EnginePool::key(EngineKind::Qwen3Asr, dir, &coreml), EnginePool::key(EngineKind::Qwen3Asr, dir, &cuda));
+    }
+
+    #[test]
+    fn pool_key_isolated_by_fixed_language() {
+        let dir = Path::new("models/example");
+        let auto = EngineOptions { language: None, ..Default::default() };
+        let zh = EngineOptions { language: Some("zh".into()), ..Default::default() };
+        let en = EngineOptions { language: Some("en".into()), ..Default::default() };
+        assert_ne!(EnginePool::key(EngineKind::WhisperLargeV3TurboMetal, dir, &auto), EnginePool::key(EngineKind::WhisperLargeV3TurboMetal, dir, &zh));
+        assert_ne!(EnginePool::key(EngineKind::WhisperLargeV3TurboMetal, dir, &zh), EnginePool::key(EngineKind::WhisperLargeV3TurboMetal, dir, &en));
+        // 相同语言 → 复用同一实例
+        assert_eq!(EnginePool::key(EngineKind::WhisperLargeV3TurboMetal, dir, &zh), EnginePool::key(EngineKind::WhisperLargeV3TurboMetal, dir, &EngineOptions { language: Some("zh".into()), ..Default::default() }));
     }
 
     #[test]

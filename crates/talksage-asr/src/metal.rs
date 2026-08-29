@@ -42,6 +42,7 @@ pub struct WhisperMetalEngine {
     buffer: Vec<f32>,
     threads: i32,
     initial_prompt: String,
+    language: Option<String>,
     kind: crate::EngineKind,
 }
 
@@ -74,6 +75,7 @@ impl WhisperMetalEngine {
             buffer: Vec::new(),
             threads: num_threads.max(1),
             initial_prompt: options.hotwords.join("，"),
+            language: options.language.clone(),
             kind,
         })
     }
@@ -85,9 +87,19 @@ impl WhisperMetalEngine {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(self.threads);
         params.set_translate(false);
-        // language=None 已表示自动识别。detect_language=true 是 whisper.cpp 的
-        // “只检测语言后退出”模式，会得到语言概率但不生成任何文本。
-        params.set_language(None);
+        // 语言策略：Some(lang) = 按场景固定（关闭自动检测，避免短句/口音/专业词
+        // 漂移到其他语言）；None = 模型每段自动检测。
+        match &self.language {
+            Some(lang) => {
+                params.set_language(Some(lang.as_str()));
+                params.set_detect_language(false);
+                log::debug!("whisper.cpp {BACKEND} 固定语言: {lang}");
+            }
+            None => {
+                params.set_language(None);
+                params.set_detect_language(true);
+            }
+        }
         params.set_no_context(true);
         params.set_single_segment(false);
         params.set_no_timestamps(true);

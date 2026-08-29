@@ -27,6 +27,7 @@ export interface AppConfig {
     aliyun_access_key_secret: string;
     aliyun_app_key: string;
     asr_mode: string;
+    language_mode: string;
     terminology: {
       enabled: boolean;
       hotword_score: number;
