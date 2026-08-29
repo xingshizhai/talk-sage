@@ -603,7 +603,13 @@ pub struct AsrConfig {
     /// ASR 模式："auto" | "local" | "cloud"。
     #[serde(default = "default_asr_mode")]
     pub asr_mode: String,
+    /// 语言策略："scene"（按场景设定每条流的语言，whisper.cpp 固定解码语言，
+    /// 避免自动检测在短句/口音/专业词时漂移到英文）| "auto"（模型自动检测）。
+    #[serde(default = "default_language_mode")]
+    pub language_mode: String,
 }
+
+fn default_language_mode() -> String { "scene".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -657,6 +663,7 @@ impl Default for AsrConfig {
             aliyun_access_key_secret: String::new(),
             aliyun_app_key: String::new(),
             asr_mode: "auto".into(),
+            language_mode: "scene".into(),
         }
     }
 }
@@ -1187,6 +1194,7 @@ fn merge_config(default: Config, user: Config) -> Config {
             aliyun_access_key_secret: user.asr.aliyun_access_key_secret,
             aliyun_app_key: user.asr.aliyun_app_key,
             asr_mode: user.asr.asr_mode,
+            language_mode: user.asr.language_mode,
         },
         audio: AudioConfig {
             mic_device: user.audio.mic_device.or(default.audio.mic_device),
@@ -1496,6 +1504,9 @@ pub fn apply_updates(c: &mut Config, updates: &serde_json::Value) {
         }
         if let Some(v) = asr.get("asr_mode").and_then(|v| v.as_str()) {
             c.asr.asr_mode = v.to_string();
+        }
+        if let Some(v) = asr.get("language_mode").and_then(|v| v.as_str()) {
+            c.asr.language_mode = v.to_string();
         }
         if let Some(v) = asr.get("aliyun_access_key_id").and_then(|v| v.as_str()) {
             c.asr.aliyun_access_key_id = v.trim().to_string();

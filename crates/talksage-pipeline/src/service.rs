@@ -479,12 +479,31 @@ impl TalkSageService {
             snapshot.asr.backend,
         );
         let terminology = snapshot.asr.terminology.clone();
-        let engine_options = talksage_asr::EngineOptions {
+        let scene = snapshot.scene.effective();
+        // 语言策略：language_mode="scene" 时按场景固定每条流的解码语言
+        // （whisper.cpp 等支持语言参数的引擎避免自动检测漂移到英文）；
+        // "auto" 时保留 None（模型自动检测）。
+        let lang_opt = |lang: &str| -> Option<String> {
+            if snapshot.asr.language_mode == "auto" {
+                None
+            } else {
+                let l = lang.trim().to_lowercase();
+                if l.is_empty() || l == "auto" { None } else { Some(l) }
+            }
+        };
+        // user 流 / client 流分开构造：语言不同 → 引擎池键不同，各自独立实例。
+        let user_engine_options = talksage_asr::EngineOptions {
             hotwords: terminology.normalized_terms(),
             hotword_score: terminology.hotword_score.clamp(0.0, 10.0),
             provider: String::new(),
+            language: lang_opt(&scene.language),
         };
-        let scene = snapshot.scene.effective();
+        let client_engine_options = talksage_asr::EngineOptions {
+            hotwords: terminology.normalized_terms(),
+            hotword_score: terminology.hotword_score.clamp(0.0, 10.0),
+            provider: String::new(),
+            language: lang_opt(&scene.client_language),
+        };
         // 引擎解析规则：
         // - Custom 模式：用 scene.user_engine / scene.client_engine（全量用户控制）
         // - Bilingual：user 流 = scene.language 对应引擎，client 流 = scene.client_language 对应引擎
@@ -553,7 +572,7 @@ impl TalkSageService {
                 input,
                 speaker_id: 1,
                 speaker_label: if scene.speaker_mode == SpeakerMode::Off { "讲话者".into() } else { "对方".into() },
-                engine_options: engine_options.clone(),
+                engine_options: client_engine_options.clone(),
                 terminology: terminology.clone(),
             })
         });
@@ -666,7 +685,7 @@ impl TalkSageService {
                 speaker_label: req.user_label.clone().unwrap_or_else(|| {
                     if scene.speaker_mode == SpeakerMode::Off { "讲话者".into() } else { "我".into() }
                 }),
-                engine_options,
+                engine_options: user_engine_options,
                 terminology,
             },
             client,

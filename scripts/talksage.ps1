@@ -18,6 +18,7 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
   .\scripts\talksage.ps1 doctor               # 环境诊断（talksage doctor）
   .\scripts\talksage.ps1 test                 # 全量测试（Rust + Vitest）
   .\scripts\talksage.ps1 package              # 打包（release + NSIS/MSI 安装器 + 升级签名）
+  .\scripts\talksage.ps1 vulkan [--test]      # 只编译 talksage-app（vulkan-gpu）；--test 跑真实 GPU 转写验证
   .\scripts\talksage.ps1 logs                 # 查看最近日志
   .\scripts\talksage.ps1 clean                # 清理构建产物（target/dist/node_modules）
 
@@ -67,13 +68,24 @@ $PSNativeCommandUseErrorActionPreference = $false
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
+# 本机环境覆盖（不入库）：复制 scripts\talksage.local.example.ps1 为 talksage.local.ps1
+# 并按需修改路径，用于 Vulkan SDK / LLVM / Cargo 输出目录 / 数据目录等。
+# 必须在环境隔离区（TALKSAGE_*_DIR 默认值、代理清除）之前加载：
+# local 里设的 TALKSAGE_DATA_DIR 等才会被识别为「外部已设」并沿用。
+$LocalEnv = Join-Path $PSScriptRoot "talksage.local.ps1"
+if (Test-Path $LocalEnv) { . $LocalEnv }
+
 # ── 环境变量（项目内隔离，避免污染用户全局） ──────────────────
 # 保存用户设置的代理（应用内 HuggingFace 模型下载需要走代理）
 $_SavedHttpProxy  = $env:HTTP_PROXY
 $_SavedHttpsProxy = $env:HTTPS_PROXY
-# 清除代理：避免 Cargo/国内镜像请求走代理导致 503/连接失败
-# （仅对 cargo build 生效；Cmd-Dev/Cmd-Run 启动 app 前会恢复代理）
-$env:HTTP_PROXY = ""; $env:HTTPS_PROXY = ""; $env:http_proxy = ""; $env:https_proxy = ""
+# 默认清除代理：避免 Cargo/国内镜像请求走代理导致 503/连接失败
+# （仅对 cargo build 生效；Cmd-Dev/Cmd-Run 启动 app 前会恢复代理）。
+# 本机可在 talksage.local.ps1 设 TALKSAGE_BUILD_KEEP_PROXY=1 保留代理
+# （例如网络必须经代理才能访问 rsproxy.cn 时）。
+if ($env:TALKSAGE_BUILD_KEEP_PROXY -ne "1") {
+    $env:HTTP_PROXY = ""; $env:HTTPS_PROXY = ""; $env:http_proxy = ""; $env:https_proxy = ""
+}
 $env:CARGO_HOME = Join-Path $Root ".cargo-home"
 $env:SHERPA_ONNX_ARCHIVE_DIR = Join-Path $Root ".tools\sherpa-onnx-archives"
 # TALKSAGE_* 目录分离（v0.2+）：配置 / 数据 / 日志互不混放。
@@ -220,11 +232,6 @@ function Get-CliExe     { Find-Exe "debug"   "talksage.exe" }
 function Get-DebugApp   { Find-Exe "debug"   "talksage-app.exe" }
 function Get-ReleaseApp { Find-Exe "release" "talksage-app.exe" }
 
-# 本机环境覆盖（不入库）：复制 scripts\talksage.local.example.ps1 为 talksage.local.ps1
-# 并按需修改路径，用于 Vulkan SDK / LLVM 安装到非默认位置的情况。
-$LocalEnv = Join-Path $PSScriptRoot "talksage.local.ps1"
-if (Test-Path $LocalEnv) { . $LocalEnv }
-
 function Write-Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 
 # 确保配置目录存在，首次自动从模板初始化配置文件。
@@ -357,12 +364,46 @@ function Cmd-Build {
     }
 }
 
+# MSVC 工具链初始化：cargo/cc 链接需要 cl.exe/link.exe 在 PATH 中。
+# 用 vswhere 定位 VS 安装并 dot-source vcvars64.bat 的环境变量（等价于
+# 打开 "Developer PowerShell"）。已初始化（VSCMD_VER 存在）则跳过。
+function Ensure-MsvcEnv {
+    if ($env:VSCMD_VER) { return }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $vswhere)) {
+        Write-Host "警告: 未找到 vswhere.exe，无法定位 MSVC。请从 Developer PowerShell 运行。" -ForegroundColor Yellow
+        return
+    }
+    $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+    if (-not $vsPath) {
+        Write-Host "警告: 未找到含 VC 工具的 Visual Studio 安装。请安装 'Desktop development with C++'。" -ForegroundColor Yellow
+        return
+    }
+    $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+    if (-not (Test-Path $vcvars)) {
+        Write-Host "警告: 未找到 vcvars64.bat（$vcvars）。请安装 'Desktop development with C++'。" -ForegroundColor Yellow
+        return
+    }
+    Write-Host "  [auto] MSVC: $vcvars" -ForegroundColor DarkGray
+    # vcvars64.bat 只能设 cmd 环境变量：在子 cmd 里执行后导出，再逐项写回当前进程
+    $envDump = & cmd /c "call `"$vcvars`" >nul 2>&1 && set"
+    foreach ($line in $envDump) {
+        $idx = $line.IndexOf('=')
+        if ($idx -gt 0) {
+            $name = $line.Substring(0, $idx)
+            $value = $line.Substring($idx + 1)
+            [System.Environment]::SetEnvironmentVariable($name, $value, "Process")
+        }
+    }
+}
+
 # Windows x64 Vulkan 构建环境配置：
 #   自动检测 VULKAN_SDK / LIBCLANG_PATH，设置短 target 路径避免 MAX_PATH，
 #   并配置 RUSTFLAGS 全静态 CRT（与 whisper.cpp /MT 和 sherpa-onnx /MT 一致）。
 # 仅在 Windows x64 上生效，其他平台跳过。
 function Ensure-VulkanEnv {
     if ($env:OS -ne "Windows_NT" -or $env:PROCESSOR_ARCHITECTURE -ne "AMD64") { return }
+    Ensure-MsvcEnv
 
     # VULKAN_SDK：已设则沿用，否则从常见安装位置自动探测
     if (-not $env:VULKAN_SDK) {
@@ -587,8 +628,13 @@ function Ensure-UpdaterKeys {
             if (-not $conf.plugins.updater) { $conf.plugins | Add-Member -NotePropertyName updater -NotePropertyValue ([pscustomobject]@{}) }
             if ($conf.plugins.updater.pubkey -ne $pub) {
                 $conf.plugins.updater | Add-Member -NotePropertyName pubkey -NotePropertyValue $pub -Force
-                $conf | ConvertTo-Json -Depth 20 | Set-Content -Path $confPath -Encoding UTF8
-                Write-Host "  [updater] 已把签名公钥写入 web\src-tauri\tauri.conf.json" -ForegroundColor Green
+                # 关键：必须无 BOM 的 UTF-8。Windows PowerShell 5.1 的
+                # Set-Content -Encoding UTF8 会写 BOM，tauri-build 的
+                # serde_json 严格按 JSON 标准解析、不接受 BOM（报
+                # "expected value at line 1 column 1"）。
+                $json = $conf | ConvertTo-Json -Depth 20
+                [System.IO.File]::WriteAllText($confPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+                Write-Host "  [updater] 已把签名公钥写入 web\src-tauri\tauri.conf.json（无 BOM）" -ForegroundColor Green
             } else {
                 Write-Host "  [updater] 签名公钥已就绪" -ForegroundColor DarkGray
             }
@@ -618,6 +664,61 @@ function Cmd-Logs {
     if (-not $log) { Write-Host "无日志文件"; return }
     Write-Host "=== $($log.Name)（最近 50 行）==="
     Get-Content $log.FullName -Tail 50
+}
+
+function Cmd-Vulkan {
+    $runTest = $Rest -contains "--test" -or $Rest -contains "-test"
+    Ensure-VulkanEnv
+    if (-not $env:VULKAN_SDK) {
+        Write-Host "Vulkan SDK 未就绪，无法构建 vulkan-gpu feature。" -ForegroundColor Red
+        return 1
+    }
+    # tauri-build 编译期把 web\dist 嵌入 App 二进制：前端产物缺失会直接编译失败。
+    # vulkan 命令聚焦 whisper.cpp 编译验证，不负责构建前端——缺失时给出明确指引。
+    $distIndex = Join-Path $Root "web\dist\index.html"
+    if (-not (Test-Path $distIndex)) {
+        Write-Host "前端产物缺失（web\dist\index.html 不存在）。" -ForegroundColor Yellow
+        Write-Host "请先运行 .\scripts\talksage.ps1 build（含前端构建）或 cd web && npm run build，再重试 vulkan。" -ForegroundColor Yellow
+        return 1
+    }
+    Write-Step "Vulkan whisper.cpp 编译（talksage-app + vulkan-gpu）"
+    # 只编译 App：whisper.cpp Vulkan 由 vendor/whisper-rs-sys 的 build.rs
+    # 在编译期 CMake 构建（GGML_VULKAN），这是验证 Vulkan 工具链的最短路径。
+    $code = Invoke-Native { cargo build -p talksage-app --features "tauri/custom-protocol,vulkan-gpu" }
+    if ($code -ne 0) {
+        Write-Host "Vulkan 编译失败" -ForegroundColor Red
+        return 1
+    }
+    $app = Get-DebugApp
+    Write-Host "`nVulkan 编译完成: $app" -ForegroundColor Green
+
+    if ($runTest) {
+        Write-Host "`n=== GPU 推理验证（真实模型转写）===" -ForegroundColor Cyan
+        $wav = Get-ChildItem (Join-Path $Root "models") -Recurse -Filter "*.wav" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 50KB -and $_.Length -lt 2MB } | Select-Object -First 1
+        if (-not $wav) {
+            Write-Host "未找到测试 wav（16kHz），跳过转写验证。可手动验证：talksage listen --input <wav> --engine whisper-large-v3-turbo-metal" -ForegroundColor Yellow
+            return 1
+        }
+        Write-Host "测试音频: $($wav.FullName)" -ForegroundColor DarkGray
+        $cli = Get-CliExe
+        if (-not (Test-Path $cli)) {
+            Write-Host "未找到 CLI 可执行文件（$cli），请先运行 .\scripts\talksage.ps1 build" -ForegroundColor Yellow
+            return 1
+        }
+        # listen 会打印 "ASR 路由已确定: route=..."，GPU 成功时 route 含 Vulkan；
+        # 捕获输出供下方判断（RUST_LOG=info 由脚本默认开启）。
+        $out = & $cli listen --input $wav.FullName --engine whisper-large-v3-turbo-metal --seconds 30 2>&1
+        $joined = $out -join "`n"
+        $out | ForEach-Object { Write-Host $_ }
+        if ($joined -match "route=.*(?i:vulkan|gpu)" -or $joined -match "(?i:provider=vulkan)" -or $joined -match "加速|GPU") {
+            Write-Host "`n✓ GPU 推理验证通过（路由日志含 Vulkan/GPU）" -ForegroundColor Green
+        } else {
+            Write-Host "`n⚠ 未在日志中确认 GPU 路由（可能是 CPU 回退）。检查上方 ASR 路由日志。" -ForegroundColor Yellow
+            return 1
+        }
+    }
+    return 0
 }
 
 function Cmd-Clean {
@@ -652,7 +753,7 @@ function Cmd-Help {
         Write-Host $Matches[1].Trim()
         return
     }
-    Write-Host "用法: .\scripts\talksage.ps1 <env|deps|build|dev|run|serve|listen|import|trim|record|loop|doctor|test|package|logs|clean>"
+    Write-Host "用法: .\scripts\talksage.ps1 <env|deps|build|dev|run|serve|listen|import|trim|record|loop|doctor|test|package|vulkan|logs|clean>"
 }
 
 # ── 分发 ─────────────────────────────────────────────
@@ -671,6 +772,7 @@ switch ($Command.ToLower()) {
     "doctor"  { Cmd-Doctor }
     "test"    { Cmd-Test }
     "package" { Cmd-Package }
+    "vulkan"  { Cmd-Vulkan }
     "logs"    { Cmd-Logs }
     "clean"   { Cmd-Clean }
     default   { Cmd-Help }

@@ -169,6 +169,7 @@ export default function SettingsSection({
   const [engineZh, setEngineZh] = useState<string>(initialEngineZh);
   const [punctEnabled, setPunctEnabled] = useState<boolean>(config?.asr?.punct_enabled ?? true);
   const [asrMode, setAsrMode] = useState(config?.asr?.asr_mode ?? "auto");
+  const [languageMode, setLanguageMode] = useState(config?.asr?.language_mode ?? "scene");
   const configuredBackend = config?.asr?.backend ?? "auto";
   const [asrBackend, setAsrBackend] = useState(
     configuredBackend === "coreml" || configuredBackend === "metal" ? "auto" : configuredBackend,
@@ -509,6 +510,7 @@ export default function SettingsSection({
         backend: asrBackend,
         punct_enabled: punctEnabled,
         asr_mode: asrMode,
+        language_mode: languageMode,
         aliyun_access_key_id: aliyunKeyId,
         aliyun_access_key_secret: aliyunKeySecret,
         aliyun_app_key: aliyunAppKey,
@@ -1092,6 +1094,17 @@ export default function SettingsSection({
             <option value="local">本地优先</option>
             <option value="cloud">阿里云云端</option>
           </select>
+
+          <h3 style={{ ...groupTitle, marginTop: 10 }}>语言策略</h3>
+          <select
+            value={languageMode}
+            onChange={(e) => setLanguageMode(e.target.value)}
+            style={{ ...inputStyle, marginBottom: 4 }}
+          >
+            <option value="scene">按场景设定（推荐）：中文场景固定识别中文，避免偶尔冒出英文</option>
+            <option value="auto">自动检测：模型每段自己判断语言（适合真正中英混说）</option>
+          </select>
+          <div style={hint}>「按场景设定」会按每条输入流的语言固定 whisper.cpp 解码语言（如双语场景：我的流=中文、对方流=英文）；「自动检测」交给模型逐段判断，短句/口音/专业词时可能漂移。</div>
           {asrMode === "local" && (
             <label style={{ ...labelBlock, marginTop: 6 }}>
               <span>本地推理后端</span>

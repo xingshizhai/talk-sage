@@ -15,6 +15,10 @@ engine_en = "qwen3-asr"
 backend = "auto"
 # ASR 模式：auto（本地优先，无 GPU 时回退云端）| local（仅本地）| cloud（仅阿里云）
 asr_mode = "auto"
+# 语言策略：scene（默认，按场景固定每条流的解码语言——中文场景固定 zh，
+# 避免 whisper.cpp 自动检测在短句/口音/专业词时漂移到英文）
+#         | auto（模型每段自动检测语言，适合真正中英混说）
+language_mode = "scene"
 # 标点恢复与语义分段（需安装标点模型）
 punct_enabled = true
 
