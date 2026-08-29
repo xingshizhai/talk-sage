@@ -561,11 +561,17 @@ token = ""
 |---|---|
 | 桌面 / headless 监听 | `StartListen::desktop()` → `service.start` → `SessionRuntime` |
 | CLI `listen` | 同上（共用引擎池）；`--client` 才开双流，否则 `ClientCapture::Off` |
-| GUI / CLI `import` / `transcribe --save` | `talksage-audio::read_audio_file` 解码 WAV / MP3 / MP4(AAC) → mono PCM → 16kHz 重采样 → `StartListen::import_file` → Service |
+| GUI / CLI `import` / `transcribe --save` | `talksage-audio::read_audio_file` 解码 WAV / MP3 / MP4(AAC) → mono PCM → 16kHz 重采样 → `StartListen::import_file` → Service；GUI 导入写入同一个 `running` 槽位并复用事件、暂停、插件、录音、落库和收尾协议 |
 | CLI `session replay` | 解析会话 master 录音后走 `transcribe --save`，另存新会话 |
 | bench / OpenAI `/v1/audio/transcriptions` | `offline::transcribe_file` → `SessionRuntime` |
 
 `ClientCapture::Auto`：场景允许客户流且 Windows → 回环；非 Windows **明确降级为单流并记日志**，不改用麦克风。
+
+文件输入不再是独立的批处理旁路：`start_file_import` 只负责启动并立即返回，后台完成
+监视器是唯一的 `finish` 所有者；自然 EOF 与用户停止都通过 `media_completed` 回执。
+`RuntimeParams.playback_speed` 控制 `FilePacer`，`media_progress` 的位置始终来自已消费采样数，
+因此倍速不会污染转写时间轴。GUI 不显式指定 ASR engine，模型由当前场景与有效 GPU/云端
+路由选择；CLI 的 `--engine` 仍作为显式覆盖。
 
 ### 19.3 SessionRuntime 与 TranscriptState
 

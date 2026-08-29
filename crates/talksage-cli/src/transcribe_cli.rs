@@ -90,7 +90,8 @@ pub fn run(path: &str, engine: &str, save: bool, speaker: &str, json: bool) -> E
         }
         _ => {}
     });
-    let mut req = StartListen::import_file(audio_path, kind, speaker.to_string());
+    let mut req = StartListen::import_file(audio_path, speaker.to_string());
+    req.user_engine = Some(kind);
     req.persist = save;
     let running = match service.start(req, sink) {
         Ok(r) => r,

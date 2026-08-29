@@ -74,12 +74,19 @@ pub(crate) fn join_owned_with_timeout(handle: std::thread::JoinHandle<()>, timeo
 ///
 /// 参考 WhisperLiveKit 的"会话状态与计算解耦"思想：把运行期可调状态集中管理，
 /// 未来新增参数（实时切换 VAD 灵敏度、降噪强度等）只需在此扩展。
-#[derive(Default)]
 pub struct RuntimeParams {
     /// 噪音电平阈值（f32 bits；0 = 关闭）：块 RMS 低于该值的音频静音。
     pub noise_level: Arc<AtomicU32>,
     /// 暂停时继续排空实时设备队列，但不录音、不识别、不推进音频时钟。
     pub paused: Arc<AtomicBool>,
+    /// 文件输入速度（f32 bits，1.0 = 实时，0 = 极速）。
+    pub playback_speed: Arc<AtomicU32>,
+}
+
+impl Default for RuntimeParams {
+    fn default() -> Self {
+        Self::with_noise_level(0.0)
+    }
 }
 
 impl RuntimeParams {
@@ -87,7 +94,17 @@ impl RuntimeParams {
         Self {
             noise_level: Arc::new(AtomicU32::new(level.clamp(0.0, 0.5).to_bits())),
             paused: Arc::new(AtomicBool::new(false)),
+            playback_speed: Arc::new(AtomicU32::new(1.0f32.to_bits())),
         }
+    }
+
+    pub fn set_playback_speed(&self, speed: f32) {
+        let speed = if speed <= 0.0 { 0.0 } else { speed.clamp(0.25, 16.0) };
+        self.playback_speed.store(speed.to_bits(), Ordering::Release);
+    }
+
+    pub fn playback_speed(&self) -> f32 {
+        f32::from_bits(self.playback_speed.load(Ordering::Acquire))
     }
 }
 
@@ -243,6 +260,10 @@ impl LivePipeline {
 
     pub fn is_paused(&self) -> bool {
         self.runtime.paused.load(Ordering::Acquire)
+    }
+
+    pub fn set_playback_speed(&self, speed: f32) {
+        self.runtime.set_playback_speed(speed);
     }
 
     /// 在专用线程中启动管道；返回后可用 `stop()` 停止。
@@ -570,6 +591,8 @@ struct StreamWorker {
     done: bool,
     /// 文件输入实时节拍；None 表示设备输入。
     file_pacer: Option<FilePacer>,
+    file_total_samples: u64,
+    file_processed_samples: u64,
     #[cfg(windows)]
     loopback: Option<talksage_audio::LoopbackCapture>,
     /// final 段完成后的回调（插件触发）。
@@ -720,6 +743,7 @@ impl StreamWorker {
 
         // 文件模式：统一解码 WAV / MP3 / MP4 音轨，转为 16kHz mono 后分块。
         let mut file_chunks = None;
+        let mut file_total_samples = 0u64;
         if let AudioInput::File(path) = &cfg.input {
             let (sample_rate, samples) = talksage_audio::read_audio_file(path)
                 .map_err(|error| anyhow::anyhow!("读取导入音频失败 {}: {error:#}", path.display()))?;
@@ -728,6 +752,7 @@ impl StreamWorker {
                 sample_rate,
                 talksage_audio::TARGET_SAMPLE_RATE,
             );
+            file_total_samples = samples.len() as u64;
             let chunk_size = talksage_audio::TARGET_SAMPLE_RATE as usize * chunk_ms as usize / 1000;
             let chunks: Vec<Vec<f32>> = samples.chunks(chunk_size).map(|c| c.to_vec()).collect();
             file_chunks = Some(chunks.into_iter());
@@ -756,6 +781,8 @@ impl StreamWorker {
             terminology: cfg.terminology.clone(),
             done: false,
             file_pacer,
+            file_total_samples,
+            file_processed_samples: 0,
             #[cfg(windows)]
             loopback: None,
             on_final: None,
@@ -859,7 +886,7 @@ impl StreamWorker {
                 None
             } else if let Some(c) = iter.next() {
                 if let Some(pacer) = &mut self.file_pacer {
-                    pacer.consumed();
+                    pacer.consumed(self.runtime.playback_speed());
                 }
                 Some(c)
             } else {
@@ -878,6 +905,17 @@ impl StreamWorker {
             }
             return Ok(false);
         };
+
+        if self.input_kind == InputKind::File {
+            self.file_processed_samples = (self.file_processed_samples + chunk.len() as u64)
+                .min(self.file_total_samples);
+            let rate = talksage_audio::TARGET_SAMPLE_RATE as u64;
+            emit(DomainEvent::MediaProgress {
+                position_ms: self.file_processed_samples * 1000 / rate,
+                total_ms: self.file_total_samples * 1000 / rate,
+                speed: self.runtime.playback_speed(),
+            });
+        }
 
         // 统计：原始块能量（预处理前，反映环境噪音真实水平）
         let block_rms = if chunk.is_empty() {

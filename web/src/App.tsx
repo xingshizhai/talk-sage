@@ -114,10 +114,9 @@ export default function App() {
   // 文件导入状态
   const [importing, setImporting] = useState(false);
   const [importFile, setImportFile] = useState<string | null>(null);
-  const [importLines, setImportLines] = useState<TimelineLine[]>([]);
   const [importDone, setImportDone] = useState(false);
   const [importSessionId, setImportSessionId] = useState<number | null>(null);
-  const importAccRef = useRef(new TranscriptAccumulator());
+  const [mediaProgress, setMediaProgress] = useState({ positionMs: 0, totalMs: 0, speed: 1 });
   const [noiseLevel, setNoiseLevel] = useState(0); // 0..100（UI 百分比）
   const prevNoiseRef = useRef(-1);
   // onCloseRequested 只注册一次，用 ref 取最新监听状态，避免闭包过期
@@ -173,7 +172,7 @@ export default function App() {
     const off = api.onEvent((ev: DomainEvent) => {
       if (ev.type === "status") {
         setStatus(ev.message);
-        if (ev.stage === "recording") {
+        if (ev.stage === "recording" || ev.stage === "importing") {
           setListening((prev) => {
             if (!prev) {
               // 全新开始：清零计时
@@ -204,11 +203,24 @@ export default function App() {
           });
           setPaused(true);
         }
-        if (ev.stage === "idle" || ev.stage === "asr_ready") {
+        if (ev.stage === "idle") {
           setListening(false);
           setPaused(false);
           timerRef.current = { start: 0, accumMs: 0 };
         }
+      }
+      if (ev.type === "media_progress") {
+        setMediaProgress({ positionMs: ev.position_ms, totalMs: ev.total_ms, speed: ev.speed });
+        setListenElapsed(Math.floor(ev.position_ms / 1000));
+      }
+      if (ev.type === "media_completed") {
+        setImporting(false);
+        setImportDone(!ev.cancelled && !ev.error);
+        setImportSessionId(ev.session_id ?? null);
+        setListening(false);
+        setPaused(false);
+        setStatus(ev.error ? `文件转写失败: ${ev.error}` : ev.cancelled ? "文件转写已停止" : "文件转写完成");
+        if (ev.error) window.alert(`文件转写失败：${ev.error}`);
       }
       if (ev.type === "snapshot") {
         const acc = accumulatorRef.current;
@@ -328,32 +340,6 @@ export default function App() {
     };
   }, []);
 
-  // 文件导入事件：独立频道，与实时转写不干扰
-  useEffect(() => {
-    const off = api.onImportEvent((ev: DomainEvent) => {
-      if (ev.type === "segment") {
-        const acc = importAccRef.current;
-        acc.push(ev);
-        setImportLines(
-          acc.getLines().map((l) => {
-            const st = speakerStyle(l.speakerLabel);
-            return {
-              key: l.key,
-              time: fmtTime(l.tsMs),
-              speaker: l.speakerLabel,
-              speakerColor: st.color,
-              engine: st.engine,
-              text: l.text,
-              isPartial: l.isPartial,
-              translation: undefined,
-            };
-          }),
-        );
-      }
-    });
-    return () => off();
-  }, []);
-
   // headless 的 /config 不返回 scene（浏览器模式），这里必须容缺，否则整页崩在启动阶段
   const currentSceneLabel = config?.scene?.mode ? SCENE_LABELS[config.scene.mode] : "加载中…";
 
@@ -383,7 +369,7 @@ export default function App() {
   ];
 
   const navItems: NavItem[] = [
-    { key: "transcript", label: "语音转写", dot: importing ? "var(--brief)" : listening ? "var(--live)" : "var(--muted)", badge: importing ? String(importLines.length) : String(lines.length), active: navPage === "transcript" },
+    { key: "transcript", label: "语音转写", dot: importing ? "var(--brief)" : listening ? "var(--live)" : "var(--muted)", badge: String(lines.length), active: navPage === "transcript" },
     { key: "history", label: "历史会话", dot: "var(--term)", badge: String(sessions.length), active: navPage === "history" },
     { key: "chat", label: "AI 助手", dot: "var(--me)", badge: "", active: navPage === "chat" },
     { key: "models", label: "模型管理", dot: "var(--client)", badge: "", active: navPage === "models" },
@@ -637,6 +623,7 @@ export default function App() {
     setMetrics(null);
     setNudges([]);
     setMicRms(0);
+    setMediaProgress({ positionMs: 0, totalMs: 0, speed: 1 });
   }, []);
 
   // 设置页是切走即卸载：有未保存改动时先确认，否则改动静默丢失（尤其是场景模式，
@@ -691,41 +678,40 @@ export default function App() {
     const path = await api.pickAudioFile();
     if (!path) return;
     const filename = path.replace(/\\/g, "/").split("/").pop() ?? path;
-    importAccRef.current = new TranscriptAccumulator();
-    setImportLines([]);
+    resetLiveSession();
     setImportFile(filename);
     setImportDone(false);
     setImportSessionId(null);
     setImporting(true);
+    setListening(true);
+    setStatus("正在加载媒体与 ASR…");
     setNavPage("transcript");
     try {
       const sid = await api.startFileImport(path);
       setImportSessionId(sid);
-      setImportDone(true);
     } catch (e) {
       const msg = String(e);
       if (!msg.includes("已取消")) {
         window.alert(`导入失败：${msg}`);
       }
       setImportFile(null);
-    } finally {
       setImporting(false);
+      setListening(false);
     }
-  }, [confirmLeaveSettings, listening, importing]);
+  }, [confirmLeaveSettings, listening, importing, resetLiveSession]);
 
   /** 取消正在进行的文件导入。 */
   const handleCancelImport = useCallback(async () => {
-    await api.cancelFileImport().catch(() => {});
+    await api.stopListen().catch((error) => setStatus(`停止失败: ${error}`));
   }, []);
 
   /** 重置文件导入区域，回到空白状态。 */
   const handleResetImport = useCallback(() => {
     setImportFile(null);
-    setImportLines([]);
     setImportDone(false);
     setImportSessionId(null);
-    importAccRef.current = new TranscriptAccumulator();
-  }, []);
+    resetLiveSession();
+  }, [resetLiveSession]);
 
   /** 确认关闭：先优雅停止监听（会话落库、录音收尾），再退出应用。 */
   const handleConfirmClose = useCallback(async () => {
@@ -959,7 +945,24 @@ export default function App() {
                   : <span style={{ color: "var(--live)", fontWeight: 600 }}>✓ 转写完成</span>
                 }
                 <span style={{ color: "var(--muted)" }}>{importFile}</span>
-                <span style={{ color: "var(--muted)", fontSize: 11 }}>{importLines.length} 段</span>
+                <span style={{ color: "var(--muted)", fontSize: 11 }}>{lines.length} 段</span>
+                {importing && mediaProgress.totalMs > 0 && (
+                  <>
+                    <progress value={mediaProgress.positionMs} max={mediaProgress.totalMs} style={{ width: 130 }} />
+                    <span style={{ color: "var(--muted)", fontSize: 11 }}>
+                      {fmtTime(mediaProgress.positionMs)} / {fmtTime(mediaProgress.totalMs)}
+                    </span>
+                    {[1, 2, 4, 0].map((speed) => (
+                      <button
+                        key={speed}
+                        onClick={() => api.setFilePlaybackSpeed(speed).catch((error) => setStatus(`调速失败: ${error}`))}
+                        style={{ padding: "3px 7px", borderRadius: 6, cursor: "pointer", border: "1px solid var(--border)", background: mediaProgress.speed === speed ? "var(--live)" : "var(--surface)", color: mediaProgress.speed === speed ? "#fff" : "var(--text)" }}
+                      >
+                        {speed === 0 ? "极速" : `${speed}x`}
+                      </button>
+                    ))}
+                  </>
+                )}
                 <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
                   {importing && (
                     <button onClick={handleCancelImport} style={{ padding: "4px 12px", borderRadius: 7, cursor: "pointer", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)" }}>
@@ -1000,13 +1003,12 @@ export default function App() {
               mode={mode}
               setMode={(m) => { setMode(m); saveTranscriptMode(m); }}
               meta={importing || importDone
-                ? `${importLines.length} 段 · 文件导入`
+                ? `${lines.length} 段 · 文件导入`
                 : `${lines.length} 段 · ${mode === "timeline" ? "时间线" : mode === "focus" ? "专注" : "密集"}`}
-              lines={importing || importDone ? importLines : lines}
+              lines={lines}
               timer={{ listening, paused, seconds: listenElapsed }}
             />
-            {!importing && !importDone && (
-              <KeyPointsCard
+            <KeyPointsCard
                 points={points}
                 flushRecords={flushRecords}
                 dismissedKeys={dismissedPointKeys}
@@ -1038,7 +1040,6 @@ export default function App() {
                   return "已禁用";
                 })()}
               />
-            )}
           </>
         )}
 

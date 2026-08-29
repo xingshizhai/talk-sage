@@ -186,6 +186,8 @@ export interface SpeakerAttribution {
 }
 
 export type DomainEvent =
+  | { type: "media_progress"; position_ms: number; total_ms: number; speed: number }
+  | { type: "media_completed"; session_id?: number | null; cancelled: boolean; error?: string }
   | {
       type: "segment";
       speaker_id: number;
@@ -559,13 +561,10 @@ export interface AppApi {
   pickAudioFile(): Promise<string | null>;
   /** 打开系统文件夹对话框，选择知识库 / Obsidian 仓库目录；取消时返回 null。 */
   pickFolder(): Promise<string | null>;
-  /** 导入本地录音文件：全量转写并落库，返回创建的 session_id。
-   *  转写期间通过 onImportEvent 推送进度；可调用 cancelFileImport 中止。 */
+  /** 启动本地媒体会话，立即返回 session_id；事件通过统一 onEvent 推送。 */
   startFileImport(path: string): Promise<number>;
-  /** 取消正在进行的文件导入。 */
-  cancelFileImport(): Promise<void>;
-  /** 订阅文件导入事件流（独立频道，不影响实时转写），返回取消函数。 */
-  onImportEvent(handler: (ev: DomainEvent) => void): () => void;
+  /** 调整文件会话处理速度；0 表示极速。 */
+  setFilePlaybackSpeed(speed: number): Promise<void>;
   /** 在线检查更新（框架；未配置公钥时 configured=false）。 */
   checkForUpdates(): Promise<UpdateCheckResult>;
   /** 选择离线升级包；取消时返回 null。仅桌面。Windows：NSIS/MSI；macOS：.dmg/.app。 */

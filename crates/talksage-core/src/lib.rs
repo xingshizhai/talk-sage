@@ -89,6 +89,19 @@ impl SpeakerAttribution {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DomainEvent {
+    /// 导入媒体的播放位置。文件导入与实时监听共用事件通道和会话管线。
+    MediaProgress {
+        position_ms: u64,
+        total_ms: u64,
+        speed: f32,
+    },
+    /// 导入媒体完成（自然结束或用户停止）；此时会话已经收尾并落库。
+    MediaCompleted {
+        session_id: Option<i64>,
+        cancelled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// 转写片段（增量或最终）。speaker_id: 0=我, 1=客户, >1=其他说话人（diarization 预留）。
     Segment {
         speaker_id: u32,
@@ -285,11 +298,12 @@ impl DomainEvent {
             | DomainEvent::State { .. }
             | DomainEvent::Metrics { .. }
             | DomainEvent::Nudge { .. }
+            | DomainEvent::MediaCompleted { .. }
             | DomainEvent::ModelProgress { .. } => DeliveryClass::Replayable,
             // 增量只在生成过程中有意义：漏了就重开一次；完整回答落在 chat_messages 表里
             DomainEvent::ChatDelta { .. } => DeliveryClass::Ephemeral,
             // 一次性回执，只对当下那次点击有意义
-            DomainEvent::KeyPointFlush { .. } => DeliveryClass::Ephemeral,
+            DomainEvent::KeyPointFlush { .. } | DomainEvent::MediaProgress { .. } => DeliveryClass::Ephemeral,
         }
     }
 }

@@ -158,13 +158,15 @@ idle（已停止，落库 + 录音收尾 + finalizer）
 
 两侧实现同一 `AppApi` 接口，业务层（App.tsx）零分支。
 
-### 3.5 计时器与各模式的关系
+### 3.5 实时输入与文件输入统一会话
 
-- 计时器**只属于实时监听会话**：文件导入（`importing`）复用转写卡片但不传
-  `timer`（`timer={{listening, paused, seconds}}` 仅在非导入分支传入）。
-- 暂停模式（`paused`）直接体现在计时器上：冻结 + 黄色状态，与侧栏「暂停」
-  状态一致。
-- 场景/视图模式切换不影响计时（计时是会话级，不是渲染级）。
+- 麦克风和导入媒体均写入 `AppState.running`，使用同一个 `talksage://event` 事件流；
+  前端只有一套 transcript / term / key-point / translation 状态。
+- 文件会话启动命令立即返回 `session_id`，后台在 EOF 或用户停止后统一调用
+  `TalkSageService::finish`，随后发出 `media_completed`。界面不会自动跳到历史页。
+- `media_progress` 以音频采样位置驱动时间和进度，不使用墙钟；1×/2×/4×/极速只改变
+  文件块调度节拍，不改变音频时间戳。暂停时进度与计时同时冻结。
+- 导入文件也生成会话主录音，因此历史回放、导出和质量评估与实时监听一致。
 
 ---
 
