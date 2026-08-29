@@ -1,4 +1,5 @@
 // 实时转写卡片：3 视图模式（时间线 / 专注 / 密集）+ 自动滚动 + 智能句读分句。
+// 头部右侧带会话计时器（监听中实时累计；暂停冻结；格式 H:MM:SS / MM:SS）。
 
 import { useEffect, useRef } from "react";
 import { punctuateAndSplit } from "../lib/transcript";
@@ -16,16 +17,29 @@ export interface TimelineLine {
   translation?: string;
 }
 
+/** 格式化秒数为 H:MM:SS（<1h 时 MM:SS）。 */
+export function fmtElapsed(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${p(m)}:${p(sec)}` : `${p(m)}:${p(sec)}`;
+}
+
 export default function TranscriptCard({
   mode,
   setMode,
   meta,
   lines,
+  timer,
 }: {
   mode: TranscriptMode;
   setMode: (m: TranscriptMode) => void;
   meta: string;
   lines: TimelineLine[];
+  /** 会话计时器：null = 不显示（非监听会话，如文件导入）。 */
+  timer?: { listening: boolean; paused: boolean; seconds: number };
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -61,6 +75,38 @@ export default function TranscriptCard({
         <b style={{ fontSize: 13 }}>实时转写</b>
         <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>{meta}</span>
         <div style={{ flex: 1 }} />
+        {timer && timer.listening && (
+          <span
+            title={timer.paused ? "已暂停（计时冻结）" : "实时转写时长"}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 7,
+              padding: "3px 10px",
+              borderRadius: 8,
+              border: "1px solid var(--border)",
+              background: timer.paused ? "var(--brief-soft, var(--surface-2))" : "var(--live-soft)",
+              color: timer.paused ? "var(--brief)" : "var(--live)",
+              fontFamily: "monospace",
+              fontWeight: 700,
+              fontSize: 15,
+              letterSpacing: "0.04em",
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            <span
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                background: timer.paused ? "var(--brief)" : "var(--danger)",
+                animation: timer.paused ? undefined : "talksageBlink 1.4s ease-in-out infinite",
+                flexShrink: 0,
+              }}
+            />
+            {fmtElapsed(timer.seconds)}
+          </span>
+        )}
         {modes.map((m) => (
           <button
             key={m.key}

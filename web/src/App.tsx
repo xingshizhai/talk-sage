@@ -9,7 +9,7 @@ import { termKey } from "./lib/terms";
 import { cssVars, type Theme } from "./lib/theme";
 import { loadTheme, saveTheme, loadTranscriptMode, saveTranscriptMode, loadAsideCollapsed, saveAsideCollapsed } from "./lib/prefs";
 import SideNav, { type HealthRow, type NavItem } from "./components/SideNav";
-import TranscriptCard, { type TimelineLine, type TranscriptMode } from "./components/TranscriptCard";
+import TranscriptCard, { fmtElapsed, type TimelineLine, type TranscriptMode } from "./components/TranscriptCard";
 import KeyPointsCard from "./components/KeyPointsCard";
 import AsidePanel from "./components/AsidePanel";
 import HistorySection from "./sections/HistorySection";
@@ -76,8 +76,10 @@ export default function App() {
   const [listening, setListening] = useState(false);
   const [paused, setPaused] = useState(false);
   const [status, setStatus] = useState<string>("待机");
-  const [listenStartTime, setListenStartTime] = useState<number | null>(null);
   const [listenElapsed, setListenElapsed] = useState(0);
+  // 计时核心：{ start: 当前活跃段起点（暂停时置 0）, accumMs: 暂停前已累计毫秒 }。
+  // 用 ref 避免 onEvent 一次性注册闭包里的过期值；暂停期间 accumMs 冻结、计时不走。
+  const timerRef = useRef({ start: 0, accumMs: 0 });
   // 启动默认进入「实时转写」页（不跨启动恢复导航页）
   const [navPage, setNavPage] = useState<string>("transcript");
   // 设置页有未保存改动（由 SettingsSection 上报）：离开前需要确认。
@@ -172,17 +174,40 @@ export default function App() {
       if (ev.type === "status") {
         setStatus(ev.message);
         if (ev.stage === "recording") {
-          setListening((prev) => { if (!prev) { setListenStartTime(Date.now()); setListenElapsed(0); } return true; });
+          setListening((prev) => {
+            if (!prev) {
+              // 全新开始：清零计时
+              timerRef.current = { start: Date.now(), accumMs: 0 };
+              setListenElapsed(0);
+            } else {
+              // 从暂停恢复：start 重新指向当前时刻，保留已累计时长
+              timerRef.current = { ...timerRef.current, start: Date.now() };
+            }
+            return true;
+          });
           setPaused(false);
         }
         if (ev.stage === "paused") {
-          setListening((prev) => { if (!prev) { setListenStartTime(Date.now()); setListenElapsed(0); } return true; });
+          setListening((prev) => {
+            if (!prev) {
+              // 异常顺序（未 recording 直接 paused）：按全新开始处理
+              timerRef.current = { start: Date.now(), accumMs: 0 };
+              setListenElapsed(0);
+            } else {
+              // 正常暂停：把当前活跃段累计进 accumMs，start 冻结（暂停期间不走表）
+              const t = timerRef.current;
+              if (t.start > 0) {
+                timerRef.current = { start: 0, accumMs: t.accumMs + (Date.now() - t.start) };
+              }
+            }
+            return true;
+          });
           setPaused(true);
         }
         if (ev.stage === "idle" || ev.stage === "asr_ready") {
           setListening(false);
           setPaused(false);
-          setListenStartTime(null);
+          timerRef.current = { start: 0, accumMs: 0 };
         }
       }
       if (ev.type === "snapshot") {
@@ -349,7 +374,7 @@ export default function App() {
       value: paused
         ? "暂停"
         : listening
-          ? `活跃 ${String(Math.floor(listenElapsed / 60)).padStart(2, "0")}:${String(listenElapsed % 60).padStart(2, "0")}`
+          ? `活跃 ${fmtElapsed(listenElapsed)}`
           : "待机",
     },
     { dot: "var(--client)", label: "客户流(VAD)", value: "双流" },
@@ -414,12 +439,16 @@ export default function App() {
     }
   }, [listening]);
 
-  // 监听中每秒更新计时器
+  // 监听中每秒更新计时器（暂停期间 accumMs 冻结、start=0，显示值不变）
   useEffect(() => {
-    if (!listenStartTime) { setListenElapsed(0); return; }
-    const id = setInterval(() => setListenElapsed(Math.floor((Date.now() - listenStartTime) / 1000)), 1000);
+    if (!listening) { setListenElapsed(0); return; }
+    const id = setInterval(() => {
+      const t = timerRef.current;
+      const totalMs = t.accumMs + (t.start > 0 ? Date.now() - t.start : 0);
+      setListenElapsed(Math.floor(totalMs / 1000));
+    }, 1000);
     return () => clearInterval(id);
-  }, [listenStartTime]);
+  }, [listening]);
 
   const handleHistorySearch = useCallback(async (q: string) => {
     setDetail(null);
@@ -624,7 +653,8 @@ export default function App() {
         await api.stopListen();
         setListening(false);
         setPaused(false);
-        setListenStartTime(null);
+        timerRef.current = { start: 0, accumMs: 0 };
+        setListenElapsed(0);
         setStatus("已停止");
       } else {
         setStatus("启动中…");
@@ -713,7 +743,7 @@ export default function App() {
         ]);
         setListening(false);
         setPaused(false);
-        setListenStartTime(null);
+        timerRef.current = { start: 0, accumMs: 0 };
       }
     } finally {
       // 优先优雅销毁窗口；destroy 不触发 close-requested，不会再次进入守卫循环。
@@ -838,7 +868,7 @@ export default function App() {
               color: listening ? "var(--live)" : "var(--muted)",
             }}
           >
-            {listening ? `● ${currentSceneLabel} · ${String(Math.floor(listenElapsed / 60)).padStart(2, "0")}:${String(listenElapsed % 60).padStart(2, "0")}` : status}
+            {listening ? `● ${currentSceneLabel} · ${fmtElapsed(listenElapsed)}` : status}
           </span>
           )}
         </div>
@@ -973,6 +1003,7 @@ export default function App() {
                 ? `${importLines.length} 段 · 文件导入`
                 : `${lines.length} 段 · ${mode === "timeline" ? "时间线" : mode === "focus" ? "专注" : "密集"}`}
               lines={importing || importDone ? importLines : lines}
+              timer={{ listening, paused, seconds: listenElapsed }}
             />
             {!importing && !importDone && (
               <KeyPointsCard
