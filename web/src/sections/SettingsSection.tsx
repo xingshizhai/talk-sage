@@ -15,7 +15,7 @@ const VOICE_ENROLL_SECONDS = 16;
 const VOICE_ENROLL_TEXT =
   "你好，我正在为拓思者录制声音标识。今天阳光明亮，我会清楚、自然、连续地读完这段文字。会议结束后，请帮我整理重点、时间和下一步行动。";
 
-type SettingsTab = "scene" | "asr" | "audio" | "terminology" | "plugins" | "quality" | "voice" | "llm" | "webhooks" | "network" | "upgrade";
+type SettingsTab = "scene" | "asr" | "audio" | "terminology" | "plugins" | "voice" | "llm" | "webhooks" | "network" | "upgrade";
 
 /** 场景清单：chip 渲染与「当前生效场景」文案共用同一份数据。 */
 const SCENE_MODES: { key: SceneMode; label: string; desc: string }[] = [
@@ -37,7 +37,7 @@ const TAB_OF_PATH: { prefix: string; tab: SettingsTab }[] = [
   { prefix: "recording.", tab: "audio" },
   { prefix: "plugins.", tab: "plugins" },
   { prefix: "knowledge_base.", tab: "plugins" },
-  { prefix: "quality.", tab: "quality" },
+  { prefix: "quality.", tab: "audio" }, // 会话质量阈值并入「音频与录音」
   { prefix: "llm.", tab: "llm" },
   { prefix: "webhooks.", tab: "webhooks" },
   { prefix: "network.", tab: "network" },
@@ -75,10 +75,9 @@ function DirtyDot({ inset }: { inset?: boolean }) {
 const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "scene", label: "场景模式", desc: "听写 / 会话 / 双语 / 会议 / 课堂 / 自定义" },
   { key: "asr", label: "ASR 转写", desc: "引擎 / 输入增益" },
-  { key: "audio", label: "音频与录音", desc: "采集 / 灵敏度 / 断句 / 降噪 / 录音" },
+  { key: "audio", label: "音频与录音", desc: "采集 / 灵敏度 / 断句 / 降噪 / 质量阈值 / 录音" },
   { key: "terminology", label: "术语纠错", desc: "热词与误识别替换" },
   { key: "plugins", label: "插件", desc: "专业术语 / 翻译 / 简报 / 要点聚合" },
-  { key: "quality", label: "噪音检测", desc: "会话质量阈值" },
   { key: "voice", label: "声音标识", desc: "注册主人声音，识别说话人" },
   { key: "llm", label: "LLM", desc: "默认模型与密钥" },
   { key: "webhooks", label: "Webhook", desc: "会议结束推送（n8n/Zapier/CRM）" },
@@ -196,7 +195,11 @@ export default function SettingsSection({
   const [endpointForceQuietMs, setEndpointForceQuietMs] = useState(config?.audio?.endpoint?.force_quiet_ms ?? 850);
   const [recEnabled, setRecEnabled] = useState(config?.recording?.enabled ?? true);
   const [recDir, setRecDir] = useState<string>(config?.recording?.dir ?? "");
-  const [qAutoDetect, setQAutoDetect] = useState(config?.quality?.auto_detect ?? true);
+  // 自动检测背景噪音：实际生效字段是 scene.custom.noise_auto_detect（pipeline
+  // finalize 用场景值覆盖 quality.auto_detect）。与场景 tab 自定义模式共用同一
+  // 开关（同一 state），避免两处不一致；qAutoDetect 仅为 audio tab 内联副本。
+  const qAutoDetect = sceneCustom.noise_auto_detect;
+  const setQAutoDetect = (v: boolean) => setSceneCustom({ ...sceneCustom, noise_auto_detect: v });
   const [qTextNoise, setQTextNoise] = useState(config?.quality?.text_noise_threshold ?? 0.45);
   const [qMinRatio, setQMinRatio] = useState(config?.quality?.min_speech_ratio ?? 0.15);
   const [qMaxRatio, setQMaxRatio] = useState(config?.quality?.max_speech_ratio ?? 0.85);
@@ -536,8 +539,9 @@ export default function SettingsSection({
         enabled: recEnabled,
         dir: recDir.trim(),
       },
+      // auto_detect 实际由场景级 scene.custom.noise_auto_detect 生效（finalize 覆盖），
+      // 这里只提交阈值；开关已并入场景字段，避免两处脏点与误导。
       quality: {
-        auto_detect: qAutoDetect,
         text_noise_threshold: qTextNoise,
         min_speech_ratio: qMinRatio,
         max_speech_ratio: qMaxRatio,
@@ -629,7 +633,7 @@ export default function SettingsSection({
     setMessage("");
     try {
       await onSave({ quality: null }); // Rust 侧：null → 恢复默认
-      setQAutoDetect(true);
+      setSceneCustom((s) => ({ ...s, noise_auto_detect: true }));
       setQTextNoise(0.45);
       setQMinRatio(0.15);
       setQMaxRatio(0.85);
@@ -1253,6 +1257,42 @@ export default function SettingsSection({
           <div style={hint}>
             保存的录音用于历史回放与测试闭环：<code style={{ color: "var(--term)" }}>talksage trim &lt;录音.wav&gt;</code> 去掉静音后，再回放验证转写。
           </div>
+
+          <h3 style={{ ...groupTitle, marginTop: 10 }}>会话质量评估（噪音判定）</h3>
+          <label style={labelBlock}>
+            <input type="checkbox" checked={qAutoDetect} onChange={(e) => setQAutoDetect(e.target.checked)} /> 自动检测背景噪音并自动设置阈值
+          </label>
+          {qAutoDetect ? (
+            <div style={hint}>
+              监听时自动测量非语音段的背景噪音水平，并据此设置静音/高能量阈值（静音 = 背景×1.5，高能量 = 背景×5）。无需手工调整。
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 6, fontSize: 12 }}>
+              <label>
+                文本噪音阈值（0~1，默认 0.45）：
+                <input type="number" min={0.05} max={0.95} step={0.05} value={qTextNoise} onChange={(e) => setQTextNoise(Number(e.target.value))} style={numStyle} />
+              </label>
+              <label>
+                静音语音占比下限（默认 0.15）：
+                <input type="number" min={0.05} max={0.5} step={0.05} value={qMinRatio} onChange={(e) => setQMinRatio(Number(e.target.value))} style={numStyle} />
+              </label>
+              <label>
+                持续噪音语音占比上限（默认 0.85）：
+                <input type="number" min={0.5} max={0.98} step={0.05} value={qMaxRatio} onChange={(e) => setQMaxRatio(Number(e.target.value))} style={numStyle} />
+              </label>
+              <label>
+                静音能量阈值（RMS，默认 0.01）：
+                <input type="number" min={0.001} max={0.1} step={0.005} value={qSilenceRms} onChange={(e) => setQSilenceRms(Number(e.target.value))} style={numStyle} />
+              </label>
+              <label>
+                高能量噪音阈值（RMS，默认 0.5）：
+                <input type="number" min={0.1} max={1} step={0.05} value={qHighRms} onChange={(e) => setQHighRms(Number(e.target.value))} style={numStyle} />
+              </label>
+            </div>
+          )}
+          <div style={hint}>
+            噪音/静音会话会自动跳过要点聚合等下游分析，历史详情可见质量标记。自动检测开关与「场景模式 → 自定义」中的同一开关同步（实际生效字段在场景级）。
+          </div>
         </div>
       )}
 
@@ -1324,45 +1364,6 @@ export default function SettingsSection({
           <div style={hint}>
             会中由「简报检索」插件检索此目录下的 .md/.txt。Obsidian 的 .obsidian / .trash 不会进索引。保存后下次监听生效。
           </div>
-        </div>
-      )}
-
-      {/* ── 噪音检测 ── */}
-      {tab === "quality" && (
-        <div>
-          <h3 style={groupTitle}>会话质量评估</h3>
-          <label style={labelBlock}>
-            <input type="checkbox" checked={qAutoDetect} onChange={(e) => setQAutoDetect(e.target.checked)} /> 自动检测背景噪音并自动设置阈值
-          </label>
-          {qAutoDetect ? (
-            <div style={hint}>
-              监听时自动测量非语音段的背景噪音水平，并据此设置静音/高能量阈值（静音 = 背景×1.5，高能量 = 背景×5）。无需手工调整。
-            </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 6, fontSize: 12 }}>
-              <label>
-                文本噪音阈值（0~1，默认 0.45）：
-                <input type="number" min={0.05} max={0.95} step={0.05} value={qTextNoise} onChange={(e) => setQTextNoise(Number(e.target.value))} style={numStyle} />
-              </label>
-              <label>
-                静音语音占比下限（默认 0.15）：
-                <input type="number" min={0.05} max={0.5} step={0.05} value={qMinRatio} onChange={(e) => setQMinRatio(Number(e.target.value))} style={numStyle} />
-              </label>
-              <label>
-                持续噪音语音占比上限（默认 0.85）：
-                <input type="number" min={0.5} max={0.98} step={0.05} value={qMaxRatio} onChange={(e) => setQMaxRatio(Number(e.target.value))} style={numStyle} />
-              </label>
-              <label>
-                静音能量阈值（RMS，默认 0.01）：
-                <input type="number" min={0.001} max={0.1} step={0.005} value={qSilenceRms} onChange={(e) => setQSilenceRms(Number(e.target.value))} style={numStyle} />
-              </label>
-              <label>
-                高能量噪音阈值（RMS，默认 0.5）：
-                <input type="number" min={0.1} max={1} step={0.05} value={qHighRms} onChange={(e) => setQHighRms(Number(e.target.value))} style={numStyle} />
-              </label>
-            </div>
-          )}
-          <div style={hint}>噪音/静音会话会自动跳过要点聚合等下游分析，历史详情可见质量标记。</div>
         </div>
       )}
 
@@ -1636,7 +1637,7 @@ export default function SettingsSection({
         {baseline !== null && dirtyCount === 0 && !saving && !message && (
           <span style={{ fontSize: 11, color: "var(--muted)" }}>已保存</span>
         )}
-        {tab === "quality" && (
+        {tab === "audio" && (
           <button onClick={handleResetQuality} disabled={saving} style={{ fontSize: 12 }}>
             恢复噪音阈值默认
           </button>
