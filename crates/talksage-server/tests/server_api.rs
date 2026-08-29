@@ -44,7 +44,11 @@ fn test_state() -> ServerState {
         talksage_asr::EnginePool::new(),
     );
     ServerState {
-        chat: Arc::new(talksage_pipeline::chat::ChatService::new(config.clone(), sessions.clone())),
+        chat: Arc::new(talksage_pipeline::chat::ChatService::with_knowledge(
+            config.clone(),
+            sessions.clone(),
+            service.knowledge(),
+        )),
         config,
         sessions,
         events: tx,
@@ -170,8 +174,8 @@ async fn plugins_endpoint_lists_every_builtin_plugin() {
         assert!(m["id"].as_str().is_some_and(|s| !s.is_empty()), "缺少 id: {m}");
         assert!(m["label"].as_str().is_some_and(|s| !s.is_empty()), "缺少 label: {m}");
         assert!(m["description"].as_str().is_some_and(|s| !s.is_empty()), "缺少 description: {m}");
-        assert!(matches!(m["category"].as_str(), Some("analysis" | "infrastructure")));
-        assert!(matches!(m["phase"].as_str(), Some("filter" | "observer" | "finalizer")));
+        assert!(matches!(m["category"].as_str(), Some("analysis" | "infrastructure" | "knowledge_source")));
+        assert!(matches!(m["phase"].as_str(), Some("filter" | "observer" | "finalizer" | "source")));
         assert!(m["capabilities"].is_array());
         assert!(m["after"].is_array());
         assert!(m["schema"]["enabled"].is_boolean(), "缺少 schema.enabled: {m}");
@@ -278,7 +282,11 @@ async fn export_returns_markdown_for_session() {
             talksage_asr::EnginePool::new(),
         );
         ServerState {
-            chat: Arc::new(talksage_pipeline::chat::ChatService::new(config.clone(), sessions.clone())),
+            chat: Arc::new(talksage_pipeline::chat::ChatService::with_knowledge(
+                config.clone(),
+                sessions.clone(),
+                service.knowledge(),
+            )),
             config,
             sessions,
             events: tx,

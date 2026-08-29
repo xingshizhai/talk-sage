@@ -56,10 +56,13 @@ pub async fn run(host: &str, port: u16, token: &str, web_dist: &PathBuf) -> Resu
     );
     let (tx, _rx) = broadcast::channel::<DomainEvent>(256);
     let service = TalkSageService::new(config.clone(), Some(sessions.clone()), EnginePool::new());
-    // 上次异常退出的残留（未完成录音 + 未结束会话），在对外服务前先收拾干净。
     service.recover_on_startup();
     let state = ServerState {
-        chat: Arc::new(talksage_pipeline::chat::ChatService::new(config.clone(), sessions.clone())),
+        chat: Arc::new(talksage_pipeline::chat::ChatService::with_knowledge(
+            config.clone(),
+            sessions.clone(),
+            service.knowledge(),
+        )),
         config,
         sessions,
         events: tx,
@@ -117,6 +120,7 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/session/{id}/highlights", axum::routing::post(generate_highlights_api))
         .route("/llm/test", axum::routing::post(test_llm_api))
         .route("/logs", get(read_logs_api))
+        .route("/knowledge/documents", get(list_knowledge_documents_api))
         .route("/listen/start", axum::routing::post(start_listen_api))
         .route("/listen/stop", axum::routing::post(stop_listen_api))
         .route("/listen/pause", axum::routing::post(pause_listen_api))
@@ -548,7 +552,11 @@ async fn save_config_api(
         .update(|c| {
             talksage_config::apply_updates(c, &updates);
         }) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Ok(()) => {
+            state.service.knowledge().invalidate();
+            state.service.knowledge().refresh();
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
 }
@@ -868,8 +876,17 @@ async fn generate_notes_api(
     let Ok(detail) = state.sessions.get_session(id) else {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "会话不存在" }))).into_response();
     };
+    let knowledge = {
+        let q = talksage_notes::build_knowledge_query(
+            detail.title.as_deref(),
+            None,
+            &detail.key_points,
+            &detail.segments,
+        );
+        state.service.knowledge().block_for_query(&q, 8)
+    };
     let gen = NotesGenerator::new(llm);
-    match gen.generate(&detail.segments, &detail.terms, &detail.translations, &detail.key_points, &template) {
+    match gen.generate(&detail.segments, &detail.terms, &detail.translations, &detail.key_points, &template, &knowledge) {
         Ok(notes) => {
             let _ = state.sessions.set_notes(id, &notes);
             (StatusCode::OK, Json(serde_json::json!({ "notes": notes }))).into_response()
@@ -894,8 +911,17 @@ async fn generate_trio_notes_api(
     let Ok(detail) = state.sessions.get_session(id) else {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "会话不存在" }))).into_response();
     };
+    let knowledge = {
+        let q = talksage_notes::build_knowledge_query(
+            body.meeting_name.as_deref().or(detail.title.as_deref()),
+            body.meeting_description.as_deref(),
+            &detail.key_points,
+            &detail.segments,
+        );
+        state.service.knowledge().block_for_query(&q, 8)
+    };
     let gen = talksage_notes::TrioGenerator::new(llm);
-    match gen.generate(&detail.segments, &detail.key_points, body.meeting_name.as_deref(), body.meeting_description.as_deref()) {
+    match gen.generate(&detail.segments, &detail.key_points, body.meeting_name.as_deref(), body.meeting_description.as_deref(), &knowledge) {
         Ok(trio) => {
             let json = serde_json::to_value(&trio).unwrap_or_default();
             let _ = state.sessions.set_trio(id, &json.to_string());
@@ -1027,10 +1053,40 @@ async fn test_llm_api(State(state): State<ServerState>, headers: axum::http::Hea
     }
 }
 
-async fn start_listen_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
+async fn list_knowledge_documents_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
+    let docs: Vec<serde_json::Value> = state
+        .service
+        .knowledge()
+        .list_documents()
+        .into_iter()
+            .map(|d| serde_json::json!({ "path": d.path, "title": d.title, "text": d.text }))
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!({ "documents": docs }))).into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct StartListenBody {
+    #[serde(default)]
+    pinned_note_paths: Vec<String>,
+}
+
+async fn start_listen_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let pinned_note_paths = serde_json::from_slice::<StartListenBody>(&body)
+        .map(|b| b.pinned_note_paths)
+        .unwrap_or_default();
     // start 要加载模型/装配管道（可能数秒），放进阻塞线程池，别占 tokio worker。
     let events = state.events.clone();
     let service = state.service.clone();
@@ -1040,8 +1096,10 @@ async fn start_listen_api(State(state): State<ServerState>, headers: axum::http:
         if guard.is_some() {
             return Err(anyhow::anyhow!("已在监听中"));
         }
+        let mut req = StartListen::desktop();
+        req.pinned_note_paths = pinned_note_paths;
         let started = service.start(
-            StartListen::desktop(),
+            req,
             Arc::new(move |ev| {
                 let _ = events.send(ev);
             }),

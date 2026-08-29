@@ -134,7 +134,7 @@ talksage/
 │   ├── talksage-notes/        # 会后纪要；LLM prompt 在 crate 内 prompts/
 │   ├── talksage-session/      # SQLite + Markdown 导出 + 录音索引 + 质量评估
 │   ├── talksage-llm/          # OpenAI 兼容 Provider（complete，15s 超时）
-│   ├── talksage-knowledge/    # 简报知识库检索（Jaccard，预留向量）
+│   ├── talksage-knowledge/    # 知识源切块 + 词法检索底盘（一期 Obsidian）
 │   ├── talksage-config/       # 分层配置 + 场景模式
 │   ├── talksage-logging/      # 文件日志
 │   └── talksage-server/       # axum 适配器：REST + WS + OpenAI 转写 API
@@ -250,7 +250,7 @@ flowchart LR
 
 - **入口**：`TalkSageService::start` / `finish`；内部 `SessionRuntime` 包装 `LivePipeline`（适配器不得 `LivePipeline::new`）
 - **统一接缝**：`EventFilter` 处理同步纯函数过滤；`SegmentObserver` 处理 committed 段，骨架同步而慢任务进入执行器；`SessionFinalizer` 在停止、flush、写入屏障之后运行
-- **内置插件**：`short_segment`、`cross_stream_dedup`、`conversation_metrics`、`term_explainer`、`translator`、`brief_retriever`、`key_point_extractor`、`session_quality`、`webhook`。顺序由注册表定义，设置页由插件元数据生成
+- **内置插件**：`short_segment`、`cross_stream_dedup`、`conversation_metrics`、`term_explainer`、`translator`、`brief_retriever`、`key_point_extractor`、`session_quality`、`webhook`、`knowledge_obsidian`（源插件，不进场景 allowlist、不挂转写 hook）。顺序由注册表定义，设置页由插件元数据生成；知识源单独成组，不进「基础插件」列表
 - **LLM prompt 归调用方**：会中用 LLM 的插件（目前 `term_explainer` / `translator`）自带 `prompts/<id>_*.txt`，与配置 schema、设置页标签同一所有权。宿主只注入 `LLMProvider`，不设中央 prompt 目录——加 LLM 插件仍是「实现 + `builtin.rs` 一行 + 自己的 prompt 文件」。`brief_retriever` / `key_point_extractor` 走本地规则，无 prompt。约定见 §8.5
 - **慢路径隔离**：单会话固定 2 个 worker、有界队列 32；满载丢弃新的慢任务，panic 隔离，15 秒后的结果丢弃。同步骨架和实时转写不受慢 LLM 拖累
 - **落库**：committed 段、术语、翻译、流统计进入容量 256 的 `SessionWriter`；SQLite 串行写入。停止时通过 FIFO `Shutdown` 排空队列，再运行 finalizer
@@ -281,8 +281,16 @@ flowchart LR
 
 ### 8.7 知识库（talksage-knowledge）
 
-- 本地 `.md/.txt` 文件夹，Jaccard 关键词检索（沿用旧版，零依赖）
-- 预留向量化升级（本地 embedding 模型或 OpenAI 兼容 embeddings 接口）
+三层，禁止再把索引写进会中 observer：
+
+1. **源插件**（一期仅 `knowledge_obsidian`）：读一个本地 Obsidian vault 的 `.md`/`.txt`，切成带 `source_id` 与相对路径的片段。不订阅转写段，不进场景 `plugin_allowlist`。
+2. **检索底盘** `KnowledgeIndex`（现 `KnowledgeBase`）：词法 + 词组门槛（沿用中文 2-gram / IDF）。`KnowledgeHub` 由配置指纹驱动刷新，给会中 / 纪要 / 助手共用同一份索引。
+3. **消费者**
+   - **实时转写**：会中接话。材料包（用户钉住的笔记正文）优先；`brief_retriever` 自动命中卡片默认关。
+   - **纪要 / 智能纪要**：生成前 retrieve 一次，注入 `{knowledge}`；三路智能纪要共享同一字符串。
+   - **AI 助手**：每轮按用户问题 retrieve，有命中才改 system prompt。
+
+会中默认不跑 RAG（不对每段 embedding、不对命中再 LLM 压缩）。向量库与第二 vault 一期不做。旧 `[knowledge_base]` 在源插件 folder 为空时迁入 `plugins.knowledge_obsidian`。
 
 ---
 
@@ -325,7 +333,7 @@ enum DomainEvent {
 
 ## 10. 前端设计（web/）
 
-- **分区**：上下文 / 实时转写（说话人着色、增量渲染） / 术语卡片 / 翻译区 / 要点区 / 简报区；虚拟化长转写（参考 Meetily `VirtualizedTranscriptView`）
+- **分区**：上下文 / 实时转写（说话人着色、增量渲染） / 术语卡片 / 翻译区 / 要点区 / 知识库材料包；虚拟化长转写（参考 Meetily `VirtualizedTranscriptView`）
 - **统一 API 抽象**：`lib/api.ts` 定义 `AudioCapture` / `SessionApi` / `HistoryApi` / `SettingsApi` 接口，IPC 与 HTTP 两套实现
 - **音频**：Tauri 模式音频全在壳内（前端只收事件 + 控制命令）；headless 模式当前同样由服务端采集（浏览器 `getUserMedia` 上行仍为预留）
 - **转写累加器**：`lib/transcript.ts` 按 `speaker_label` 持有 hypothesis；收到 `snapshot` 时 `reset` + `applySnapshot` 重建行
@@ -383,7 +391,8 @@ providers = { deepseek = { base_url = "…", model = "…", api_key = "" } }
 [plugins]
 term_explainer = { enabled = true, cooldown_seconds = 10 }
 translator = { enabled = true }
-brief_retriever = { enabled = true }
+brief_retriever = { enabled = false }
+knowledge_obsidian = { enabled = false, folder = "" }
 notes = { template = "standard_meeting" }
 
 [session]

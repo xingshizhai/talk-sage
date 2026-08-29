@@ -487,6 +487,9 @@ pub struct SessionMeta {
     /// 转写质量，或按相同参数重放历史录音。旧数据缺省 None。
     #[serde(default)]
     pub runtime_info: Option<SessionRuntimeInfo>,
+    /// 这场会钉住的知识库笔记（vault 相对路径）。
+    #[serde(default)]
+    pub pinned_note_paths: Vec<String>,
 }
 
 /// 会话运行环境快照：当时使用的模型、场景模式与主要参数。
@@ -634,6 +637,7 @@ impl SessionMeta {
             streams: stats,
             evaluated_at: now,
             runtime_info: None, // 由调用方（QualityHost）在写入前填充
+            pinned_note_paths: Vec::new(),
         }
     }
 }
@@ -1813,5 +1817,12 @@ mod tests {
         };
         let meta2 = SessionMeta::evaluate(stats.clone(), &[], 1, &manual);
         assert_eq!(meta2.quality, "noise", "关闭自动检测时用固定阈值判定: {:?}", meta2.quality);
+    }
+
+    #[test]
+    fn old_session_meta_json_without_pinned_notes_deserializes() {
+        let raw = r#"{"quality":"clean","skipped_analysis":false,"duration_ms":1,"speech_ms":1,"speech_ratio":1.0,"avg_rms":0.1,"max_rms":0.2,"text_noise":0.0,"streams":[],"evaluated_at":1}"#;
+        let meta = SessionMeta::from_json(raw).expect("旧 meta 缺 pinned_note_paths 仍应能解析");
+        assert!(meta.pinned_note_paths.is_empty());
     }
 }

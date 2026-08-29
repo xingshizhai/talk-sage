@@ -118,8 +118,8 @@ export interface PluginMeta {
   /** 插件用途说明。 */
   description?: string;
   /** descriptor 分类和执行阶段。 */
-  category?: "infrastructure" | "analysis";
-  phase?: "filter" | "observer" | "finalizer";
+  category?: "infrastructure" | "analysis" | "knowledge_source";
+  phase?: "filter" | "observer" | "finalizer" | "source";
   capabilities?: string[];
   after?: string[];
   /** 是否受场景 allowlist 约束（「会议辅助功能」那一类）。 */
@@ -486,7 +486,9 @@ export interface AppApi {
   saveConfig(updates: Record<string, unknown>): Promise<void>;
   ping(): Promise<void>;
   /** 开始实时监听（麦克风 → VAD → 本地 ASR → 事件推送）。 */
-  startListen(): Promise<void>;
+  startListen(pinnedNotePaths?: string[]): Promise<void>;
+  /** 知识库文档列表（材料包挑选）。 */
+  listKnowledgeDocuments(): Promise<{ path: string; title: string; text: string }[]>;
   /** 停止实时监听。 */
   stopListen(): Promise<void>;
   /** 暂停或继续当前监听，会话保持不变。 */

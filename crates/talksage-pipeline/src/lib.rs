@@ -21,6 +21,7 @@ use talksage_core::{AudioClock, DomainEvent, StatusStage, TranscriptSegment};
 
 pub mod chat;
 pub mod finalize;
+pub mod knowledge;
 mod endpoint;
 mod input_scheduler;
 pub mod offline;
@@ -37,6 +38,7 @@ mod statistics;
 
 pub use runtime::SessionRuntime;
 pub use service::{ClientCapture, RecoveryReport, RunningListen, StartListen, TalkSageService};
+pub use knowledge::KnowledgeHub;
 
 use input_scheduler::{poll_audio, AudioPoll, FilePacer, RoundRobin};
 use segment::{PartialUpdate, SegmentLifecycle};

@@ -16,4 +16,7 @@
 ## 翻译参考
 {translations}
 
+## 相关知识
+{knowledge}
+
 请生成纪要。

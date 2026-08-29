@@ -18,7 +18,7 @@ TalkSage 当前采用的是 **编译期注册、运行时配置** 的 Rust 内�
 
 | 文件 | 作用 |
 |---|---|
-| `crates/talksage-plugins/src/registry.rs` | 插件契约、三类 hook、注册表和配置载体 |
+| `crates/talksage-plugins/src/registry.rs` | 插件契约、hook、源插件类别、注册表和配置载体 |
 | `crates/talksage-plugins/src/builtin.rs` | 内置插件清单、执行顺序、配置合并和 UI 元数据 |
 | `crates/talksage-plugins/src/lib.rs` | 插件模块导出和 `PluginContext` 宿主能力 |
 | `crates/talksage-pipeline/src/plugin_executor.rs` | 慢插件的有界队列、worker、panic 与结果隔离 |
@@ -106,6 +106,18 @@ pub trait SessionFinalizer: Send + Sync {
 `FinalizeContext` 当前只提供 `session_id`。所需宿主能力应在 `Plugin::register` 时从 `PluginContext` 获取，并捕获到 finalizer 实例中。finalizer 按注册顺序逐项运行，每项在独立命名线程中执行，默认 deadline 为 10 秒；普通错误、panic 和 timeout 会分类记录，并继续执行其他 finalizer。
 
 Rust 无法安全强杀线程。超过 deadline 后宿主会停止等待，超时 finalizer 可能仍在后台自行收尾，其迟到状态不会被计为成功。因此 finalizer 自己调用的数据库或网络客户端仍须设置更短的超时，不应把宿主 deadline 当作取消机制。正常完成时顺序严格成立；某项超时后，后续项可能与它的后台尾部重叠，有强依赖的插件应共享一个 finalizer 或确保上游操作具有可靠的内部超时。
+
+### 2.4 KnowledgeSource：知识源（不是 SegmentObserver）
+
+知识源解决「材料从哪读」，不订阅转写生命周期。`category = KnowledgeSource`，`phase = Source`：
+
+- **不**加入场景 `plugin_allowlist`（那只约束分析类会中功能）；
+- `register(hooks)` **不要**往 `HookRegistry` 挂 filter / observer / finalizer；
+- **禁止**在 `SegmentObserver` 里 `index_folder` 或自建索引。索引由 `KnowledgeHub` 在配置保存、开始监听、会后生成前刷新，会中 / 纪要 / 助手共用同一份。
+
+一期内置 `knowledge_obsidian`：一个本地 Obsidian vault 路径。宿主读其 `enabled`/`folder`，用 `ObsidianSource` 切块后交给底盘。`PluginCapability::KnowledgeBase` 表示「当前索引是否就绪」，不是「产品有没有知识库」。
+
+会中默认展示用户钉住的材料包；`brief_retriever` 是可选自动命中卡，默认关闭。纪要与 AI 助手直接问 Hub 检索，不走会中 `DomainEvent::Brief`。
 
 ## 3. 插件定义与配置
 
@@ -277,7 +289,7 @@ pub mod keyword_alert;
 Box::new(KeywordAlertPlugin),
 ```
 
-列表顺序就是执行顺序。插件分类、能力和顺序约束来自 descriptor，不再维护 `ANALYSIS_PLUGIN_IDS` 或 `HOST_MANAGED_KEYS` 平行清单。如果它属于分析能力，仍需按产品意图更新配置 crate 中各场景的 `plugin_allowlist`；pipeline 契约测试会检查场景全集与 descriptor 是否一致。如果字段由宿主决定，还必须在 `plugin_overrides_for` 中真正覆盖它。
+列表顺序就是执行顺序。插件分类、能力和顺序约束来自 descriptor，不再维护 `ANALYSIS_PLUGIN_IDS` 或 `HOST_MANAGED_KEYS` 平行清单。如果它属于分析能力，仍需按产品意图更新配置 crate 中各场景的 `plugin_allowlist`；pipeline 契约测试会检查场景全集与 descriptor 是否一致。知识源（`PluginCategory::KnowledgeSource`）不要进 allowlist，也不要插到 filter 顺序不变量前面。如果字段由宿主决定，还必须在 `plugin_overrides_for` 中真正覆盖它。
 
 ### 4.3 注入宿主能力
 

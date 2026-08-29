@@ -1,8 +1,14 @@
-// 右栏：术语卡片（可展开）+ 简报（知识库命中）。支持整体折叠（偏好持久化）。
+// 右栏：术语卡片（可展开）+ 知识库材料包（钉住笔记，可选自动命中）。支持整体折叠（偏好持久化）。
 
 import { useEffect, useRef, useState } from "react";
 import type { BriefItem } from "../sections/BriefSection";
 import type { TermItem } from "../sections/TermsSection";
+import {
+  knowledgeEmptyHint,
+  pinnedDocuments,
+  truncateNoteText,
+  type KnowledgeDoc,
+} from "../lib/knowledge";
 import { toTermRows } from "../lib/terms";
 
 export default function AsidePanel({
@@ -10,6 +16,11 @@ export default function AsidePanel({
   onToggleCollapsed,
   terms,
   briefs,
+  knowledgeEnabled,
+  knowledgeFolder,
+  knowledgeDocs,
+  pinnedPaths,
+  onTogglePin,
   expandedTerms,
   onToggleTerm,
   dismissedTermKeys,
@@ -20,6 +31,11 @@ export default function AsidePanel({
   onToggleCollapsed: () => void;
   terms: TermItem[];
   briefs: BriefItem[];
+  knowledgeEnabled: boolean;
+  knowledgeFolder: string;
+  knowledgeDocs: KnowledgeDoc[];
+  pinnedPaths: string[];
+  onTogglePin: (path: string) => void;
   expandedTerms: Record<string, boolean>;
   onToggleTerm: (resultId: string) => void;
   dismissedTermKeys: ReadonlySet<string>;
@@ -27,6 +43,14 @@ export default function AsidePanel({
   /** 手动查词：交给 App 调后端，结果通过 Term 事件回到列表。 */
   onAskTerm: (term: string) => Promise<void>;
 }) {
+  const pinnedNotes = pinnedDocuments(knowledgeDocs, pinnedPaths);
+  const emptyHint = knowledgeEmptyHint({
+    enabled: knowledgeEnabled,
+    folder: knowledgeFolder,
+    docCount: knowledgeDocs.length,
+    pinnedCount: pinnedNotes.length,
+  });
+  const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
   const termRows = toTermRows(terms, dismissedTermKeys);
   const termListRef = useRef<HTMLDivElement>(null);
   const newestTermId = termRows.length > 0 ? termRows[termRows.length - 1].resultId : undefined;
@@ -89,7 +113,7 @@ export default function AsidePanel({
             writingMode: "vertical-rl",
           }}
         >
-          « 专业术语 / 简报
+          « 专业术语 / 知识库
         </button>
       </aside>
     );
@@ -245,19 +269,66 @@ export default function AsidePanel({
         </div>
       </section>
 
-      {/* 简报 */}
+      {/* 知识库：材料包优先，自动命中卡片仅在 brief_retriever 打开时出现 */}
       <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
           <span style={{ width: 6, height: 6, borderRadius: 2, background: "var(--brief)" }} />
-          <b style={{ fontSize: 13 }}>知识库命中</b>
+          <b style={{ fontSize: 13 }}>知识库</b>
+          <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>{pinnedNotes.length}</span>
         </div>
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 9 }}>
-          {briefs.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13 }}>发言命中知识库后显示…</div>}
-          {briefs.map((b, i) => (
-            <div key={i} style={{ fontSize: 12, lineHeight: 1.6, color: "var(--text-2)", wordBreak: "break-word", padding: "8px 10px", borderRadius: 8, background: "var(--surface-2)" }}>
-              {b.text}
+          {emptyHint && <div style={{ color: "var(--muted)", fontSize: 13 }}>{emptyHint}</div>}
+          {pinnedNotes.map((doc) => {
+            const expanded = !!expandedNotes[doc.path];
+            const body = expanded ? doc.text.trim() : truncateNoteText(doc.text);
+            return (
+              <div
+                key={doc.path}
+                onClick={() => setExpandedNotes((prev) => ({ ...prev, [doc.path]: !prev[doc.path] }))}
+                style={{ fontSize: 12, lineHeight: 1.6, color: "var(--text-2)", wordBreak: "break-word", padding: "8px 10px", borderRadius: 8, background: "var(--surface-2)", cursor: "pointer" }}
+              >
+                <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 4 }}>
+                  <b style={{ fontSize: 12, color: "var(--text)" }}>{doc.title || doc.path}</b>
+                  <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", flexShrink: 0 }}>{expanded ? "▾" : "▸"}</span>
+                </div>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4, fontFamily: "monospace" }}>{doc.path}</div>
+                {body}
+              </div>
+            );
+          })}
+          {knowledgeEnabled && knowledgeDocs.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={{ fontSize: 11, color: "var(--muted)" }}>钉住笔记</div>
+              {knowledgeDocs.map((doc) => {
+                const pinned = pinnedPaths.includes(doc.path);
+                return (
+                  <label
+                    key={doc.path}
+                    style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text)", cursor: "pointer" }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={pinned}
+                      onChange={() => onTogglePin(doc.path)}
+                    />
+                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {doc.title || doc.path}
+                    </span>
+                  </label>
+                );
+              })}
             </div>
-          ))}
+          )}
+          {briefs.length > 0 && (
+            <>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>自动命中</div>
+              {briefs.map((b, i) => (
+                <div key={i} style={{ fontSize: 12, lineHeight: 1.6, color: "var(--text-2)", wordBreak: "break-word", padding: "8px 10px", borderRadius: 8, background: "var(--surface-2)" }}>
+                  {b.text}
+                </div>
+              ))}
+            </>
+          )}
         </div>
       </section>
     </aside>

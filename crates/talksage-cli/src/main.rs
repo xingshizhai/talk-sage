@@ -242,6 +242,7 @@ fn cmd_listen(
         noise_level,
         kb_folder_override: kb_folder.map(std::path::PathBuf::from),
         user_label: None,
+        pinned_note_paths: Vec::new(),
     };
 
     let sink: talksage_pipeline::EventSink = std::sync::Arc::new(move |ev: DomainEvent| {

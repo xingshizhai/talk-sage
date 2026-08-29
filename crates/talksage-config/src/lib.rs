@@ -925,6 +925,20 @@ impl PluginsConfig {
             .unwrap_or(default)
     }
 
+    /// 读某个插件的字符串键。
+    pub fn get_str(&self, id: &str, key: &str, default: &str) -> String {
+        self.entries
+            .get(id)
+            .and_then(|v| v.get(key))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(default)
+            .to_string()
+    }
+
+    pub fn has_plugin(&self, id: &str) -> bool {
+        self.entries.contains_key(id)
+    }
+
     /// 应用前端提交的 `plugins` 表（设置面板 / API 保存）。
     ///
     /// 逐插件逐键合并，不认识具体插件 —— 前端提交什么 id 就存什么 id，
@@ -1183,7 +1197,7 @@ impl ConfigManager {
 
 /// 用户配置字段覆盖默认配置（非 None/非默认值时生效）。
 fn merge_config(default: Config, user: Config) -> Config {
-    Config {
+    let mut config = Config {
         asr: AsrConfig {
             engine_zh: take_or(user.asr.engine_zh, default.asr.engine_zh),
             engine_en: take_or(user.asr.engine_en, default.asr.engine_en),
@@ -1280,7 +1294,9 @@ fn merge_config(default: Config, user: Config) -> Config {
                 noise_auto_detect: user.scene.custom.noise_auto_detect,
             },
         },
-    }
+    };
+    sync_knowledge_source(&mut config);
+    config
 }
 
 fn default_asr_mode() -> String { "auto".into() }
@@ -1482,11 +1498,24 @@ pub fn apply_updates(c: &mut Config, updates: &serde_json::Value) {
         c.plugins.apply_updates(plugins);
     }
     if let Some(kb) = updates.get("knowledge_base") {
+        let mut patch = serde_json::Map::new();
         if let Some(e) = kb.get("enabled").and_then(|v| v.as_bool()) {
             c.knowledge_base.enabled = e;
+            patch.insert("enabled".into(), serde_json::Value::Bool(e));
         }
         if let Some(f) = kb.get("folder").and_then(|v| v.as_str()) {
             c.knowledge_base.folder = f.to_string();
+            patch.insert("folder".into(), serde_json::Value::String(f.to_string()));
+        }
+        if !patch.is_empty() {
+            // 空默认不要凭空写出 [plugins.knowledge_obsidian]，否则「打开设置再保存」
+            // 会改写用户 toml。已经有源插件表、或用户真的开了库/填了路径时才写入。
+            let write_plugin = c.knowledge_base.enabled
+                || !c.knowledge_base.folder.trim().is_empty()
+                || c.plugins.has_plugin("knowledge_obsidian");
+            if write_plugin {
+                c.plugins.merge_entry("knowledge_obsidian", &serde_json::Value::Object(patch));
+            }
         }
     }
     if let Some(asr) = updates.get("asr") {
@@ -1651,6 +1680,26 @@ pub fn apply_updates(c: &mut Config, updates: &serde_json::Value) {
             apply_scene_params(&mut c.scene.custom, cu);
         }
     }
+    sync_knowledge_source(c);
+}
+
+/// 旧 `[knowledge_base]` 迁入源插件；投影始终以 `plugins.knowledge_obsidian` 为准。
+pub fn sync_knowledge_source(c: &mut Config) {
+    const ID: &str = "knowledge_obsidian";
+    let plugin_folder = c.plugins.get_str(ID, "folder", "");
+    if plugin_folder.is_empty() && !c.knowledge_base.folder.is_empty() {
+        c.plugins.merge_entry(
+            ID,
+            &serde_json::json!({
+                "enabled": c.knowledge_base.enabled,
+                "folder": c.knowledge_base.folder,
+            }),
+        );
+    }
+    if c.plugins.has_plugin(ID) {
+        c.knowledge_base.enabled = c.plugins.get_bool(ID, "enabled", false);
+        c.knowledge_base.folder = c.plugins.get_str(ID, "folder", "");
+    }
 }
 
 #[cfg(test)]
@@ -1747,6 +1796,54 @@ min_segment_ms = 600
         assert_eq!(c.audio.min_segment_ms, Some(600));
         // 未覆盖字段保持默认
         assert_eq!(c.asr.engine_zh, "qwen3-asr");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn old_knowledge_base_section_migrates_into_obsidian_source() {
+        let _env = env_lock();
+        let dir = std::env::temp_dir().join(format!("talksage-cfg-kb-mig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("talksage.toml");
+        std::fs::write(
+            &file,
+            r#"
+[knowledge_base]
+enabled = true
+folder = "D:\\Obsidian"
+"#,
+        )
+        .unwrap();
+        let c = ConfigManager::load(None, Some(&file)).unwrap().snapshot();
+        assert_eq!(c.plugins.get_str("knowledge_obsidian", "folder", ""), "D:\\Obsidian");
+        assert!(c.plugins.get_bool("knowledge_obsidian", "enabled", false));
+        assert_eq!(c.knowledge_base.folder, "D:\\Obsidian");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn existing_obsidian_plugin_folder_is_not_overwritten_by_old_key() {
+        let _env = env_lock();
+        let dir = std::env::temp_dir().join(format!("talksage-cfg-kb-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("talksage.toml");
+        std::fs::write(
+            &file,
+            r#"
+[plugins.knowledge_obsidian]
+enabled = true
+folder = "C:\\Vault"
+
+[knowledge_base]
+enabled = false
+folder = "D:\\Obsidian"
+"#,
+        )
+        .unwrap();
+        let c = ConfigManager::load(None, Some(&file)).unwrap().snapshot();
+        assert_eq!(c.plugins.get_str("knowledge_obsidian", "folder", ""), "C:\\Vault");
+        assert_eq!(c.knowledge_base.folder, "C:\\Vault", "投影以源插件为准");
+        assert!(c.knowledge_base.enabled);
         std::fs::remove_dir_all(&dir).ok();
     }
 

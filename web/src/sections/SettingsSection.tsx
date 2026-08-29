@@ -77,7 +77,7 @@ const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "asr", label: "ASR 转写", desc: "引擎 / 输入增益" },
   { key: "audio", label: "音频与录音", desc: "采集 / 灵敏度 / 断句 / 降噪 / 质量阈值 / 录音" },
   { key: "terminology", label: "术语纠错", desc: "热词与误识别替换" },
-  { key: "plugins", label: "插件", desc: "专业术语 / 翻译 / 简报 / 要点聚合" },
+  { key: "plugins", label: "插件", desc: "专业术语 / 翻译 / 知识源 / 要点聚合" },
   { key: "voice", label: "声音标识", desc: "注册主人声音，识别说话人" },
   { key: "llm", label: "LLM", desc: "默认模型与密钥" },
   { key: "webhooks", label: "Webhook", desc: "会议结束推送（n8n/Zapier/CRM）" },
@@ -499,7 +499,10 @@ export default function SettingsSection({
         },
       },
       // 按元数据组装，键与值都来自 /plugins —— 组件里没有插件名
-      plugins: buildPluginUpdates(pluginMeta, pluginValues),
+      plugins: {
+        ...buildPluginUpdates(pluginMeta, pluginValues),
+        knowledge_obsidian: { enabled: kbEnabled, folder: kbFolder.trim() },
+      },
       knowledge_base: {
         enabled: kbEnabled,
         folder: kbFolder.trim(),
@@ -1351,13 +1354,13 @@ export default function SettingsSection({
               {renderPluginGroup(pluginMeta.filter((m) => m.analysis))}
               <h3 style={{ ...groupTitle, marginTop: 10 }}>基础插件</h3>
               <div style={hint}>不受场景模式约束；关掉会影响转写与会后处理，改动前请确认。</div>
-              {renderPluginGroup(pluginMeta.filter((m) => !m.analysis))}
+              {renderPluginGroup(pluginMeta.filter((m) => !m.analysis && m.category !== "knowledge_source" && m.id !== "knowledge_obsidian"))}
             </>
           )}
 
-          <h3 style={{ ...groupTitle, marginTop: 10 }}>知识库（Obsidian 仓库）</h3>
+          <h3 style={{ ...groupTitle, marginTop: 10 }}>知识源：Obsidian</h3>
           <label style={labelBlock}>
-            <input type="checkbox" checked={kbEnabled} onChange={(e) => setKbEnabled(e.target.checked)} /> 启用简报检索
+            <input type="checkbox" checked={kbEnabled} onChange={(e) => setKbEnabled(e.target.checked)} /> 启用本地仓库
           </label>
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
             <input
@@ -1375,7 +1378,7 @@ export default function SettingsSection({
             </button>
           </div>
           <div style={hint}>
-            会中由「简报检索」插件检索此目录下的 .md/.txt。Obsidian 的 .obsidian / .trash 不会进索引。保存后下次监听生效。
+            保存后立即刷新索引，供会中材料包、纪要和 AI 助手引用。只支持一个 vault 根路径；.obsidian / .trash / .git 不会进索引。
           </div>
         </div>
       )}

@@ -111,7 +111,7 @@ impl crate::registry::Plugin for BriefRetrieverPluginDef {
         // `min_score` 迁移前硬编码在 service.rs 的调用点（0.05），不在配置里；
         // 这里给出同一个值，行为不变。
         crate::registry::PluginConfig::from_value(serde_json::json!({
-            "enabled": true,
+            "enabled": false,
             "cooldown_seconds": 15.0,
             "min_score": 0.05,
             "include_user": false,
