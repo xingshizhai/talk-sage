@@ -71,9 +71,13 @@ Set-Location $Root
 # 保存用户设置的代理（应用内 HuggingFace 模型下载需要走代理）
 $_SavedHttpProxy  = $env:HTTP_PROXY
 $_SavedHttpsProxy = $env:HTTPS_PROXY
-# 清除代理：避免 Cargo/国内镜像请求走代理导致 503/连接失败
-# （仅对 cargo build 生效；Cmd-Dev/Cmd-Run 启动 app 前会恢复代理）
-$env:HTTP_PROXY = ""; $env:HTTPS_PROXY = ""; $env:http_proxy = ""; $env:https_proxy = ""
+# 默认清除代理：避免 Cargo/国内镜像请求走代理导致 503/连接失败
+# （仅对 cargo build 生效；Cmd-Dev/Cmd-Run 启动 app 前会恢复代理）。
+# 本机可在 talksage.local.ps1 设 TALKSAGE_BUILD_KEEP_PROXY=1 保留代理
+# （例如网络必须经代理才能访问 rsproxy.cn 时）。
+if ($env:TALKSAGE_BUILD_KEEP_PROXY -ne "1") {
+    $env:HTTP_PROXY = ""; $env:HTTPS_PROXY = ""; $env:http_proxy = ""; $env:https_proxy = ""
+}
 $env:CARGO_HOME = Join-Path $Root ".cargo-home"
 $env:SHERPA_ONNX_ARCHIVE_DIR = Join-Path $Root ".tools\sherpa-onnx-archives"
 # TALKSAGE_* 目录分离（v0.2+）：配置 / 数据 / 日志互不混放。
@@ -357,12 +361,46 @@ function Cmd-Build {
     }
 }
 
+# MSVC 工具链初始化：cargo/cc 链接需要 cl.exe/link.exe 在 PATH 中。
+# 用 vswhere 定位 VS 安装并 dot-source vcvars64.bat 的环境变量（等价于
+# 打开 "Developer PowerShell"）。已初始化（VSCMD_VER 存在）则跳过。
+function Ensure-MsvcEnv {
+    if ($env:VSCMD_VER) { return }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $vswhere)) {
+        Write-Host "警告: 未找到 vswhere.exe，无法定位 MSVC。请从 Developer PowerShell 运行。" -ForegroundColor Yellow
+        return
+    }
+    $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+    if (-not $vsPath) {
+        Write-Host "警告: 未找到含 VC 工具的 Visual Studio 安装。请安装 'Desktop development with C++'。" -ForegroundColor Yellow
+        return
+    }
+    $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+    if (-not (Test-Path $vcvars)) {
+        Write-Host "警告: 未找到 vcvars64.bat（$vcvars）。请安装 'Desktop development with C++'。" -ForegroundColor Yellow
+        return
+    }
+    Write-Host "  [auto] MSVC: $vcvars" -ForegroundColor DarkGray
+    # vcvars64.bat 只能设 cmd 环境变量：在子 cmd 里执行后导出，再逐项写回当前进程
+    $envDump = & cmd /c "call `"$vcvars`" >nul 2>&1 && set"
+    foreach ($line in $envDump) {
+        $idx = $line.IndexOf('=')
+        if ($idx -gt 0) {
+            $name = $line.Substring(0, $idx)
+            $value = $line.Substring($idx + 1)
+            [System.Environment]::SetEnvironmentVariable($name, $value, "Process")
+        }
+    }
+}
+
 # Windows x64 Vulkan 构建环境配置：
 #   自动检测 VULKAN_SDK / LIBCLANG_PATH，设置短 target 路径避免 MAX_PATH，
 #   并配置 RUSTFLAGS 全静态 CRT（与 whisper.cpp /MT 和 sherpa-onnx /MT 一致）。
 # 仅在 Windows x64 上生效，其他平台跳过。
 function Ensure-VulkanEnv {
     if ($env:OS -ne "Windows_NT" -or $env:PROCESSOR_ARCHITECTURE -ne "AMD64") { return }
+    Ensure-MsvcEnv
 
     # VULKAN_SDK：已设则沿用，否则从常见安装位置自动探测
     if (-not $env:VULKAN_SDK) {
