@@ -718,16 +718,18 @@ impl StreamWorker {
             AudioInput::Loopback => InputKind::Loopback,
         };
 
-        // 文件模式：预读 wav 分块
+        // 文件模式：统一解码 WAV / MP3 / MP4 音轨，转为 16kHz mono 后分块。
         let mut file_chunks = None;
         if let AudioInput::File(path) = &cfg.input {
-            let wave = sherpa_onnx::Wave::read(&path.to_string_lossy())
-                .ok_or_else(|| anyhow::anyhow!("读取 wav 失败: {}", path.display()))?;
-            if wave.sample_rate() != 16000 {
-                anyhow::bail!("文件输入要求 16kHz wav，当前 {}", wave.sample_rate());
-            }
-            let chunk_size = (wave.sample_rate() as usize) * (chunk_ms as usize) / 1000;
-            let chunks: Vec<Vec<f32>> = wave.samples().chunks(chunk_size).map(|c| c.to_vec()).collect();
+            let (sample_rate, samples) = talksage_audio::read_audio_file(path)
+                .map_err(|error| anyhow::anyhow!("读取导入音频失败 {}: {error:#}", path.display()))?;
+            let samples = talksage_audio::resample_linear(
+                &samples,
+                sample_rate,
+                talksage_audio::TARGET_SAMPLE_RATE,
+            );
+            let chunk_size = talksage_audio::TARGET_SAMPLE_RATE as usize * chunk_ms as usize / 1000;
+            let chunks: Vec<Vec<f32>> = samples.chunks(chunk_size).map(|c| c.to_vec()).collect();
             file_chunks = Some(chunks.into_iter());
         }
         let file_pacer = file_chunks

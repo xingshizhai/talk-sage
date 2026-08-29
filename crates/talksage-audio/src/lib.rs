@@ -14,8 +14,10 @@ use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 pub mod silence_trim;
+pub mod media;
 pub mod wav;
 
+pub use media::read_audio_file;
 pub use wav::{part_path_of, read_wav, recover_orphan_recordings, WavRecorder};
 
 /// 目标采样率（sherpa-onnx 模型统一 16kHz）。

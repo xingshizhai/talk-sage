@@ -181,7 +181,7 @@ fn cmd_listen(
         } else {
             let p = std::path::PathBuf::from(s);
             if !p.is_file() {
-                Err(format!("wav 文件不存在: {s}（或使用 mic / loopback）"))
+                Err(format!("媒体文件不存在: {s}（或使用 mic / loopback）"))
             } else {
                 Ok(AudioInput::File(p))
             }
@@ -742,4 +742,3 @@ fn count_wav(dir: &std::path::Path) -> usize {
 fn resolve_models_dir() -> Option<std::path::PathBuf> {
     TalkSageService::resolve_models_dir()
 }
-

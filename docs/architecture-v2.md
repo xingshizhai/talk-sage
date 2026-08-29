@@ -561,7 +561,7 @@ token = ""
 |---|---|
 | 桌面 / headless 监听 | `StartListen::desktop()` → `service.start` → `SessionRuntime` |
 | CLI `listen` | 同上（共用引擎池）；`--client` 才开双流，否则 `ClientCapture::Off` |
-| CLI `import` / `transcribe --save` | `StartListen::import_file` → Service（不再自建 Pipeline） |
+| GUI / CLI `import` / `transcribe --save` | `talksage-audio::read_audio_file` 解码 WAV / MP3 / MP4(AAC) → mono PCM → 16kHz 重采样 → `StartListen::import_file` → Service |
 | CLI `session replay` | 解析会话 master 录音后走 `transcribe --save`，另存新会话 |
 | bench / OpenAI `/v1/audio/transcriptions` | `offline::transcribe_file` → `SessionRuntime` |
 

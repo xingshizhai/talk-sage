@@ -36,12 +36,12 @@ pub enum Command {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
-    /// 实时转写验证：麦克风或 wav 文件 → VAD → 流式 ASR → 事件打印。
+    /// 实时转写验证：麦克风或媒体文件 → VAD → ASR → 事件打印。
     Listen {
-        /// 用户流输入：mic | loopback | <wav 路径>
+        /// 用户流输入：mic | loopback | <WAV/MP3/MP4/M4A 路径>
         #[arg(long, default_value = "mic")]
         input: String,
-        /// 客户流输入（英文 zipformer）：mic | loopback | <wav 路径>（可选）
+        /// 客户流输入：mic | loopback | <WAV/MP3/MP4/M4A 路径>（可选）
         #[arg(long)]
         client: Option<String>,
         /// 简报知识库文件夹（可选，启用 brief_retriever）
@@ -65,7 +65,7 @@ pub enum Command {
     },
     /// 导入音频并保存为新会话（`transcribe --save` 的别名）。
     Import {
-        /// 音频文件路径（16kHz mono wav）
+        /// 音频/会议媒体路径（WAV / MP3 / MP4 / M4A）
         path: String,
         /// 引擎（qwen3-asr | whisper-large-v3-turbo-metal | whisper-medium-metal | …）
         #[arg(long, default_value = "qwen3-asr")]

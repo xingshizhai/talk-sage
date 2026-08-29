@@ -889,12 +889,12 @@ async fn test_aliyun_asr(
     }))
 }
 
-/// 打开系统文件对话框，让用户选择一个 WAV 录音文件。返回绝对路径，用户取消时返回 null。
+/// 打开系统文件对话框，选择支持的录音/会议媒体文件。
 #[tauri::command]
 fn pick_audio_file() -> Option<String> {
     rfd::FileDialog::new()
-        .add_filter("WAV 录音", &["wav"])
-        .set_title("选择录音文件")
+        .add_filter("录音与会议媒体", &["wav", "mp3", "mp4", "m4a"])
+        .set_title("选择录音或会议媒体文件")
         .pick_file()
         .map(|p| p.to_string_lossy().into_owned())
 }

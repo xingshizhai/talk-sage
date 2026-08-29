@@ -32,6 +32,7 @@
 - **Live meeting intelligence** — term/acronym explanations, real-time translation (en↔zh), rule-based key-point aggregation (questions / requirements / decisions / actions / technical, with numeric & time heuristics), knowledge-base brief retrieval; History offers **AI-extracted key points** (LLM, needs config)
 - **Meeting minutes** — template-based generation via any OpenAI-compatible LLM (DeepSeek, Kimi, Ollama, …)
 - **Recording & testing loop** — every session keeps raw mono PCM per input stream and exposes one main recording for playback (single-stream reuse; dual-stream stereo with microphone left/system audio right); `talksage trim` supports regression preparation
+- **Meeting media import** — the desktop app imports WAV, MP3, and MP4/M4A (AAC audio track), decodes locally without an external ffmpeg installation, downmixes to mono, and resamples to the ASR pipeline's 16 kHz input
 - **Session quality assessment** — automatic noise/silence detection per session (configurable thresholds + auto background-noise calibration); noisy sessions skip downstream analysis
 - **Runtime noise control** — adjust the mic noise gate live from the left panel *while listening*, no restart
 - **History** — SQLite sessions with search, per-segment duration/RMS stats, quality badges; **each session auto-saves a runtime snapshot** (scene mode / ASR engines / VAD / denoise / min-commit / gain / speaker mode / app version) so you can compare transcription quality across models & parameters afterwards, or re-run ASR with `talksage session replay <id>` (History detail and `talksage session show <id>`)
@@ -147,6 +148,7 @@ curl http://127.0.0.1:8080/v1/audio/transcriptions \
 | Task | How |
 |---|---|
 | Start listening | Left panel ▶ 开始监听 (jumps to live transcript) |
+| Import meeting media | Live transcript → 导入录音文件 (WAV / MP3 / MP4 / M4A) |
 | Register your voice | Settings → 声音标识 → 录制我的声音 (6 s) |
 | Tune mic level / noise gate | Left panel while listening: 麦克风电平 meter + noise-gate threshold slider (live, no restart) |
 | Trim silence from a recording | `talksage trim rec.wav [-o out.wav] [--preset sensitive\|standard\|strict]` |
@@ -247,4 +249,3 @@ models/            runtime models (gitignored, ~1.2 GB, multi-engine optional)
 ## License
 
 [GNU General Public License v3.0](LICENSE)
-

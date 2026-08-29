@@ -992,7 +992,7 @@ export default function App() {
                 >
                   📂 导入录音文件
                 </button>
-                <span style={{ alignSelf: "center", fontSize: 11, color: "var(--muted)" }}>或使用左侧"开始监听"进行实时转写 · 支持 WAV 格式</span>
+                <span style={{ alignSelf: "center", fontSize: 11, color: "var(--muted)" }}>或使用左侧"开始监听"进行实时转写 · 支持 WAV、MP3、MP4</span>
               </div>
             )}
 
