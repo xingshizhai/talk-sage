@@ -102,7 +102,7 @@ pub fn pick_upgrade_package() -> Option<String> {
     {
         dlg = dlg
             .add_filter("macOS 安装包", &["dmg", "app"])
-            .set_title("选择升级包（talksage.sh package 产出的 .dmg 或 拓思者.app）");
+            .set_title("选择升级包（talksage.sh package 产出的 .dmg 或 TalkSage.app）");
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
@@ -221,7 +221,7 @@ fn version_of_package(pkg: &Path, fname: &str, kind: PackageKind) -> Result<Stri
     }
     let _ = (pkg, kind);
     Err(format!(
-        "无法从文件名解析版本号: {fname}（预期如 拓思者_0.1.4_aarch64.dmg 或 拓思者_0.1.4_x64-setup.exe）"
+        "无法从文件名解析版本号: {fname}（预期如 TalkSage_0.1.4_aarch64.dmg 或 TalkSage_0.1.4_x64-setup.exe）"
     ))
 }
 
@@ -254,7 +254,7 @@ fn spawn_macos_replacer(pkg: &Path, kind: PackageKind, app: &AppHandle) -> Resul
             .config()
             .product_name
             .clone()
-            .unwrap_or_else(|| "拓思者".into());
+            .unwrap_or_else(|| "TalkSage".into());
         let dest = PathBuf::from(format!("/Applications/{product}.app"));
         let src_kind = match kind {
             PackageKind::MacDmg => "dmg",
@@ -479,11 +479,11 @@ mod tests {
 
     #[test]
     fn parse_versions() {
-        assert_eq!(version_in_filename("拓思者_1.2.0_x64-setup.exe"), Some("1.2.0".into()));
-        assert_eq!(version_in_filename("拓思者_0.1.3_x64-setup.exe"), Some("0.1.3".into()));
-        assert_eq!(version_in_filename("拓思者_1.2.3.4_x64.msi"), Some("1.2.3.4".into()));
-        assert_eq!(version_in_filename("拓思者_0.1.4_aarch64.dmg"), Some("0.1.4".into()));
-        assert_eq!(version_in_filename("拓思者.app"), None);
+        assert_eq!(version_in_filename("TalkSage_1.2.0_x64-setup.exe"), Some("1.2.0".into()));
+        assert_eq!(version_in_filename("TalkSage_0.1.3_x64-setup.exe"), Some("0.1.3".into()));
+        assert_eq!(version_in_filename("TalkSage_1.2.3.4_x64.msi"), Some("1.2.3.4".into()));
+        assert_eq!(version_in_filename("TalkSage_0.1.4_aarch64.dmg"), Some("0.1.4".into()));
+        assert_eq!(version_in_filename("TalkSage.app"), None);
         assert_eq!(version_in_filename("setup.exe"), None);
     }
 
@@ -500,16 +500,16 @@ mod tests {
     fn arch_mismatch_matches_current_cpu() {
         #[cfg(target_arch = "aarch64")]
         {
-            assert!(arch_incompatible("拓思者_0.1.4_x64-setup.exe").is_some());
-            assert!(arch_incompatible("拓思者_0.1.4_x86_64.dmg").is_some());
-            assert!(arch_incompatible("拓思者_0.1.4_aarch64.dmg").is_none());
-            assert!(arch_incompatible("拓思者.app").is_none());
+            assert!(arch_incompatible("TalkSage_0.1.4_x64-setup.exe").is_some());
+            assert!(arch_incompatible("TalkSage_0.1.4_x86_64.dmg").is_some());
+            assert!(arch_incompatible("TalkSage_0.1.4_aarch64.dmg").is_none());
+            assert!(arch_incompatible("TalkSage.app").is_none());
         }
         #[cfg(target_arch = "x86_64")]
         {
-            assert!(arch_incompatible("拓思者_0.1.4_aarch64.dmg").is_some());
-            assert!(arch_incompatible("拓思者_0.1.4_arm64-setup.exe").is_some());
-            assert!(arch_incompatible("拓思者_0.1.4_x64-setup.exe").is_none());
+            assert!(arch_incompatible("TalkSage_0.1.4_aarch64.dmg").is_some());
+            assert!(arch_incompatible("TalkSage_0.1.4_arm64-setup.exe").is_some());
+            assert!(arch_incompatible("TalkSage_0.1.4_x64-setup.exe").is_none());
         }
     }
 }

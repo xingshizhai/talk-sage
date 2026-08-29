@@ -1,6 +1,6 @@
 {
     "$schema":  "https://schema.tauri.app/config/2",
-    "productName":  "拓思者",
+    "productName":  "TalkSage",
     "version":  "0.2.1",
     "identifier":  "ai.talksage.app",
     "build":  {
@@ -35,7 +35,7 @@
                                     "endpoints":  [
                                                       "https://updates.example.com/talksage/{{target}}/{{arch}}/{{current_version}}"
                                                   ],
-                                    "pubkey":  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc2RTZBQzk1QTc2RTBFMDQKUldRRURtNm5sYXptZGd3ZlFIZ0F1OE1FM1FiSTlNWllhbFFrbUZNQzM5ZUdsRFN1VEl0NkErcG0K"
+                                    "pubkey":  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIyNDQwRTQzNUEyRjdFM0EKUldRNmZpOWFRdzVFSW44c25SUTI0K3JEeTU4RkZaWGx4TGR6MG51MThWYlN5c0lzL2RnOEdOSjcK"
                                 }
                 },
     "bundle":  {
