@@ -20,6 +20,16 @@
 # 若你的网络访问 rsproxy.cn 必须走代理，取消注释并设为 "1"：
 # $env:TALKSAGE_BUILD_KEEP_PROXY = "1"
 
+# ── 数据 / 配置 / 日志目录 ──────────────────────────────
+# 默认：数据在项目 data\、配置在项目 config\、日志在项目 logs\（目录分离 v0.2+）。
+# 数据量大时可将数据目录指到其他盘（会在启动时自动创建并沿用）：
+# $env:TALKSAGE_DATA_DIR = "E:\talksage-data"
+# 注：设了外部 TALKSAGE_DATA_DIR 后，脚本不再单独设 CONFIG_DIR，
+# 配置文件随数据目录（<data_dir>\talksage.toml），兼容旧版单目录布局。
+# 也可单独指定配置 / 日志目录（一般无需改）：
+# $env:TALKSAGE_CONFIG_DIR = "E:\talksage-config"
+# $env:TALKSAGE_LOG_DIR    = "E:\talksage-logs"
+
 # sherpa-onnx 本地归档目录（避免每次联网下载）
 # $env:SHERPA_ONNX_ARCHIVE_DIR = "D:\Work\aiproject\projects\talk-sage\.tools\sherpa-onnx-archives"
 

@@ -18,6 +18,7 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
   .\scripts\talksage.ps1 doctor               # 环境诊断（talksage doctor）
   .\scripts\talksage.ps1 test                 # 全量测试（Rust + Vitest）
   .\scripts\talksage.ps1 package              # 打包（release + NSIS/MSI 安装器 + 升级签名）
+  .\scripts\talksage.ps1 vulkan [--test]      # 只编译 talksage-app（vulkan-gpu）；--test 跑真实 GPU 转写验证
   .\scripts\talksage.ps1 logs                 # 查看最近日志
   .\scripts\talksage.ps1 clean                # 清理构建产物（target/dist/node_modules）
 
@@ -66,6 +67,13 @@ $ErrorActionPreference = "Continue"
 $PSNativeCommandUseErrorActionPreference = $false
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
+
+# 本机环境覆盖（不入库）：复制 scripts\talksage.local.example.ps1 为 talksage.local.ps1
+# 并按需修改路径，用于 Vulkan SDK / LLVM / Cargo 输出目录 / 数据目录等。
+# 必须在环境隔离区（TALKSAGE_*_DIR 默认值、代理清除）之前加载：
+# local 里设的 TALKSAGE_DATA_DIR 等才会被识别为「外部已设」并沿用。
+$LocalEnv = Join-Path $PSScriptRoot "talksage.local.ps1"
+if (Test-Path $LocalEnv) { . $LocalEnv }
 
 # ── 环境变量（项目内隔离，避免污染用户全局） ──────────────────
 # 保存用户设置的代理（应用内 HuggingFace 模型下载需要走代理）
@@ -223,11 +231,6 @@ function Find-Exe([string]$profile, [string]$name) {
 function Get-CliExe     { Find-Exe "debug"   "talksage.exe" }
 function Get-DebugApp   { Find-Exe "debug"   "talksage-app.exe" }
 function Get-ReleaseApp { Find-Exe "release" "talksage-app.exe" }
-
-# 本机环境覆盖（不入库）：复制 scripts\talksage.local.example.ps1 为 talksage.local.ps1
-# 并按需修改路径，用于 Vulkan SDK / LLVM 安装到非默认位置的情况。
-$LocalEnv = Join-Path $PSScriptRoot "talksage.local.ps1"
-if (Test-Path $LocalEnv) { . $LocalEnv }
 
 function Write-Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 
@@ -658,6 +661,61 @@ function Cmd-Logs {
     Get-Content $log.FullName -Tail 50
 }
 
+function Cmd-Vulkan {
+    $runTest = $Rest -contains "--test" -or $Rest -contains "-test"
+    Ensure-VulkanEnv
+    if (-not $env:VULKAN_SDK) {
+        Write-Host "Vulkan SDK 未就绪，无法构建 vulkan-gpu feature。" -ForegroundColor Red
+        return 1
+    }
+    # tauri-build 编译期把 web\dist 嵌入 App 二进制：前端产物缺失会直接编译失败。
+    # vulkan 命令聚焦 whisper.cpp 编译验证，不负责构建前端——缺失时给出明确指引。
+    $distIndex = Join-Path $Root "web\dist\index.html"
+    if (-not (Test-Path $distIndex)) {
+        Write-Host "前端产物缺失（web\dist\index.html 不存在）。" -ForegroundColor Yellow
+        Write-Host "请先运行 .\scripts\talksage.ps1 build（含前端构建）或 cd web && npm run build，再重试 vulkan。" -ForegroundColor Yellow
+        return 1
+    }
+    Write-Step "Vulkan whisper.cpp 编译（talksage-app + vulkan-gpu）"
+    # 只编译 App：whisper.cpp Vulkan 由 vendor/whisper-rs-sys 的 build.rs
+    # 在编译期 CMake 构建（GGML_VULKAN），这是验证 Vulkan 工具链的最短路径。
+    $code = Invoke-Native { cargo build -p talksage-app --features "tauri/custom-protocol,vulkan-gpu" }
+    if ($code -ne 0) {
+        Write-Host "Vulkan 编译失败" -ForegroundColor Red
+        return 1
+    }
+    $app = Get-DebugApp
+    Write-Host "`nVulkan 编译完成: $app" -ForegroundColor Green
+
+    if ($runTest) {
+        Write-Host "`n=== GPU 推理验证（真实模型转写）===" -ForegroundColor Cyan
+        $wav = Get-ChildItem (Join-Path $Root "models") -Recurse -Filter "*.wav" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 50KB -and $_.Length -lt 2MB } | Select-Object -First 1
+        if (-not $wav) {
+            Write-Host "未找到测试 wav（16kHz），跳过转写验证。可手动验证：talksage listen --input <wav> --engine whisper-large-v3-turbo-metal" -ForegroundColor Yellow
+            return 1
+        }
+        Write-Host "测试音频: $($wav.FullName)" -ForegroundColor DarkGray
+        $cli = Get-CliExe
+        if (-not (Test-Path $cli)) {
+            Write-Host "未找到 CLI 可执行文件（$cli），请先运行 .\scripts\talksage.ps1 build" -ForegroundColor Yellow
+            return 1
+        }
+        # listen 会打印 "ASR 路由已确定: route=..."，GPU 成功时 route 含 Vulkan；
+        # 捕获输出供下方判断（RUST_LOG=info 由脚本默认开启）。
+        $out = & $cli listen --input $wav.FullName --engine whisper-large-v3-turbo-metal --seconds 30 2>&1
+        $joined = $out -join "`n"
+        $out | ForEach-Object { Write-Host $_ }
+        if ($joined -match "route=.*(?i:vulkan|gpu)" -or $joined -match "(?i:provider=vulkan)" -or $joined -match "加速|GPU") {
+            Write-Host "`n✓ GPU 推理验证通过（路由日志含 Vulkan/GPU）" -ForegroundColor Green
+        } else {
+            Write-Host "`n⚠ 未在日志中确认 GPU 路由（可能是 CPU 回退）。检查上方 ASR 路由日志。" -ForegroundColor Yellow
+            return 1
+        }
+    }
+    return 0
+}
+
 function Cmd-Clean {
     Write-Step "清理构建产物"
     foreach ($d in @("web\dist", "web\node_modules", ".cargo-home", ".tools")) {
@@ -690,7 +748,7 @@ function Cmd-Help {
         Write-Host $Matches[1].Trim()
         return
     }
-    Write-Host "用法: .\scripts\talksage.ps1 <env|deps|build|dev|run|serve|listen|import|trim|record|loop|doctor|test|package|logs|clean>"
+    Write-Host "用法: .\scripts\talksage.ps1 <env|deps|build|dev|run|serve|listen|import|trim|record|loop|doctor|test|package|vulkan|logs|clean>"
 }
 
 # ── 分发 ─────────────────────────────────────────────
@@ -709,6 +767,7 @@ switch ($Command.ToLower()) {
     "doctor"  { Cmd-Doctor }
     "test"    { Cmd-Test }
     "package" { Cmd-Package }
+    "vulkan"  { Cmd-Vulkan }
     "logs"    { Cmd-Logs }
     "clean"   { Cmd-Clean }
     default   { Cmd-Help }
