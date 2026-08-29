@@ -349,6 +349,8 @@ fn save_config(
     // 记录保存后实际生效的代理，验证 network 字段是否正确写入
     let proxy_after = state.config.snapshot().network.proxy_url().map(str::to_string).unwrap_or_default();
     log::info!("save_config: 配置已写入磁盘 proxy={proxy_after:?}");
+    state.service.knowledge().invalidate();
+    state.service.knowledge().refresh();
     // 录音目录可在设置页修改，保存后同步刷新 asset scope。
     allow_recording_assets(&app, &state.config)?;
     Ok(())
@@ -372,7 +374,11 @@ fn ping(app: tauri::AppHandle) -> Result<(), String> {
 /// async + spawn_blocking：`service.start` 要加载模型/装配管道，可能耗时数秒；
 /// 同步 command 会占住 Tauri 主线程（窗口消息循环冻结，UI 假死）。
 #[tauri::command]
-async fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn start_listen(
+    pinned_note_paths: Option<Vec<String>>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     log::info!("收到开始实时监听请求");
     let app = app.clone();
     let service = state.service.clone();
@@ -390,7 +396,12 @@ async fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) 
         if guard.is_some() {
             return Err("已在监听中".into());
         }
-        let req = StartListen { user_input, client, ..StartListen::desktop() };
+        let req = StartListen {
+            user_input,
+            client,
+            pinned_note_paths: pinned_note_paths.unwrap_or_default(),
+            ..StartListen::desktop()
+        };
         let started = service
             .start(
                 req,
@@ -408,6 +419,17 @@ async fn start_listen(app: tauri::AppHandle, state: tauri::State<'_, AppState>) 
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn list_knowledge_documents(state: tauri::State<'_, AppState>) -> Vec<serde_json::Value> {
+    state
+        .service
+        .knowledge()
+        .list_documents()
+        .into_iter()
+        .map(|d| serde_json::json!({ "path": d.path, "title": d.title, "text": d.text }))
+        .collect()
 }
 
 /// 停止实时监听。
@@ -758,9 +780,18 @@ fn generate_notes(session_id: i64, template_id: String, state: tauri::State<'_, 
         return Err(format!("未知模板: {template_id}"));
     };
     let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
+    let knowledge = {
+        let q = talksage_notes::build_knowledge_query(
+            detail.title.as_deref(),
+            None,
+            &detail.key_points,
+            &detail.segments,
+        );
+        state.service.knowledge().block_for_query(&q, 8)
+    };
     let gen = talksage_notes::NotesGenerator::new(llm);
     let notes = gen
-        .generate(&detail.segments, &detail.terms, &detail.translations, &detail.key_points, &template)
+        .generate(&detail.segments, &detail.terms, &detail.translations, &detail.key_points, &template, &knowledge)
         .map_err(|e| format!("纪要生成失败: {e}"))?;
     state
         .sessions
@@ -776,9 +807,18 @@ fn generate_trio_notes(session_id: i64, meeting_name: Option<String>, meeting_de
         return Err("未配置 LLM（请设置 llm.providers.<provider>.api_key）".into());
     };
     let detail = state.sessions.get_session(session_id).map_err(|e| e.to_string())?;
+    let knowledge = {
+        let q = talksage_notes::build_knowledge_query(
+            meeting_name.as_deref().or(detail.title.as_deref()),
+            meeting_description.as_deref(),
+            &detail.key_points,
+            &detail.segments,
+        );
+        state.service.knowledge().block_for_query(&q, 8)
+    };
     let gen = talksage_notes::TrioGenerator::new(llm);
     let trio = gen
-        .generate(&detail.segments, &detail.key_points, meeting_name.as_deref(), meeting_description.as_deref())
+        .generate(&detail.segments, &detail.key_points, meeting_name.as_deref(), meeting_description.as_deref(), &knowledge)
         .map_err(|e| format!("智能纪要生成失败: {e}"))?;
     let json = serde_json::to_value(&trio).map_err(|e| e.to_string())?;
     state
@@ -1124,6 +1164,11 @@ pub fn run() {
     let service = TalkSageService::new(config.clone(), Some(sessions.clone()), EnginePool::new());
     // 上次异常退出的残留（未完成录音 + 未结束会话），在窗口起来前先收拾干净。
     service.recover_on_startup();
+    let chat = Arc::new(ChatService::with_knowledge(
+        config.clone(),
+        sessions.clone(),
+        service.knowledge(),
+    ));
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1132,7 +1177,7 @@ pub fn run() {
             config: config.clone(),
             sessions: sessions.clone(),
             service,
-            chat: Arc::new(ChatService::new(config, sessions)),
+            chat,
             running: Arc::new(Mutex::new(None)),
             downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
             import_cancel: Arc::new(Mutex::new(None)),
@@ -1150,6 +1195,7 @@ pub fn run() {
             save_config,
             ping,
             start_listen,
+            list_knowledge_documents,
             stop_listen,
             set_listen_paused,
             set_file_playback_speed,

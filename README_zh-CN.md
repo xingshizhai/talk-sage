@@ -21,7 +21,7 @@
 
 ## 产品定位
 
-拓思者采用**本地优先**架构：采集、录音、GPU ASR、说话人归属和媒体解码均在本机执行。只有用户明确选择阿里云回退或配置远程 OpenAI 兼容 LLM 时，音频或转写文本才会发送给对应服务商。系统提供实时转写、说话人归属、术语解释、翻译、要点聚合、知识库简报与会议纪要，并保留原始录音用于回归测试。
+拓思者采用**本地优先**架构：采集、录音、GPU ASR、说话人归属和媒体解码均在本机执行。只有用户明确选择阿里云回退或配置远程 OpenAI 兼容 LLM 时，音频或转写文本才会发送给对应服务商。系统提供实时转写、说话人归属、术语解释、翻译、要点聚合、Obsidian 会中材料包及会后检索与会议纪要，并保留原始录音用于回归测试。
 
 ## 功能特性
 
@@ -29,7 +29,7 @@
 - **本地 GPU ASR**：Windows x64 使用 **whisper.cpp + Vulkan**（AMD / Intel / NVIDIA），macOS Apple Silicon 使用 **whisper.cpp + Metal**，均运行 Whisper large-v3-turbo Q5_0（约 547 MiB）。检测到受支持 GPU 时自动路由，否则回退阿里云或 CPU。
 - **场景模式**：六套完整预设——**单人听写 / 一对一会话 / 双语对话 / 多人会议 / 演讲课堂 / 自定义**。一对一会话是默认模式，采用低开销的通道归属；仅多人会议默认启用 WeSpeaker 声纹聚类。
 - **说话人归属**：明确的 `off / channel / voiceprint` 策略。`channel` 直接按麦克风/系统音频标记角色，不加载模型；`voiceprint` 匹配已登记主人并将其他说话人聚类为「客户1」「客户2」…
-- **会议实时智能**：术语/缩写解释、中英实时翻译、本地规则要点聚合（问句/要求/决策/行动/技术，含数字与时间启发式）、知识库简报命中；历史详情可 **AI 提炼核心要点**（LLM，需配置）
+- **会议实时智能**：术语/缩写解释、中英实时翻译、本地规则要点聚合（问句/要求/决策/行动/技术，含数字与时间启发式）、知识库材料包（钉住 Obsidian 笔记会中对照；自动检索卡片默认关）；历史详情可 **AI 提炼核心要点**（LLM，需配置）；纪要与 AI 助手可引用同一知识库
 - **会议纪要**：内置模板 + 任意 OpenAI 兼容 LLM（DeepSeek / Kimi / Ollama / Claude…）
 - **录音与测试闭环**：每次监听保存原始分轨，历史页提供完整主录音回放（单流复用；双流立体声合并）；`talksage trim` 可准备回归素材
 - **会议媒体实时会话**：WAV、MP3、MP4/M4A 在本地解码后，与麦克风会话共用场景 ASR 路由、逐句上屏、暂停/停止、术语、翻译、要点、录音和落库链路；可选 1×/2×/4×/极速，完成后停留在当前转写页。
@@ -183,7 +183,7 @@ Rust workspace 单二进制（无 Python 运行时），由单一应用服务和
 ```
 音频输入（麦克风 / Windows 回环 / WAV·MP3·MP4）→ 有界采集队列
         → 双流公平调度 → Preprocessor → VAD → ASR
-        → 段生命周期 → 说话人归属 → EventFilter 链
+        → 段生命周期 → 说话人归属 → EventFilter 链 + 知识源（Obsidian）
         → DomainEvent → Tauri IPC / WebSocket / CLI
         ├── 有界 SessionWriter → SQLite + WAV 元数据
         └── 有界 PluginExecutor → observer 结果
@@ -199,8 +199,8 @@ Rust workspace 单二进制（无 Python 运行时），由单一应用服务和
 | `talksage-core` | 领域事件、采样时钟、转写状态、说话人归属、会话指标 |
 | `talksage-audio` | 麦克风/回环采集、媒体解码、重采样、降噪、WAV 读写、静音裁剪 |
 | `talksage-asr` | ASR 适配器：sherpa-onnx 流式、whisper.cpp GPU（Vulkan / Metal）、阿里云 |
-| `talksage-pipeline` | 共享服务、双流公平调度、段生命周期、有界插件/持久化 worker |
-| `talksage-plugins` | 插件注册表：8 个内置插件（filter/observer/finalizer 三类钩子，短段抑制/跨流去重/指标/术语/翻译/简报/质量/Webhook） |
+| `talksage-pipeline` | 共享服务、双流公平调度、段生命周期、有界插件/持久化 worker、知识检索装配 |
+| `talksage-plugins` | 插件注册表：filter/observer/finalizer 与知识源（Obsidian），覆盖短段抑制、跨流去重、指标、术语、翻译、简报、质量和 Webhook |
 | `talksage-session` | SQLite 存储、兼容 schema 迁移与质量评估 |
 | `talksage-notes` | 纪要模板 + 生成器 |
 | `talksage-server` | axum headless 服务（REST + WS + SPA） |

@@ -8,6 +8,7 @@ use crate::brief_retriever::BriefRetrieverPluginDef;
 use crate::conversation_metrics::ConversationMetricsPlugin;
 use crate::cross_stream_dedup::CrossStreamDedupPlugin;
 use crate::key_point_llm::KeyPointLlmPlugin;
+use crate::knowledge_obsidian::KnowledgeObsidianPlugin;
 use crate::registry::{
     config_type_name, CapabilityAvailability, HookRegistry, Plugin, PluginCategory,
     PluginConfig, PluginConfigIssue, PluginRegistration, RegistrationStatus,
@@ -55,6 +56,7 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
         // 会话行，webhook 要重新读这一行来拼载荷
         Box::new(SessionQualityPlugin),
         Box::new(WebhookPlugin),
+        Box::new(KnowledgeObsidianPlugin),
     ]
 }
 
@@ -495,9 +497,28 @@ mod tests {
             "conversation_metrics",
             "session_quality",
             "webhook",
+            "knowledge_obsidian",
         ] {
-            assert!(!analysis.contains(&id), "{id} 是基础设施，不该受场景裁决");
+            assert!(!analysis.contains(&id), "{id} 不应受场景 allowlist 约束");
         }
+    }
+
+    #[test]
+    fn knowledge_obsidian_is_a_source_plugin_not_an_observer() {
+        use crate::registry::Plugin as _;
+        let plugins = builtin_plugins();
+        let src = plugins
+            .iter()
+            .find(|p| p.id() == "knowledge_obsidian")
+            .expect("应注册 knowledge_obsidian");
+        assert_eq!(src.descriptor().category, PluginCategory::KnowledgeSource);
+        assert!(!analysis_plugin_ids().contains(&"knowledge_obsidian"));
+        assert!(!crate::brief_retriever::BriefRetrieverPluginDef.default_config().get_bool("enabled", true));
+
+        let mut hooks = HookRegistry::default();
+        src.register(&src.default_config(), &PluginContext::new(), &mut hooks);
+        assert_eq!(hooks.observers().len(), 0);
+        assert_eq!(hooks.filter_count(), 0);
     }
 
     /// 元数据必须覆盖每个插件，且每项都带设置页依赖的四个键。

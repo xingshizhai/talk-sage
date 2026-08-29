@@ -43,6 +43,8 @@ pub struct StartListen {
     pub kb_folder_override: Option<PathBuf>,
     /// 用户流显示名（默认「我」）。
     pub user_label: Option<String>,
+    /// 会中材料包：vault 相对路径。
+    pub pinned_note_paths: Vec<String>,
 }
 
 impl Default for StartListen {
@@ -56,6 +58,7 @@ impl Default for StartListen {
             noise_level: 0.0,
             kb_folder_override: None,
             user_label: None,
+            pinned_note_paths: Vec::new(),
         }
     }
 }
@@ -77,6 +80,7 @@ impl StartListen {
             noise_level: 0.0,
             kb_folder_override: None,
             user_label: Some(speaker_label),
+            pinned_note_paths: Vec::new(),
         }
     }
 }
@@ -174,6 +178,7 @@ pub struct TalkSageService {
     config: Arc<ConfigManager>,
     sessions: Option<Arc<SessionStore>>,
     engines: Arc<EnginePool>,
+    knowledge: Arc<crate::knowledge::KnowledgeHub>,
 }
 
 /// 会话级术语去重：同一个术语只放行第一条。
@@ -240,11 +245,17 @@ fn key_point_aggregation_policy(mode: talksage_config::SceneMode) -> Option<(u64
 
 impl TalkSageService {
     pub fn new(config: Arc<ConfigManager>, sessions: Option<Arc<SessionStore>>, engines: Arc<EnginePool>) -> Self {
+        let knowledge = Arc::new(crate::knowledge::KnowledgeHub::new(config.clone()));
         Self {
             config,
             sessions,
             engines,
+            knowledge,
         }
+    }
+
+    pub fn knowledge(&self) -> Arc<crate::knowledge::KnowledgeHub> {
+        self.knowledge.clone()
     }
 
     /// 在宿主进程退出前主动释放常驻 ASR 模型。
@@ -263,15 +274,8 @@ impl TalkSageService {
             "webhook",
             serde_json::json!({ "enabled": has_session_host }),
         );
-        let knowledge_base = if snapshot.knowledge_base.enabled
-            && !snapshot.knowledge_base.folder.is_empty()
-        {
-            let mut kb = talksage_knowledge::KnowledgeBase::new();
-            kb.index_folder(std::path::Path::new(&snapshot.knowledge_base.folder));
-            kb.chunk_count() > 0
-        } else {
-            false
-        };
+        self.knowledge.refresh_if_stale();
+        let knowledge_base = self.knowledge.is_ready();
         let availability = talksage_plugins::CapabilityAvailability {
             llm: Self::build_llm(&self.config).is_some(),
             knowledge_base,
@@ -581,23 +585,12 @@ impl TalkSageService {
             })
         });
 
-        let kb_folder = req.kb_folder_override.clone().or_else(|| {
-            if snapshot.knowledge_base.enabled && !snapshot.knowledge_base.folder.is_empty() {
-                Some(PathBuf::from(&snapshot.knowledge_base.folder))
-            } else {
-                None
-            }
-        });
-        let kb = kb_folder.and_then(|folder| {
-            let mut kb = talksage_knowledge::KnowledgeBase::new();
-            kb.index_folder(&folder);
-            if kb.chunk_count() > 0 {
-                Some(Arc::new(kb))
-            } else {
-                log::warn!("知识库目录无 .md/.txt 内容: {}", folder.display());
-                None
-            }
-        });
+        self.knowledge.refresh_with_folder(req.kb_folder_override.as_deref());
+        let kb = if self.knowledge.is_ready() {
+            Some(self.knowledge.index())
+        } else {
+            None
+        };
 
         let speaker = if scene.speaker_mode == SpeakerMode::Voiceprint {
             let spk_model = model_dir.join("wespeaker").join("wespeaker_zh_cnceleb_resnet34.onnx");
@@ -728,6 +721,7 @@ impl TalkSageService {
                     stats: stats.clone(),
                     texts: texts.clone(),
                     master_recording: master_recording.clone(),
+                    pinned_note_paths: req.pinned_note_paths.clone(),
                 }) as Arc<dyn QualityDeps>),
                 Some(Arc::new(WebhookHost {
                     config: self.config.clone(),

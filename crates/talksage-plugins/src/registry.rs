@@ -239,6 +239,7 @@ enum FinalizerOutcome {
 pub enum PluginCategory {
     Infrastructure,
     Analysis,
+    KnowledgeSource,
 }
 
 impl PluginCategory {
@@ -246,6 +247,7 @@ impl PluginCategory {
         match self {
             Self::Infrastructure => "infrastructure",
             Self::Analysis => "analysis",
+            Self::KnowledgeSource => "knowledge_source",
         }
     }
 }
@@ -255,6 +257,7 @@ pub enum PluginPhase {
     Filter,
     Observer,
     Finalizer,
+    Source,
 }
 
 impl PluginPhase {
@@ -263,6 +266,7 @@ impl PluginPhase {
             Self::Filter => "filter",
             Self::Observer => "observer",
             Self::Finalizer => "finalizer",
+            Self::Source => "source",
         }
     }
 }

@@ -126,7 +126,7 @@ user_terms       = ""     # 用户自定义关注词（逗号分隔），出现�
 enabled = false   # 实时翻译（需在场景中开启 translation_mode）
 
 [brief_retriever]
-enabled = true    # 客户简报检索（需配置 knowledge_base）
+enabled = false   # 会中自动检索卡片（默认关；材料包不依赖此插件）
 # include_user 由场景裁决：无客户流（演讲）时检索主讲人，有客户流时只检索对方
 
 # ── 场景 ────────────────────────────────────────────────────────────────────
@@ -167,11 +167,18 @@ max_speech_ratio     = 0.85   # 语音占比高于此值 → 持续噪音
 silence_rms          = 0.01   # 静音能量阈值
 high_rms             = 0.5    # 高能量噪音阈值
 
-# ── 知识库（客户简报）────────────────────────────────────────────────────
+# ── 知识库 ────────────────────────────────────────────────────────────────
+# 一期源插件：本地 Obsidian，一个 vault 根路径。
+# 会中用材料包钉笔记；纪要 / 智能纪要 / AI 助手按查询检索后写入 prompt。
 
-[knowledge_base]
+[plugins.knowledge_obsidian]
 enabled = false
-folder  = ""    # Obsidian 仓库或普通 .md/.txt 文件夹（会跳过 .obsidian / .trash）
+folder  = ""    # 一个 vault 根路径；.obsidian / .trash / .git 不会进索引
+
+# 旧键仍可读：若源插件 folder 为空，加载时会把下面两项迁入 knowledge_obsidian。
+# [knowledge_base]
+# enabled = false
+# folder  = ""
 
 # ── Webhook（会后推送）───────────────────────────────────────────────────
 

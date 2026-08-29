@@ -392,6 +392,16 @@ fn cmd_notes(id: i64, template_id: &str, json: bool) -> ExitCode {
             "未配置 LLM（请设置 llm.providers.<provider>.api_key）".into(),
         );
     };
+    let hub = talksage_pipeline::KnowledgeHub::new(mgr.clone());
+    let knowledge = {
+        let q = talksage_notes::build_knowledge_query(
+            detail.title.as_deref(),
+            None,
+            &detail.key_points,
+            &detail.segments,
+        );
+        hub.block_for_query(&q, 8)
+    };
     let gen = talksage_notes::NotesGenerator::new(llm);
     let notes = match gen.generate(
         &detail.segments,
@@ -399,6 +409,7 @@ fn cmd_notes(id: i64, template_id: &str, json: bool) -> ExitCode {
         &detail.translations,
         &detail.key_points,
         &template,
+        &knowledge,
     ) {
         Ok(n) => n,
         Err(e) => return fail(json, format!("纪要生成失败: {e}")),
@@ -434,8 +445,13 @@ fn cmd_trio(id: i64, name: Option<&str>, desc: Option<&str>, json: bool) -> Exit
             "未配置 LLM（请设置 llm.providers.<provider>.api_key）".into(),
         );
     };
+    let hub = talksage_pipeline::KnowledgeHub::new(mgr.clone());
+    let knowledge = {
+        let q = talksage_notes::build_knowledge_query(name, desc, &detail.key_points, &detail.segments);
+        hub.block_for_query(&q, 8)
+    };
     let gen = talksage_notes::TrioGenerator::new(llm);
-    let trio = match gen.generate(&detail.segments, &detail.key_points, name, desc) {
+    let trio = match gen.generate(&detail.segments, &detail.key_points, name, desc, &knowledge) {
         Ok(t) => t,
         Err(e) => return fail(json, format!("智能纪要生成失败: {e}")),
     };

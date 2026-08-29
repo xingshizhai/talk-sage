@@ -242,6 +242,7 @@ impl NotesGenerator {
         translations: &[String],
         key_points: &[KeyPointRecord],
         template: &Template,
+        knowledge: &str,
     ) -> Result<String> {
         template.validate()?;
         if transcript.is_empty() {
@@ -275,6 +276,7 @@ impl NotesGenerator {
                 ("transcript", &transcript_block),
                 ("terms", &terms_block),
                 ("translations", &translations_block),
+                ("knowledge", &knowledge_section(knowledge)),
             ],
         );
         let notes = self.llm.complete(&prompt, prompts::NOTES_SYSTEM)?;
@@ -334,6 +336,7 @@ impl TrioGenerator {
         key_points: &[KeyPointRecord],
         meeting_name: Option<&str>,
         meeting_description: Option<&str>,
+        knowledge: &str,
     ) -> Result<TrioSummary> {
         if transcript.is_empty() {
             return Err(anyhow!("会话无转写内容，无法生成纪要"));
@@ -357,6 +360,7 @@ impl TrioGenerator {
                 ("context", &context),
                 ("key_points", &key_points_block),
                 ("transcript", &transcript_block),
+                ("knowledge", &knowledge_section(knowledge)),
             ],
         );
 
@@ -386,6 +390,49 @@ impl TrioGenerator {
             action_items,
         })
     }
+}
+
+fn knowledge_section(knowledge: &str) -> String {
+    let trimmed = knowledge.trim();
+    if trimmed.is_empty() {
+        "（无相关知识）".into()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 构造检索查询：标题、说明、要点，过短时追加转写前约 1500 字。
+pub fn build_knowledge_query(
+    title: Option<&str>,
+    description: Option<&str>,
+    key_points: &[KeyPointRecord],
+    transcript: &[TranscriptSegment],
+) -> String {
+    let mut q = String::new();
+    if let Some(t) = title.map(str::trim).filter(|s| !s.is_empty()) {
+        q.push_str(t);
+        q.push('\n');
+    }
+    if let Some(d) = description.map(str::trim).filter(|s| !s.is_empty()) {
+        q.push_str(d);
+        q.push('\n');
+    }
+    for kp in key_points {
+        q.push_str(&kp.content);
+        q.push('\n');
+    }
+    const MAX_CHARS: usize = 1500;
+    if q.chars().count() < 40 {
+        let extra: String = transcript
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        q.push_str(&extra.chars().take(MAX_CHARS).collect::<String>());
+    } else if q.chars().count() > MAX_CHARS {
+        q = q.chars().take(MAX_CHARS).collect();
+    }
+    q
 }
 
 /// 从 LLM 输出中提取 JSON（容忍 ```json 围栏与前后说明文字）。
@@ -438,7 +485,7 @@ pub fn generate_highlights(
 mod tests {
     use super::*;
     use talksage_core::KeyPointRecord;
-    use talksage_llm::MockProvider;
+    use talksage_llm::{LLMProvider, MockProvider};
 
     #[test]
     fn prompt_templates_keep_required_placeholders() {
@@ -448,9 +495,11 @@ mod tests {
         assert!(prompts::NOTES_USER.contains("{transcript}"));
         assert!(prompts::NOTES_USER.contains("{terms}"));
         assert!(prompts::NOTES_USER.contains("{translations}"));
+        assert!(prompts::NOTES_USER.contains("{knowledge}"));
         assert!(prompts::TRIO_USER.contains("{context}"));
         assert!(prompts::TRIO_USER.contains("{key_points}"));
         assert!(prompts::TRIO_USER.contains("{transcript}"));
+        assert!(prompts::TRIO_USER.contains("{knowledge}"));
         assert!(prompts::HIGHLIGHTS_USER_FROM_KEY_POINTS.contains("{key_points}"));
         assert!(prompts::HIGHLIGHTS_USER_FROM_TRANSCRIPT.contains("{transcript}"));
         assert!(!prompts::NOTES_SYSTEM.trim().is_empty());
@@ -525,7 +574,7 @@ mod tests {
         ];
         let t = get_template("standard_meeting").unwrap();
         let notes = gen
-            .generate(&segs, &["NPI = 新产品导入".into()], &[], &[], &t)
+            .generate(&segs, &["NPI = 新产品导入".into()], &[], &[], &t, "")
             .unwrap();
         assert!(notes.contains("会议纪要"));
         assert!(notes.contains("NPI"));
@@ -538,7 +587,7 @@ mod tests {
         };
         let gen = NotesGenerator::new(Arc::new(mock));
         let t = get_template("standard_meeting").unwrap();
-        assert!(gen.generate(&[], &[], &[], &[], &t).is_err());
+        assert!(gen.generate(&[], &[], &[], &[], &t, "").is_err());
     }
 
     #[test]
@@ -571,7 +620,7 @@ mod tests {
             },
         ];
         let trio = gen
-            .generate(&segs, &[], Some("NPI 评审"), Some("确认交付时间"))
+            .generate(&segs, &[], Some("NPI 评审"), Some("确认交付时间"), "")
             .unwrap();
         assert!(!trio.short_overview.trim().is_empty(), "概述为空");
         assert_eq!(trio.key_points.len(), 1);
@@ -595,7 +644,68 @@ mod tests {
             duration_ms: 100,
             rms: 0.1,
         }];
-        assert!(gen.generate(&segs, &[], None, None).is_err());
+        assert!(gen.generate(&segs, &[], None, None, "").is_err());
+    }
+
+    struct RecordingLlm {
+        users: std::sync::Mutex<Vec<String>>,
+        response: String,
+    }
+
+    impl LLMProvider for RecordingLlm {
+        fn complete(&self, prompt: &str, _system: &str) -> anyhow::Result<String> {
+            self.users.lock().unwrap().push(prompt.to_string());
+            Ok(self.response.clone())
+        }
+    }
+
+    fn sample_segs() -> Vec<TranscriptSegment> {
+        vec![TranscriptSegment {
+            speaker_id: 1,
+            speaker_label: "客户".into(),
+            speaker_attribution: None,
+            text: "We need NPI samples by Friday.".into(),
+            is_partial: false,
+            ts_ms: 0,
+            duration_ms: 500,
+            rms: 0.2,
+        }]
+    }
+
+    #[test]
+    fn notes_prompt_includes_knowledge_or_placeholder() {
+        let t = get_template("standard_meeting").unwrap();
+        let rec = Arc::new(RecordingLlm {
+            users: std::sync::Mutex::new(Vec::new()),
+            response: "# 会议纪要\n\n## 摘要\nok".into(),
+        });
+        NotesGenerator::new(rec.clone())
+            .generate(&sample_segs(), &[], &[], &[], &t, "knowledge_obsidian:a.md — 条款\nMOQ 1000")
+            .unwrap();
+        assert!(rec.users.lock().unwrap()[0].contains("knowledge_obsidian:a.md"));
+
+        let rec2 = Arc::new(RecordingLlm {
+            users: std::sync::Mutex::new(Vec::new()),
+            response: "# 会议纪要\n\n## 摘要\nok".into(),
+        });
+        NotesGenerator::new(rec2.clone())
+            .generate(&sample_segs(), &[], &[], &[], &t, "")
+            .unwrap();
+        assert!(rec2.users.lock().unwrap()[0].contains("（无相关知识）"));
+    }
+
+    #[test]
+    fn trio_three_prompts_share_the_same_knowledge_block() {
+        let rec = Arc::new(RecordingLlm {
+            users: std::sync::Mutex::new(Vec::new()),
+            response: r#"{"key_points":[{"topic":"交付","points":["客户确认了周五"]}],"checklist":["跟进邮件"]}"#.into(),
+        });
+        TrioGenerator::new(rec.clone())
+            .generate(&sample_segs(), &[], None, None, "knowledge_obsidian:wiki.md — NPI\n交期两周")
+            .unwrap();
+        let users = rec.users.lock().unwrap();
+        assert_eq!(users.len(), 3);
+        assert!(users.iter().all(|u| u.contains("knowledge_obsidian:wiki.md")));
     }
 
     #[test]

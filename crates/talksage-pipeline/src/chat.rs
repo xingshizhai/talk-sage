@@ -26,6 +26,18 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(1);
 const SYSTEM_PROMPT: &str = "你是 TalkSage（拓思者）内置的 AI 助手，帮用户思考与处理工作问题。\
 回答简洁、直接、可执行；不确定就说不确定，不要编造。用户用什么语言提问就用什么语言回答。";
 
+const KNOWLEDGE_INSTRUCTION: &str = "\n\n下面是用户知识库中的相关片段。回答时必须区分：来自知识库的引用（列出路径）与你的推断。没有出现在片段里的政策或事实不要编造。\n\n";
+
+/// 有命中则把知识块追加到同一条 system；无命中保持原人设。
+pub fn system_prompt_for_turn(knowledge_block: &str) -> String {
+    let block = knowledge_block.trim();
+    if block.is_empty() {
+        SYSTEM_PROMPT.to_string()
+    } else {
+        format!("{SYSTEM_PROMPT}{KNOWLEDGE_INSTRUCTION}{block}")
+    }
+}
+
 /// [`ChatService::send`] 的返回：两条消息都已入库，回答正文随后由事件补齐。
 #[derive(Debug, Clone, Copy)]
 pub struct ChatSendResult {
@@ -39,15 +51,26 @@ pub struct ChatSendResult {
 pub struct ChatService {
     config: Arc<ConfigManager>,
     sessions: Arc<SessionStore>,
+    knowledge: Arc<crate::knowledge::KnowledgeHub>,
     /// 正在生成的回答 id → 取消开关。
     running: Mutex<HashMap<i64, Arc<AtomicBool>>>,
 }
 
 impl ChatService {
     pub fn new(config: Arc<ConfigManager>, sessions: Arc<SessionStore>) -> Self {
+        let knowledge = Arc::new(crate::knowledge::KnowledgeHub::new(config.clone()));
+        Self::with_knowledge(config, sessions, knowledge)
+    }
+
+    pub fn with_knowledge(
+        config: Arc<ConfigManager>,
+        sessions: Arc<SessionStore>,
+        knowledge: Arc<crate::knowledge::KnowledgeHub>,
+    ) -> Self {
         Self {
             config,
             sessions,
+            knowledge,
             running: Mutex::new(HashMap::new()),
         }
     }
@@ -79,7 +102,8 @@ impl ChatService {
 
         // 上下文取最近 N 条（含刚落库的提问），system 单独放最前
         let history = self.sessions.get_chat_messages(thread_id)?;
-        let mut messages = vec![ChatMessage::system(SYSTEM_PROMPT)];
+        let knowledge_block = self.knowledge.block_for_query(text, 5);
+        let mut messages = vec![ChatMessage::system(system_prompt_for_turn(&knowledge_block))];
         let start = history.len().saturating_sub(CONTEXT_MESSAGES + 1);
         messages.extend(
             history[start..]
@@ -185,6 +209,20 @@ mod tests {
         ));
         let sessions = Arc::new(SessionStore::open(":memory:").unwrap());
         ChatService::new(config, sessions)
+    }
+
+    #[test]
+    fn system_prompt_stays_bare_without_knowledge() {
+        assert_eq!(system_prompt_for_turn(""), SYSTEM_PROMPT);
+        assert_eq!(system_prompt_for_turn("   "), SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn system_prompt_appends_knowledge_block() {
+        let p = system_prompt_for_turn("knowledge_obsidian:a.md — 条款\nMOQ 1000");
+        assert!(p.contains(SYSTEM_PROMPT));
+        assert!(p.contains("knowledge_obsidian:a.md"));
+        assert!(p.contains("列出路径"));
     }
 
     /// 没配 LLM key 时不该在库里留下"提问 + 永远空着的回答"，

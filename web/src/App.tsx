@@ -19,6 +19,7 @@ import ChatSection from "./sections/ChatSection";
 import DebugWindow from "./sections/DebugWindow";
 import type { TermItem } from "./sections/TermsSection";
 import type { BriefItem } from "./sections/BriefSection";
+import { knowledgeBaseSettings, knowledgeSourceReady, togglePinnedPath, type KnowledgeDoc } from "./lib/knowledge";
 
 const api = getApi();
 
@@ -97,6 +98,8 @@ export default function App() {
   // 用户在当前会话主动删除的术语；后续其他插件再返回同一词也不显示。
   const [dismissedTermKeys, setDismissedTermKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [briefs, setBriefs] = useState<BriefItem[]>([]);
+  const [kbDocs, setKbDocs] = useState<KnowledgeDoc[]>([]);
+  const [pinnedNotePaths, setPinnedNotePaths] = useState<string[]>([]);
   const [rawEvents, setRawEvents] = useState<DomainEvent[]>([]);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [searchResults, setSearchResults] = useState<SegmentHit[] | null>(null);
@@ -398,6 +401,28 @@ export default function App() {
     setAudioSource(newCfg.audio?.audio_source ?? "mic");
   }, []);
 
+  useEffect(() => {
+    if (!knowledgeSourceReady(config)) {
+      setKbDocs([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .listKnowledgeDocuments()
+      .then((docs) => {
+        if (cancelled) return;
+        setKbDocs(docs);
+        setPinnedNotePaths((prev) => prev.filter((p) => docs.some((d) => d.path === p)));
+      })
+      .catch((e) => {
+        console.error("读取知识库文档失败:", e);
+        if (!cancelled) setKbDocs([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [config]);
+
   const handleToggleAudioSource = useCallback(async () => {
     const next: "mic" | "loopback" = audioSource === "mic" ? "loopback" : "mic";
     setAudioSource(next);
@@ -650,7 +675,7 @@ export default function App() {
         // 后端会创建全新的 SessionRuntime；前端也必须同步丢弃上一会话的聚合状态。
         // 必须在 startListen 前清空，避免启动后立即到达的新事件被误删。
         resetLiveSession();
-        await api.startListen();
+        await api.startListen(pinnedNotePaths);
       }
     } catch (e) {
       const msg = String(e).replace(/^Error: /, "");
@@ -660,7 +685,7 @@ export default function App() {
         window.alert(`启动失败：${msg}`);
       }
     }
-  }, [confirmLeaveSettings, listening, resetLiveSession]);
+  }, [confirmLeaveSettings, listening, pinnedNotePaths, resetLiveSession]);
 
   const handlePause = useCallback(async () => {
     if (!listening) return;
@@ -1100,7 +1125,7 @@ export default function App() {
         )}
       </div>
 
-      {/* 右栏：术语/简报属于实时转写上下文，仅转写页显示（历史/设置页右侧为设置内容） */}
+      {/* 右栏：术语/知识库属于实时转写上下文，仅转写页显示（历史/设置页右侧为设置内容） */}
       {navPage === "transcript" && (
         <AsidePanel
           collapsed={asideCollapsed}
@@ -1113,6 +1138,11 @@ export default function App() {
           }
           terms={terms}
           briefs={briefs}
+          knowledgeEnabled={knowledgeSourceReady(config)}
+          knowledgeFolder={knowledgeBaseSettings(config).folder}
+          knowledgeDocs={kbDocs}
+          pinnedPaths={pinnedNotePaths}
+          onTogglePin={(path) => setPinnedNotePaths((prev) => togglePinnedPath(prev, path))}
           expandedTerms={expandedTerms}
           onToggleTerm={(id) => setExpandedTerms((prev) => ({ ...prev, [id]: !prev[id] }))}
           dismissedTermKeys={dismissedTermKeys}

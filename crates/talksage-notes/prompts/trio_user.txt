@@ -5,4 +5,7 @@
 ## 转写（核对说话人）
 {transcript}
 
+## 相关知识
+{knowledge}
+
 请整理。

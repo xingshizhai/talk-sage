@@ -26,6 +26,7 @@ pub(crate) struct QualityHost {
     pub stats: Arc<Mutex<Vec<StreamMeta>>>,
     pub texts: Arc<Mutex<Vec<String>>>,
     pub master_recording: Arc<Mutex<Option<String>>>,
+    pub pinned_note_paths: Vec<String>,
 }
 
 impl QualityDeps for QualityHost {
@@ -43,6 +44,7 @@ impl QualityDeps for QualityHost {
         // 记录本次运行的模型/场景/主要参数：事后可对比不同 ASR 配置的质量
         // 差异，或按相同参数重放历史录音（见 SessionRuntimeInfo）。
         meta.runtime_info = Some(runtime_info_from_config(&snapshot));
+        meta.pinned_note_paths = self.pinned_note_paths.clone();
         if let Err(e) = self.store.set_session_meta(session_id, &meta) {
             // 写不进 meta 不该拖垮整条链：会话本身已经落库，报个警继续。
             log::warn!("保存会话元数据失败: {e}");
@@ -191,6 +193,7 @@ mod tests {
             stats: Arc::new(Mutex::new(stats)),
             texts: Arc::new(Mutex::new(texts)),
             master_recording: Arc::new(Mutex::new(None)),
+            pinned_note_paths: Vec::new(),
         }
     }
 

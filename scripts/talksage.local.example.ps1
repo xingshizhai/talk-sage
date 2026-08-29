@@ -3,8 +3,19 @@
 # 此文件会被 talksage.ps1 自动加载（dot-source），在 Ensure-VulkanEnv 之前执行。
 # 已加入 .gitignore，修改不会入库——每台开发机各自维护自己的路径。
 #
-# 用途：Vulkan SDK / LLVM / Cargo 输出目录安装到非默认路径时，在此覆盖自动探测结果。
+# 用途：Vulkan SDK / LLVM / Cargo 输出目录 / 网络代理 等本机特定配置。
 # 不需要修改的项保持注释即可。
+
+# ── 网络代理 ─────────────────────────────────────────────
+# 本机代理（v2ray / clash 等本地 HTTP 代理端口）。设置后：
+#   - 应用内模型下载（HuggingFace）、LLM API、Webhook 走代理；
+#   - 脚本默认在编译阶段清除代理（让 Cargo 直连 rsproxy.cn 国内镜像）；
+#   - 若你的网络访问 rsproxy.cn / crates.io 也必须走代理，
+#     再设置下方 TALKSAGE_BUILD_KEEP_PROXY=1 保留代理。
+# $env:HTTP_PROXY  = "http://127.0.0.1:10808"
+# $env:HTTPS_PROXY = "http://127.0.0.1:10808"
+# $env:http_proxy  = "http://127.0.0.1:10808"
+# $env:https_proxy = "http://127.0.0.1:10808"
 
 # Vulkan SDK 安装目录（默认自动扫描 C:\VulkanSDK\*，取最新版）
 # $env:VULKAN_SDK = "C:\VulkanSDK\1.4.357.0"

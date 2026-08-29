@@ -21,7 +21,7 @@
 
 ## What it does
 
-拓思者 is **local-first**: capture, recording, GPU ASR, speaker attribution, and media decoding run on the device. If you explicitly select Aliyun fallback or configure a remote OpenAI-compatible LLM, audio or transcript text is sent to that configured provider. The app provides real-time transcription, speaker attribution, term explanations, translation, key-point aggregation, knowledge-base briefs, and meeting minutes while preserving raw recordings for regression testing.
+拓思者 is **local-first**: capture, recording, GPU ASR, speaker attribution, and media decoding run on the device. If you explicitly select Aliyun fallback or configure a remote OpenAI-compatible LLM, audio or transcript text is sent to that configured provider. The app provides real-time transcription, speaker attribution, term explanations, translation, key-point aggregation, an **Obsidian knowledge base** (live meeting pack plus retrieval for minutes and the AI assistant), and meeting minutes while preserving raw recordings for regression testing.
 
 ## Features
 
@@ -29,7 +29,7 @@
 - **Local GPU ASR** — Windows x64: **whisper.cpp + Vulkan** (AMD / Intel / NVIDIA, driver-level loader, no extra runtime needed); macOS Apple Silicon: **whisper.cpp + Metal**. Both use Whisper large-v3-turbo Q5_0 (~547 MiB). When a supported GPU is detected, the pipeline routes through it automatically; falls back to Aliyun cloud or CPU.
 - **Scene modes** — six complete runtime presets: **Dictation / Conversation / Bilingual / Meeting / Lecture / Custom**. Conversation is the default and uses low-cost channel attribution; only Meeting enables WeSpeaker voiceprint clustering by default. Bilingual explicitly binds Chinese/English models and translation direction to the two input streams.
 - **Speaker attribution** — explicit `off / channel / voiceprint` policy instead of a boolean. Channel attribution labels microphone/system-audio roles without loading a model; voiceprint mode identifies the enrolled owner and clusters other speakers as 「客户1」「客户2」…
-- **Live meeting intelligence** — term/acronym explanations, real-time translation (en↔zh), rule-based key-point aggregation (questions / requirements / decisions / actions / technical, with numeric & time heuristics), knowledge-base brief retrieval; History offers **AI-extracted key points** (LLM, needs config)
+- **Live meeting intelligence** — term/acronym explanations, real-time translation (en↔zh), rule-based key-point aggregation (questions / requirements / decisions / actions / technical, with numeric & time heuristics), a meeting pack of pinned Obsidian notes (auto-hit cards off by default); History offers **AI-extracted key points** (LLM, needs config); minutes and the AI assistant can retrieve the same knowledge base
 - **Meeting minutes** — template-based generation via any OpenAI-compatible LLM (DeepSeek, Kimi, Ollama, …)
 - **Recording & testing loop** — every session keeps raw mono PCM per input stream and exposes one main recording for playback (single-stream reuse; dual-stream stereo with microphone left/system audio right); `talksage trim` supports regression preparation
 - **Live meeting media sessions** — WAV, MP3, and MP4/M4A are locally decoded and then run through the same scene-selected ASR, incremental transcript, pause/stop, term, translation, key-point, recording, and persistence pipeline as microphone sessions. Processing speed is selectable (1×/2×/4×/unlimited), and completion keeps the transcript on screen instead of navigating away.
@@ -201,7 +201,7 @@ Meeting mode enables online speaker clustering when the WeSpeaker model is insta
 | `talksage-audio` | Mic/loopback capture, resample, denoise, wav IO, silence trim |
 | `talksage-asr` | ASR engine adapters: sherpa-onnx streaming, whisper.cpp GPU (Vulkan / Metal), Aliyun cloud |
 | `talksage-pipeline` | Shared service, fair dual-stream scheduling, segment lifecycle, bounded plugin/persistence workers |
-| `talksage-plugins` | Registry with filters, segment observers, finalizers, config metadata, and 8 built-ins |
+| `talksage-plugins` | Registry with filters, observers, finalizers, a knowledge source (Obsidian vault), config metadata, and built-ins |
 | `talksage-session` | SQLite storage, compatible schema migration, quality evaluation |
 | `talksage-notes` | Minutes templates + generator |
 | `talksage-server` | axum headless service (REST + WS + SPA) |

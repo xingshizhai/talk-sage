@@ -78,8 +78,12 @@ export const ipcApi: AppApi = {
     await invoke("ping");
   },
 
-  async startListen(): Promise<void> {
-    await invoke("start_listen");
+  async startListen(pinnedNotePaths?: string[]): Promise<void> {
+    await invoke("start_listen", { pinnedNotePaths: pinnedNotePaths ?? [] });
+  },
+
+  async listKnowledgeDocuments(): Promise<{ path: string; title: string; text: string }[]> {
+    return invoke("list_knowledge_documents");
   },
 
   async stopListen(): Promise<void> {
@@ -325,8 +329,17 @@ export const httpApi: AppApi = {
     await req("/health");
   },
 
-  async startListen(): Promise<void> {
-    await req("/listen/start", { method: "POST" });
+  async startListen(pinnedNotePaths?: string[]): Promise<void> {
+    await req("/listen/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned_note_paths: pinnedNotePaths ?? [] }),
+    });
+  },
+
+  async listKnowledgeDocuments(): Promise<{ path: string; title: string; text: string }[]> {
+    const r = await req<{ documents?: { path: string; title: string; text: string }[] }>("/knowledge/documents");
+    return r.documents ?? [];
   },
 
   async stopListen(): Promise<void> {
