@@ -72,6 +72,10 @@ impl SessionRuntime {
         self.pipeline.set_paused(paused);
     }
 
+    pub fn set_playback_speed(&self, speed: f32) {
+        self.pipeline.set_playback_speed(speed);
+    }
+
     pub fn is_paused(&self) -> bool {
         self.pipeline.is_paused()
     }

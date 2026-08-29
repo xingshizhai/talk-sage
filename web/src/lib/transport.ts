@@ -258,8 +258,8 @@ export const ipcApi: AppApi = {
     return invoke<number>("start_file_import", { path });
   },
 
-  async cancelFileImport(): Promise<void> {
-    await invoke("cancel_file_import");
+  async setFilePlaybackSpeed(speed: number): Promise<void> {
+    await invoke("set_file_playback_speed", { speed });
   },
 
   async checkForUpdates(): Promise<UpdateCheckResult> {
@@ -274,20 +274,6 @@ export const ipcApi: AppApi = {
     return invoke<OfflineUpgradeResult>("install_offline_upgrade", { path });
   },
 
-  onImportEvent(handler: (ev: DomainEvent) => void): () => void {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    listen<DomainEvent>("talksage://import-event", (e) => handler(e.payload))
-      .then((fn) => {
-        if (cancelled) fn();
-        else unlisten = fn;
-      })
-      .catch((err) => console.error("failed to listen import events:", err));
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  },
 };
 
 /** headless 服务适配器（浏览器访问，M4）。 */
@@ -611,8 +597,8 @@ export const httpApi: AppApi = {
     throw new Error("headless 模式不支持文件导入");
   },
 
-  async cancelFileImport(): Promise<void> {
-    // headless 无文件导入
+  async setFilePlaybackSpeed(_speed: number): Promise<void> {
+    throw new Error("headless 模式不支持调整文件处理速度");
   },
 
   async checkForUpdates(): Promise<UpdateCheckResult> {
@@ -633,9 +619,6 @@ export const httpApi: AppApi = {
     throw new Error("离线升级仅桌面应用可用");
   },
 
-  onImportEvent(_handler: (ev: DomainEvent) => void): () => void {
-    return () => {};
-  },
 };
 
 /** 选择当前载体：Tauri 运行时 → IPC；浏览器（headless 服务）→ HTTP。 */

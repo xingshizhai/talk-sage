@@ -54,7 +54,7 @@ fn normalize(evs: &[DomainEvent]) -> String {
             DomainEvent::SessionStats { speaker_label, final_segments, .. } => {
                 out.push_str(&format!("stats\t{speaker_label}\t{final_segments}\n"))
             }
-            DomainEvent::Level { .. } => {} // 高频且随机，完全忽略
+            DomainEvent::Level { .. } | DomainEvent::MediaProgress { .. } => {} // 高频且随机，完全忽略
             other => out.push_str(&format!("{}\n", other_kind(other))),
         }
     }

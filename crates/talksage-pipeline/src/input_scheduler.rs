@@ -62,8 +62,10 @@ impl FilePacer {
         now >= self.next_at
     }
 
-    pub(super) fn consumed(&mut self) {
-        self.next_at += self.interval;
+    pub(super) fn consumed(&mut self, speed: f32) {
+        // “极速”仍保留最小节拍，避免长录音瞬间灌满 ASR 命令队列。
+        let effective_speed = if speed <= 0.0 { 8.0 } else { speed };
+        self.next_at += self.interval.div_f32(effective_speed);
     }
 
     /// 暂停期间把 deadline 保持在未来，恢复后不会追赶暂停期间的旧时钟。
@@ -110,10 +112,19 @@ mod tests {
         let interval = Duration::from_millis(100);
         let mut pacer = FilePacer::new_at(interval, base);
         assert!(pacer.due_at(base));
-        pacer.consumed();
+        pacer.consumed(1.0);
         assert!(!pacer.due_at(base + Duration::from_millis(99)));
         pacer.postpone_at(base + Duration::from_secs(10));
         assert!(!pacer.due_at(base + Duration::from_secs(10)));
         assert!(pacer.due_at(base + Duration::from_millis(10_100)));
+    }
+
+    #[test]
+    fn file_pacer_scales_interval_with_speed() {
+        let base = Instant::now();
+        let mut pacer = FilePacer::new_at(Duration::from_millis(100), base);
+        pacer.consumed(2.0);
+        assert!(!pacer.due_at(base + Duration::from_millis(49)));
+        assert!(pacer.due_at(base + Duration::from_millis(50)));
     }
 }

@@ -21,18 +21,18 @@
 
 ## What it does
 
-拓思者 runs **100% locally** (no cloud, no audio leaves your machine): listen to a meeting through your microphone (plus system loopback for remote callers), get **real-time bilingual transcription**, **automatic speaker identification** (register your own voice, then everyone else is separated automatically), live **term explanations**, **translation**, **key-point aggregation**, an **Obsidian knowledge base** (meeting pack during live listen; minutes and the AI assistant can cite it), and **meeting minutes** — all while **recording the raw audio** for later regression testing.
+拓思者 is **local-first**: capture, recording, GPU ASR, speaker attribution, and media decoding run on the device. If you explicitly select Aliyun fallback or configure a remote OpenAI-compatible LLM, audio or transcript text is sent to that configured provider. The app provides real-time transcription, speaker attribution, term explanations, translation, key-point aggregation, an **Obsidian knowledge base** (live meeting pack plus retrieval for minutes and the AI assistant), and meeting minutes while preserving raw recordings for regression testing.
 
 ## Features
 
-- **Real-time streaming ASR** — Chinese (paraformer) + English (zipformer) dual streams, incremental partials, VAD segmentation; **smart punctuation** (streaming ASR emits no punctuation → heuristic 。，？ from question tails / conjunctions / subject & time words, then sentence-split display); **denoise off by default** so faint/distant speech is still recognized (enable in Settings for noisy rooms)
+- **Real-time ASR** — VAD segmentation, responsive partial updates, and smart punctuation/sentence display; **denoise is off by default** so faint or distant speech remains recognizable (enable it in Settings for noisy rooms)
 - **Local GPU ASR** — Windows x64: **whisper.cpp + Vulkan** (AMD / Intel / NVIDIA, driver-level loader, no extra runtime needed); macOS Apple Silicon: **whisper.cpp + Metal**. Both use Whisper large-v3-turbo Q5_0 (~547 MiB). When a supported GPU is detected, the pipeline routes through it automatically; falls back to Aliyun cloud or CPU.
 - **Scene modes** — six complete runtime presets: **Dictation / Conversation / Bilingual / Meeting / Lecture / Custom**. Conversation is the default and uses low-cost channel attribution; only Meeting enables WeSpeaker voiceprint clustering by default. Bilingual explicitly binds Chinese/English models and translation direction to the two input streams.
 - **Speaker attribution** — explicit `off / channel / voiceprint` policy instead of a boolean. Channel attribution labels microphone/system-audio roles without loading a model; voiceprint mode identifies the enrolled owner and clusters other speakers as 「客户1」「客户2」…
 - **Live meeting intelligence** — term/acronym explanations, real-time translation (en↔zh), rule-based key-point aggregation (questions / requirements / decisions / actions / technical, with numeric & time heuristics), a meeting pack of pinned Obsidian notes (auto-hit cards off by default); History offers **AI-extracted key points** (LLM, needs config); minutes and the AI assistant can retrieve the same knowledge base
 - **Meeting minutes** — template-based generation via any OpenAI-compatible LLM (DeepSeek, Kimi, Ollama, …)
 - **Recording & testing loop** — every session keeps raw mono PCM per input stream and exposes one main recording for playback (single-stream reuse; dual-stream stereo with microphone left/system audio right); `talksage trim` supports regression preparation
-- **Meeting media import** — the desktop app imports WAV, MP3, and MP4/M4A (AAC audio track), decodes locally without an external ffmpeg installation, downmixes to mono, and resamples to the ASR pipeline's 16 kHz input
+- **Live meeting media sessions** — WAV, MP3, and MP4/M4A are locally decoded and then run through the same scene-selected ASR, incremental transcript, pause/stop, term, translation, key-point, recording, and persistence pipeline as microphone sessions. Processing speed is selectable (1×/2×/4×/unlimited), and completion keeps the transcript on screen instead of navigating away.
 - **Session quality assessment** — automatic noise/silence detection per session (configurable thresholds + auto background-noise calibration); noisy sessions skip downstream analysis
 - **Runtime noise control** — adjust the mic noise gate live from the left panel *while listening*, no restart
 - **History** — SQLite sessions with search, per-segment duration/RMS stats, quality badges; **each session auto-saves a runtime snapshot** (scene mode / ASR engines / VAD / denoise / min-commit / gain / speaker mode / app version) so you can compare transcription quality across models & parameters afterwards, or re-run ASR with `talksage session replay <id>` (History detail and `talksage session show <id>`)
@@ -213,7 +213,7 @@ Meeting mode enables online speaker clustering when the WeSpeaker model is insta
 ```bash
 ./scripts/talksage.sh test      # macOS/Linux: Rust + frontend + script tests
 cargo test --workspace         # Rust: unit + live model tests (auto-skip if models missing)
-cd web && npm test             # frontend: 60 tests (current suite)
+cd web && npm test             # frontend: 68 tests (current suite)
 ```
 
 Windows 使用 `.\scripts\run_tests.ps1` 或 `.\scripts\talksage.ps1 test`。
@@ -230,11 +230,15 @@ Real-model integration tests cover Chinese/English ASR, dual-stream fairness and
 - [RECORDING.md](docs/RECORDING.md) — recording / trim / regression loop
 - [LOGGING.md](docs/LOGGING.md) — structured logging & debugging
 - [testing.md](docs/testing.md) — automated testing strategy
+- [real-time-transcription.md](docs/real-time-transcription.md) — live transcript behavior, timing, modes, and improvement roadmap
+- [evaluation-user-guide.md](docs/evaluation-user-guide.md) — audio evaluation and model-comparison user guide
+- [evaluation-framework.md](docs/evaluation-framework.md) — evaluation architecture and metrics
+- [terminology.md](docs/terminology.md) — terminology correction, hot words, and evaluation metrics
 
 ## Repository layout
 
 ```
-crates/            Rust workspace (10 domain crates)
+crates/            Rust workspace domain crates
 web/               Tauri 2 + React frontend
 scripts/           build/run/test tooling + model downloaders
   talksage.ps1              Windows all-in-one script (auto-configures Vulkan env)

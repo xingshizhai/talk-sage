@@ -440,6 +440,22 @@ fn list_knowledge_documents(state: tauri::State<'_, AppState>) -> Vec<serde_json
 /// invoke 立即返回，前端可继续销毁窗口。
 #[tauri::command]
 async fn stop_listen(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    // 文件会话由它的完成监视器统一收尾，避免这里与自然 EOF 竞争 take/finish。
+    let import_flag = state.import_cancel.lock().map_err(|_| "导入锁失败".to_string())?.clone();
+    if let Some(flag) = import_flag {
+        flag.store(true, Ordering::SeqCst);
+        let import_cancel = state.import_cancel.clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < deadline {
+                if import_cancel.lock().map_err(|_| "导入锁失败".to_string())?.is_none() {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err("停止文件转写超时，请查看日志".to_string())
+        }).await.map_err(|e| e.to_string())?;
+    }
     let running = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?.take();
     let Some(running) = running else {
         return Ok(());
@@ -463,6 +479,20 @@ fn set_listen_paused(paused: bool, state: tauri::State<'_, AppState>) -> Result<
             Ok(())
         }
         None => Err("未在监听中".into()),
+    }
+}
+
+/// 调整导入媒体的处理速度；0 表示受保护的最高速度。
+#[tauri::command]
+fn set_file_playback_speed(speed: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let guard = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+    match guard.as_ref() {
+        Some(running) => {
+            running.set_playback_speed(speed);
+            log::info!("文件转写速度已调整为 {speed}x（0=极速）");
+            Ok(())
+        }
+        None => Err("当前没有活动会话".into()),
     }
 }
 
@@ -948,8 +978,8 @@ fn pick_folder() -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
-/// 导入本地录音文件：全量转写 + 落库，转写期间逐段向前端推送 `talksage://import-event`。
-/// 异步命令：在阻塞线程池运行，不冻结 UI；文件转写完毕（或取消）后返回。
+/// 启动本地媒体会话。它与麦克风会话共用事件、暂停、分析插件和落库链路；
+/// 命令在管线启动后立即返回 session_id，完成结果由 MediaCompleted 推送。
 #[tauri::command]
 async fn start_file_import(
     path: String,
@@ -978,62 +1008,73 @@ async fn start_file_import(
     }
 
     let service = state.service.clone();
-    let cfg = state.config.snapshot();
-    let engine_kind = EngineKind::from_name(&cfg.asr.engine_zh).unwrap_or(EngineKind::ParaformerZh);
     let path_buf = PathBuf::from(&path);
-
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    let running_slot = state.running.clone();
+    let import_slot = state.import_cancel.clone();
+    tauri::async_runtime::spawn_blocking(move || {
         let done = Arc::new(AtomicBool::new(false));
-        let done2 = done.clone();
-        let app2 = app.clone();
+        let done_for_events = done.clone();
+        let event_app = app.clone();
+        let started = match service.start(
+            StartListen::import_file(path_buf, "说话人".into()),
+            Arc::new(move |ev: DomainEvent| {
+                if matches!(&ev, DomainEvent::Status { stage: StatusStage::Idle, .. }) {
+                    done_for_events.store(true, Ordering::SeqCst);
+                }
+                let _ = event_app.emit("talksage://event", &ev);
+            }),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                *import_slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                log::error!("启动文件转写失败 {}: {error:#}", path);
+                return Err(error.to_string());
+            }
+        };
+        let sid = match started.session_id() {
+            Some(sid) => sid,
+            None => {
+                let _ = service.finish(started);
+                *import_slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                return Err("文件会话未创建".to_string());
+            }
+        };
+        *running_slot.lock().map_err(|_| "pipeline 锁失败".to_string())? = Some(started);
 
-        let running = service
-            .start(
-                talksage_pipeline::StartListen::import_file(path_buf, engine_kind, "说话人".into()),
-                Arc::new(move |ev: DomainEvent| {
-                    if matches!(&ev, DomainEvent::Status { stage: StatusStage::Idle, .. }) {
-                        done2.store(true, Ordering::SeqCst);
-                    }
-                    let _ = app2.emit("talksage://import-event", &ev);
-                }),
-            )
-            .map_err(|e| e.to_string())?;
-
-        let deadline = Instant::now() + Duration::from_secs(7200); // 最长 2 小时
-        while !done.load(Ordering::SeqCst)
-            && !cancel.load(Ordering::SeqCst)
-            && Instant::now() < deadline
-        {
-            std::thread::sleep(Duration::from_millis(200));
+        let monitor_service = service.clone();
+        let monitor_running = running_slot.clone();
+        let monitor_import = import_slot.clone();
+        let monitor_app = app.clone();
+        let monitor_result = std::thread::Builder::new().name("talksage-file-session".into()).spawn(move || {
+            while !done.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let cancelled = cancel.load(Ordering::SeqCst);
+            let running = monitor_running.lock().unwrap_or_else(|e| e.into_inner()).take();
+            let result = running.map(|r| monitor_service.finish(r)).transpose();
+            *monitor_import.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            let (session_id, error) = match result {
+                Ok(id) => (id.flatten(), None),
+                Err(error) => {
+                    log::error!("文件会话收尾失败: {error:#}");
+                    (None, Some(error.to_string()))
+                }
+            };
+            let _ = monitor_app.emit("talksage://event", DomainEvent::MediaCompleted {
+                session_id,
+                cancelled,
+                error,
+            });
+        });
+        if let Err(error) = monitor_result {
+            if let Some(running) = running_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = service.finish(running);
+            }
+            *import_slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            return Err(format!("创建文件会话监视器失败: {error}"));
         }
-
-        let cancelled = cancel.load(Ordering::SeqCst);
-        let sid = service.finish(running).map_err(|e| e.to_string())?;
-
-        if cancelled {
-            Err("已取消".to_string())
-        } else {
-            sid.ok_or_else(|| "导入完成但未创建会话（落库未启用）".to_string())
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // 无论成功还是取消，都清除 cancel 标志
-    let mut g = state.import_cancel.lock().unwrap_or_else(|e| e.into_inner());
-    *g = None;
-
-    result
-}
-
-/// 取消正在进行的文件导入。
-#[tauri::command]
-fn cancel_file_import(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let g = state.import_cancel.lock().map_err(|_| "导入锁失败".to_string())?;
-    if let Some(flag) = g.as_ref() {
-        flag.store(true, Ordering::SeqCst);
-    }
-    Ok(())
+        Ok::<i64, String>(sid)
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// 整理会中已落库要点（历史详情；无 LLM 时返回错误，前端提示）。
@@ -1157,6 +1198,7 @@ pub fn run() {
             list_knowledge_documents,
             stop_listen,
             set_listen_paused,
+            set_file_playback_speed,
             flush_key_points,
             set_noise_level,
             get_voiceprint_status,
@@ -1191,7 +1233,6 @@ pub fn run() {
             pick_audio_file,
             pick_folder,
             start_file_import,
-            cancel_file_import,
             updater::check_for_updates,
             updater::pick_upgrade_package,
             updater::install_offline_upgrade

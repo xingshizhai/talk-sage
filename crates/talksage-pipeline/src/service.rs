@@ -69,14 +69,14 @@ impl StartListen {
         Self::default()
     }
 
-    /// 文件导入（单流、落库、不录音）。
-    pub fn import_file(path: PathBuf, engine: EngineKind, speaker_label: String) -> Self {
+    /// 文件导入：与实时监听共用场景路由、插件和会话录音。
+    pub fn import_file(path: PathBuf, speaker_label: String) -> Self {
         Self {
             user_input: AudioInput::File(path),
-            user_engine: Some(engine),
+            user_engine: None,
             client: ClientCapture::Off,
             persist: true,
-            record: Some(false),
+            record: Some(true),
             noise_level: 0.0,
             kb_folder_override: None,
             user_label: Some(speaker_label),
@@ -113,6 +113,10 @@ impl RunningListen {
 
     pub fn set_paused(&self, paused: bool) {
         self.runtime.set_paused(paused);
+    }
+
+    pub fn set_playback_speed(&self, speed: f32) {
+        self.runtime.set_playback_speed(speed);
     }
 
     pub fn is_paused(&self) -> bool {
@@ -990,6 +994,16 @@ pub(crate) fn unix_secs() -> i64 {
 mod tests {
     use super::*;
     use talksage_config::{Config, ConfigManager, SceneMode};
+
+    #[test]
+    fn file_import_uses_scene_engine_and_keeps_playback_recording() {
+        let request = StartListen::import_file(PathBuf::from("meeting.mp3"), "说话人".into());
+        assert!(matches!(request.user_input, AudioInput::File(_)));
+        assert_eq!(request.user_engine, None);
+        assert_eq!(request.record, Some(true));
+        assert!(request.persist);
+        assert!(matches!(request.client, ClientCapture::Off));
+    }
 
     fn temp_service(persist: bool) -> (TalkSageService, tempfile_dir::TempDir) {
         let dir = tempfile_dir::TempDir::new();
