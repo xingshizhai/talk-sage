@@ -678,8 +678,22 @@ function Cmd-Package {
     Push-Location (Join-Path $Root "web")
     $null = Invoke-Native { npx tauri build --features vulkan-gpu }
     Pop-Location
+    # 安装包文件名统一为英文：tauri 用 productName（"拓思者"）生成文件名，
+    # 这里把前缀换成 TalkSage_。.sig 是对文件内容的 minisign 签名，改名不影响校验
+    # （trusted comment 里的文件名仅为说明信息）。
+    $bundleDir = Join-Path (Get-TargetDir) "release\bundle"
+    Get-ChildItem $bundleDir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.Name -like "拓思者_*") {
+            $newName = $_.Name -replace "^拓思者_", "TalkSage_"
+            $dst = Join-Path $_.DirectoryName $newName
+            if (-not (Test-Path $dst)) {
+                Rename-Item $_.FullName -NewName $newName
+                Write-Host "  [rename] $($_.Name) → $newName" -ForegroundColor DarkGray
+            }
+        }
+    }
     Write-Host "`n产物:"
-    Get-ChildItem (Join-Path (Get-TargetDir) "release\bundle") -Recurse -File -ErrorAction SilentlyContinue |
+    Get-ChildItem $bundleDir -Recurse -File -ErrorAction SilentlyContinue |
         Select-Object @{n='Path';e={$_.FullName.Replace($Root + '\','')}}, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
 }
 
