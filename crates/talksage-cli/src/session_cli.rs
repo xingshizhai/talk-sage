@@ -701,6 +701,7 @@ mod tests {
                 .collect(),
             evaluated_at: 0,
             runtime_info: engine.map(runtime),
+            pinned_note_paths: Vec::new(),
         }
     }
 
