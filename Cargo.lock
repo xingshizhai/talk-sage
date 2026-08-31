@@ -4689,7 +4689,7 @@ dependencies = [
 
 [[package]]
 name = "talksage-app"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "log",
  "rfd",
@@ -4716,7 +4716,7 @@ dependencies = [
 
 [[package]]
 name = "talksage-asr"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4741,7 +4741,7 @@ dependencies = [
 
 [[package]]
 name = "talksage-audio"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "cpal",
@@ -4754,7 +4754,7 @@ dependencies = [
 
 [[package]]
 name = "talksage-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -4777,7 +4777,7 @@ dependencies = [
 
 [[package]]
 name = "talksage-config"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "log",
  "serde",
@@ -4788,7 +4788,7 @@ dependencies = [
 
 [[package]]
 name = "talksage-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "log",
  "serde",
@@ -4798,11 +4798,11 @@ dependencies = [
 
 [[package]]
 name = "talksage-knowledge"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "talksage-llm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "log",
@@ -4813,7 +4813,7 @@ dependencies = [
 
 [[package]]
 name = "talksage-logging"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "log",
  "talksage-config",
@@ -4825,7 +4825,7 @@ dependencies = [
 
 [[package]]
 name = "talksage-notes"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -4836,7 +4836,7 @@ dependencies = [
 
 [[package]]
 name = "talksage-pipeline"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "log",
@@ -4855,7 +4855,7 @@ dependencies = [
 
 [[package]]
 name = "talksage-plugins"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "log",
@@ -4868,7 +4868,7 @@ dependencies = [
 
 [[package]]
 name = "talksage-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -4895,7 +4895,7 @@ dependencies = [
 
 [[package]]
 name = "talksage-session"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "rusqlite",
