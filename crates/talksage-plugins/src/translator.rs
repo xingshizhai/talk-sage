@@ -152,7 +152,7 @@ mod tests {
     }
 
     fn seg(speaker: u32, text: &str) -> TranscriptSegment {
-        TranscriptSegment {
+        TranscriptSegment { id: None,
             speaker_id: speaker,
             speaker_label: if speaker == 1 { "客户" } else { "我" }.into(),
             speaker_attribution: None,

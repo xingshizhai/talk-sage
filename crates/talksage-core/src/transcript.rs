@@ -65,7 +65,7 @@ impl TranscriptState {
         }
         self.hypothesis.remove(speaker_id);
         self.committed_until_sample = self.committed_until_sample.max(*end_sample);
-        self.committed.push(TranscriptSegment {
+        self.committed.push(TranscriptSegment { id: None,
             speaker_id: *speaker_id,
             speaker_label: speaker_label.clone(),
             speaker_attribution: speaker_attribution.clone(),

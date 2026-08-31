@@ -816,6 +816,57 @@ impl SessionStore {
         Ok(())
     }
 
+    /// 编辑某条转写段文本（历史详情纠错用）。
+    ///
+    /// 段必须属于该会话，否则返回 `Ok(false)`（由上层映射成 404）。
+    /// 文本被修改后，基于旧转写生成的纪要 / 智能纪要 / 会中要点全部失效，
+    /// 一并清掉，让「重新整理」从头生成——避免新旧内容混在一起。
+    pub fn update_segment(&self, session_id: i64, segment_id: i64, text: &str) -> Result<bool> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow!("转写内容不能为空"));
+        }
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE segments SET text = ?3 WHERE id = ?2 AND session_id = ?1",
+            rusqlite::params![session_id, segment_id, trimmed],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        drop(conn);
+        self.invalidate_session_derived(session_id)?;
+        Ok(true)
+    }
+
+    /// 删除某条转写段。段必须属于该会话，否则返回 `Ok(false)`。
+    /// 与 [`Self::update_segment`] 相同，删除后清掉派生的纪要/要点。
+    pub fn delete_segment(&self, session_id: i64, segment_id: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "DELETE FROM segments WHERE id = ?2 AND session_id = ?1",
+            rusqlite::params![session_id, segment_id],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        drop(conn);
+        self.invalidate_session_derived(session_id)?;
+        Ok(true)
+    }
+
+    /// 清掉基于旧转写生成的派生数据：纪要、智能纪要、会中要点。
+    /// 转写被编辑/删除后调用，保证「重新整理」的结果不混入旧内容。
+    fn invalidate_session_derived(&self, session_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET notes = NULL, trio = NULL WHERE id = ?1",
+            [session_id],
+        )?;
+        conn.execute("DELETE FROM key_points WHERE session_id = ?1", [session_id])?;
+        Ok(())
+    }
+
     /// 保存会话元数据（统计 + 质量评估 JSON）。
     pub fn set_session_meta(&self, session_id: i64, meta: &SessionMeta) -> Result<()> {
         let json = serde_json::to_string(meta)?;
@@ -1090,13 +1141,13 @@ impl SessionStore {
 
         let segments = {
             let mut stmt = conn.prepare(
-                "SELECT speaker_id, speaker_label, text, ts_ms, duration_ms, rms, speaker_attribution FROM segments WHERE session_id = ?1 ORDER BY id",
+                "SELECT id, speaker_id, speaker_label, text, ts_ms, duration_ms, rms, speaker_attribution FROM segments WHERE session_id = ?1 ORDER BY id",
             )?;
             let rows = stmt
                 .query_map([session_id], |r| {
-                    let speaker_id = r.get(0)?;
-                    let speaker_label: String = r.get(1)?;
-                    let raw: Option<String> = r.get(6)?;
+                    let speaker_id = r.get(1)?;
+                    let speaker_label: String = r.get(2)?;
+                    let raw: Option<String> = r.get(7)?;
                     let speaker_attribution = raw
                         .as_deref()
                         .and_then(|json| serde_json::from_str(json).ok())
@@ -1107,14 +1158,15 @@ impl SessionStore {
                             ))
                         });
                     Ok(TranscriptSegment {
+                        id: Some(r.get(0)?),
                         speaker_id,
                         speaker_label,
                         speaker_attribution,
-                        text: r.get(2)?,
+                        text: r.get(3)?,
                         is_partial: false,
-                        ts_ms: r.get(3)?,
-                        duration_ms: r.get(4)?,
-                        rms: r.get(5)?,
+                        ts_ms: r.get(4)?,
+                        duration_ms: r.get(5)?,
+                        rms: r.get(6)?,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1186,7 +1238,7 @@ mod tests {
     }
 
     fn seg(speaker: u32, label: &str, text: &str) -> TranscriptSegment {
-        TranscriptSegment {
+        TranscriptSegment { id: None,
             speaker_id: speaker,
             speaker_label: label.into(),
             speaker_attribution: None,
@@ -1200,7 +1252,7 @@ mod tests {
 
     /// 带时间戳/时长的段（重复检测测试用）。
     fn seg_at(speaker: u32, label: &str, text: &str, ts_ms: u64, duration_ms: u64) -> TranscriptSegment {
-        TranscriptSegment {
+        TranscriptSegment { id: None,
             speaker_id: speaker,
             speaker_label: label.into(),
             speaker_attribution: None,
@@ -1824,5 +1876,83 @@ mod tests {
         let raw = r#"{"quality":"clean","skipped_analysis":false,"duration_ms":1,"speech_ms":1,"speech_ratio":1.0,"avg_rms":0.1,"max_rms":0.2,"text_noise":0.0,"streams":[],"evaluated_at":1}"#;
         let meta = SessionMeta::from_json(raw).expect("旧 meta 缺 pinned_note_paths 仍应能解析");
         assert!(meta.pinned_note_paths.is_empty());
+    }
+
+    /// 段编辑：改文本 + 清掉基于旧转写生成的纪要/智能纪要/会中要点。
+    #[test]
+    fn update_segment_changes_text_and_invalidates_derived() {
+        let s = store();
+        let id = s.start_session(1).unwrap();
+        s.add_segment(id, &seg(1, "客户", "We need NPI samples")).unwrap();
+        s.set_notes(id, "旧纪要").unwrap();
+        s.set_trio(id, r#"{"short_overview":"旧","key_points":[],"action_items":[]}"#).unwrap();
+        s.add_key_point(
+            id,
+            &KeyPointRecord {
+                result_id: "kp-1".into(),
+                category: talksage_core::KeyPointCategory::Requirement,
+                content: "旧要点".into(),
+                ts_ms: 1,
+                owner: None,
+                due_date: None,
+                source_refs: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let seg_id = s.get_session(id).unwrap().segments[0].id.expect("详情应带段 id");
+        assert!(s.update_segment(id, seg_id, "We need NPI samples by Friday.").unwrap());
+
+        let detail = s.get_session(id).unwrap();
+        assert_eq!(detail.segments[0].text, "We need NPI samples by Friday.");
+        assert_eq!(detail.segments[0].id, Some(seg_id));
+        assert!(detail.notes.is_none(), "编辑后旧纪要应清除");
+        assert!(detail.trio.is_none(), "编辑后旧智能纪要应清除");
+        assert!(detail.key_points.is_empty(), "编辑后旧会中要点应清除");
+
+        // 不属于该会话 / 不存在的段 → false，不改任何东西
+        assert!(!s.update_segment(999, seg_id, "x").unwrap());
+        assert!(!s.update_segment(id, 99999, "x").unwrap());
+        assert!(s.update_segment(id, seg_id, "   ").is_err(), "空文本应拒绝");
+    }
+
+    /// 段删除：行消失 + 派生数据清掉；段计数随之下调。
+    #[test]
+    fn delete_segment_removes_row_and_invalidates_derived() {
+        let s = store();
+        let id = s.start_session(1).unwrap();
+        s.add_segment(id, &seg(1, "客户", "第一段")).unwrap();
+        s.add_segment(id, &seg(0, "我", "第二段")).unwrap();
+        s.set_notes(id, "旧纪要").unwrap();
+
+        let detail = s.get_session(id).unwrap();
+        let seg_id = detail.segments[1].id.unwrap();
+        assert!(s.delete_segment(id, seg_id).unwrap());
+
+        let after = s.get_session(id).unwrap();
+        assert_eq!(after.segments.len(), 1);
+        assert_eq!(after.segments[0].text, "第一段");
+        assert!(after.notes.is_none(), "删除后旧纪要应清除");
+        assert_eq!(s.list_sessions(10).unwrap()[0].segment_count, 1);
+
+        // 不存在的段 → false
+        assert!(!s.delete_segment(id, 99999).unwrap());
+        assert!(!s.delete_segment(999, seg_id).unwrap());
+    }
+
+    /// 编辑后重新生成纪要：旧内容已清空，新内容可正常保存。
+    #[test]
+    fn regenerate_notes_after_edit_roundtrip() {
+        let s = store();
+        let id = s.start_session(1).unwrap();
+        s.add_segment(id, &seg(0, "我", "原话有误")).unwrap();
+        s.set_notes(id, "旧纪要").unwrap();
+
+        let seg_id = s.get_session(id).unwrap().segments[0].id.unwrap();
+        s.update_segment(id, seg_id, "修正后的内容").unwrap();
+        s.set_notes(id, "新纪要").unwrap();
+
+        let detail = s.get_session(id).unwrap();
+        assert_eq!(detail.notes.as_deref(), Some("新纪要"));
     }
 }

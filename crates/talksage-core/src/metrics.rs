@@ -390,7 +390,7 @@ mod tests {
     use super::*;
 
     fn seg(speaker_id: u32, text: &str, start_ms: u64, dur_ms: u64) -> TranscriptSegment {
-        TranscriptSegment {
+        TranscriptSegment { id: None,
             speaker_id,
             speaker_label: if speaker_id == 0 { "我".into() } else { "客户".into() },
             speaker_attribution: None,

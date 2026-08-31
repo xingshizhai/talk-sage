@@ -262,7 +262,7 @@ async fn export_returns_markdown_for_session() {
         sessions
             .add_segment(
                 id,
-                &talksage_core::TranscriptSegment {
+                &talksage_core::TranscriptSegment { id: None,
                     speaker_id: 1,
                     speaker_label: "客户".into(),
                     speaker_attribution: None,
@@ -334,6 +334,91 @@ async fn patch_session_renames_and_clears_title() {
     let resp = patch(r#"{"title":""}"#).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(sessions.get_session(id).unwrap().title, None, "空串应清除自定义名");
+}
+
+/// PATCH/DELETE /session/{id}/segments/{seg_id}：编辑/删除转写段。
+/// 详情 JSON 必须带段 id（前端编辑/删除按 id 定位），编辑/删除后派生的纪要/要点被清除。
+#[tokio::test]
+async fn segment_edit_and_delete_over_http() {
+    let state = test_state();
+    let sessions = state.sessions.clone();
+    let id = sessions.start_session(1).unwrap();
+    sessions
+        .add_segment(
+            id,
+            &talksage_core::TranscriptSegment {
+                id: None,
+                speaker_id: 1,
+                speaker_label: "客户".into(),
+                speaker_attribution: None,
+                text: "We need NPI samples".into(),
+                is_partial: false,
+                ts_ms: 500,
+                duration_ms: 500,
+                rms: 0.2,
+            },
+        )
+        .unwrap();
+    sessions.set_notes(id, "旧纪要").unwrap();
+    let seg_id = sessions.get_session(id).unwrap().segments[0].id.expect("详情应带段 id");
+    let router = build_router(state, &std::path::PathBuf::from("nonexistent-dist"));
+
+    // 详情 JSON 里段应带 id 字段（前端编辑/删除的定位依据）
+    let detail_resp = router
+        .clone()
+        .oneshot(Request::builder().uri(format!("/api/session/{id}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(detail_resp.into_body(), usize::MAX).await.unwrap();
+    let detail_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(detail_json["segments"][0]["id"], seg_id, "详情段应带数据库 id: {detail_json}");
+
+    // 编辑段文本
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/session/{id}/segments/{seg_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"We need NPI samples by Friday."}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let detail = sessions.get_session(id).unwrap();
+    assert_eq!(detail.segments[0].text, "We need NPI samples by Friday.");
+    assert!(detail.notes.is_none(), "编辑后旧纪要应清除");
+
+    // 删除段
+    let del = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/session/{id}/segments/{seg_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(del.status(), StatusCode::OK);
+    assert!(sessions.get_session(id).unwrap().segments.is_empty());
+
+    // 不存在的段 → 404（而不是 500）
+    let missing = router
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/session/{id}/segments/99999"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"x"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
 /// WebSocket 必须在根路径 `/ws`：前端连的就是它，挂进 /api 的 nest 会 404，

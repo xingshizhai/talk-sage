@@ -138,6 +138,14 @@ export const ipcApi: AppApi = {
     await invoke("rename_session", { sessionId: id, title });
   },
 
+  async updateSegment(sessionId: number, segmentId: number, text: string): Promise<void> {
+    await invoke("update_segment", { sessionId, segmentId, text });
+  },
+
+  async deleteSegment(sessionId: number, segmentId: number): Promise<void> {
+    await invoke("delete_segment", { sessionId, segmentId });
+  },
+
   async explainTerm(term: string): Promise<string> {
     return invoke("explain_term", { term });
   },
@@ -410,6 +418,18 @@ export const httpApi: AppApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
     });
+  },
+
+  async updateSegment(sessionId: number, segmentId: number, text: string): Promise<void> {
+    await req(`/session/${sessionId}/segments/${segmentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  },
+
+  async deleteSegment(sessionId: number, segmentId: number): Promise<void> {
+    await req(`/session/${sessionId}/segments/${segmentId}`, { method: "DELETE" });
   },
 
   async explainTerm(term: string): Promise<string> {

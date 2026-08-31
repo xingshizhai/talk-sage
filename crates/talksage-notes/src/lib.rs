@@ -551,7 +551,7 @@ mod tests {
         };
         let gen = NotesGenerator::new(Arc::new(mock));
         let segs = vec![
-            TranscriptSegment {
+            TranscriptSegment { id: None,
                 speaker_id: 1,
                 speaker_label: "客户".into(),
                 speaker_attribution: None,
@@ -561,7 +561,7 @@ mod tests {
                 duration_ms: 500,
                 rms: 0.2,
             },
-            TranscriptSegment {
+            TranscriptSegment { id: None,
                 speaker_id: 0,
                 speaker_label: "我".into(),
                 speaker_attribution: None,
@@ -598,7 +598,7 @@ mod tests {
         };
         let gen = TrioGenerator::new(Arc::new(mock));
         let segs = vec![
-            TranscriptSegment {
+            TranscriptSegment { id: None,
                 speaker_id: 1,
                 speaker_label: "客户".into(),
                 speaker_attribution: None,
@@ -608,7 +608,7 @@ mod tests {
                 duration_ms: 500,
                 rms: 0.2,
             },
-            TranscriptSegment {
+            TranscriptSegment { id: None,
                 speaker_id: 0,
                 speaker_label: "我".into(),
                 speaker_attribution: None,
@@ -634,7 +634,7 @@ mod tests {
             response: "抱歉，我无法生成".into(),
         };
         let gen = TrioGenerator::new(Arc::new(mock));
-        let segs = vec![TranscriptSegment {
+        let segs = vec![TranscriptSegment { id: None,
             speaker_id: 0,
             speaker_label: "我".into(),
             speaker_attribution: None,
@@ -660,7 +660,7 @@ mod tests {
     }
 
     fn sample_segs() -> Vec<TranscriptSegment> {
-        vec![TranscriptSegment {
+        vec![TranscriptSegment { id: None,
             speaker_id: 1,
             speaker_label: "客户".into(),
             speaker_attribution: None,
@@ -721,7 +721,7 @@ mod tests {
             response: r#"{"points":["客户确认周五交付NPI样品","报价单需下周一前提交"]}"#.into(),
         };
         let llm: Arc<dyn LLMProvider> = Arc::new(mock);
-        let segs = vec![TranscriptSegment {
+        let segs = vec![TranscriptSegment { id: None,
             speaker_id: 1,
             speaker_label: "客户".into(),
             speaker_attribution: None,
@@ -741,7 +741,7 @@ mod tests {
         let llm: Arc<dyn LLMProvider> = Arc::new(MockProvider {
             response: "抱歉，无法提炼".into(),
         });
-        let segs = vec![TranscriptSegment {
+        let segs = vec![TranscriptSegment { id: None,
             speaker_id: 0,
             speaker_label: "我".into(),
             speaker_attribution: None,
@@ -777,7 +777,7 @@ mod tests {
             due_date: None,
             source_refs: Vec::new(),
         }];
-        let segs = vec![TranscriptSegment {
+        let segs = vec![TranscriptSegment { id: None,
             speaker_id: 1,
             speaker_label: "客户".into(),
             speaker_attribution: None,

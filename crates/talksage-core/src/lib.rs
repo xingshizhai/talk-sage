@@ -404,6 +404,10 @@ pub enum StatusStage {
 /// 单条转写记录（会话域使用）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptSegment {
+    /// SQLite 段 id（历史详情编辑/删除用）。实时事件流、快照等非持久化
+    /// 场景为 None，序列化时省略，前端按可选字段处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
     pub speaker_id: u32,
     pub speaker_label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

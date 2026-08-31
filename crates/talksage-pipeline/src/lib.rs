@@ -1208,7 +1208,7 @@ impl StreamWorker {
                 offset_ms += sub_dur;
                 let is_last = i == sub_count - 1;
 
-                let seg = TranscriptSegment {
+                let seg = TranscriptSegment { id: None,
                     speaker_id: spk_id,
                     speaker_label: spk_label.clone(),
                     speaker_attribution: spk_attribution.clone(),
@@ -1390,7 +1390,7 @@ fn filtered_segment(ev: &DomainEvent) -> Option<TranscriptSegment> {
     else {
         return None;
     };
-    Some(TranscriptSegment {
+    Some(TranscriptSegment { id: None,
         speaker_id: *speaker_id,
         speaker_label: speaker_label.clone(),
         speaker_attribution: speaker_attribution.clone(),
@@ -1610,7 +1610,7 @@ fn run_loop(
         if last_plugin_idle_poll.elapsed() >= Duration::from_millis(250) {
             for plugin in cfg.hooks.observers() {
                 if plugin.idle_trigger_due() {
-                    let idle = TranscriptSegment {
+                    let idle = TranscriptSegment { id: None,
                         speaker_id: 0,
                         speaker_label: "系统".into(),
                         speaker_attribution: None,

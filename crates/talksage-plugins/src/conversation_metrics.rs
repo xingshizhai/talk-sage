@@ -103,7 +103,7 @@ mod tests {
     use talksage_core::{DomainEvent, TranscriptSegment};
 
     fn seg(speaker_id: u32, label: &str, text: &str, ts_ms: u64) -> TranscriptSegment {
-        TranscriptSegment {
+        TranscriptSegment { id: None,
             speaker_id,
             speaker_label: label.into(),
             speaker_attribution: None,

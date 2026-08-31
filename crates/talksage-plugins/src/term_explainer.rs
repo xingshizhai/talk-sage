@@ -389,7 +389,7 @@ mod tests {
     use talksage_llm::MockProvider;
 
     fn seg(text: &str) -> TranscriptSegment {
-        TranscriptSegment {
+        TranscriptSegment { id: None,
             speaker_id: 1,
             speaker_label: "客户".into(),
             speaker_attribution: None,

@@ -667,6 +667,30 @@ fn delete_session(session_id: i64, state: tauri::State<'_, AppState>) -> Result<
     state.sessions.delete_session(session_id).map_err(|e| e.to_string())
 }
 
+/// 编辑某条转写段文本（历史详情纠错）。段改完后纪要/智能纪要/会中要点
+/// 一并清除，前端引导用户重新整理生成。
+#[tauri::command]
+fn update_segment(session_id: i64, segment_id: i64, text: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("转写内容不能为空".into());
+    }
+    match state.sessions.update_segment(session_id, segment_id, &text) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!("转写段不存在或不属于该会话: segment={segment_id}")),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// 删除某条转写段（历史详情纠错）。同样清除派生的纪要/要点。
+#[tauri::command]
+fn delete_segment(session_id: i64, segment_id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    match state.sessions.delete_segment(session_id, segment_id) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!("转写段不存在或不属于该会话: segment={segment_id}")),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 // ── AI 助手 ───────────────────────────────────────────────────────────
 
 /// 话题列表（最近活跃在前）。
@@ -1211,6 +1235,8 @@ pub fn run() {
             get_session,
             rename_session,
             delete_session,
+            update_segment,
+            delete_segment,
             explain_term,
             list_chat_threads,
             create_chat_thread,

@@ -597,7 +597,7 @@ mod tests {
     use talksage_core::TranscriptSegment;
 
     fn seg(text: &str) -> TranscriptSegment {
-        TranscriptSegment {
+        TranscriptSegment { id: None,
             speaker_id: 0,
             speaker_label: "我".into(),
             speaker_attribution: None,

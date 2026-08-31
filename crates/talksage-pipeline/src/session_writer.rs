@@ -35,7 +35,7 @@ impl WriteCommand {
                 duration_ms,
                 rms,
                 ..
-            } => Some(Self::Segment(TranscriptSegment {
+            } => Some(Self::Segment(TranscriptSegment { id: None,
                 speaker_id: *speaker_id,
                 speaker_label: speaker_label.clone(),
                 speaker_attribution: speaker_attribution.clone(),

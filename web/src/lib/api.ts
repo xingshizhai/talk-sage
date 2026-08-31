@@ -398,6 +398,19 @@ export interface SessionKeyPoint {
   source_refs?: number[];
 }
 
+/** 历史详情中的转写段：比实时事件段多一个数据库 id，用于编辑/删除。 */
+export interface SessionSegment {
+  /** 数据库段 id；实时事件流里的段没有该字段。 */
+  id?: number;
+  speaker_id: number;
+  speaker_label: string;
+  speaker_attribution?: SpeakerAttribution;
+  text: string;
+  ts_ms: number;
+  duration_ms?: number;
+  rms?: number;
+}
+
 /** 会话详情。 */
 export interface SessionDetail {
   id: number;
@@ -405,7 +418,7 @@ export interface SessionDetail {
   ended_at: number | null;
   /** 用户自定义会话名（null = 未命名）。 */
   title?: string | null;
-  segments: { speaker_id: number; speaker_label: string; speaker_attribution?: SpeakerAttribution; text: string; ts_ms: number; duration_ms?: number; rms?: number }[];
+  segments: SessionSegment[];
   terms: string[];
   translations: string[];
   key_points: SessionKeyPoint[];
@@ -533,6 +546,10 @@ export interface AppApi {
   cancelChatMessage(messageId: number): Promise<void>;
   /** 历史：重命名会话；传空串 = 清除自定义名。 */
   renameSession(id: number, title: string): Promise<void>;
+  /** 历史：编辑某条转写段文本；段改完后纪要/智能纪要/会中要点会被清除，需重新整理。 */
+  updateSegment(sessionId: number, segmentId: number, text: string): Promise<void>;
+  /** 历史：删除某条转写段；同样清除派生的纪要/要点。 */
+  deleteSegment(sessionId: number, segmentId: number): Promise<void>;
   /** 历史：删除会话（含段/术语/翻译）。 */
   deleteSession(id: number): Promise<void>;
   /** 纪要：模板列表。 */

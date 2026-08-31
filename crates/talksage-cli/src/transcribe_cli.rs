@@ -71,7 +71,7 @@ pub fn run(path: &str, engine: &str, save: bool, speaker: &str, json: bool) -> E
             rms,
             ..
         } => {
-            segs_for_sink.lock().unwrap().push(talksage_core::TranscriptSegment {
+            segs_for_sink.lock().unwrap().push(talksage_core::TranscriptSegment { id: None,
                 speaker_id: *speaker_id,
                 speaker_label: speaker_label.clone(),
                 speaker_attribution: speaker_attribution.clone(),

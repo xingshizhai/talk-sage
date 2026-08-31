@@ -101,6 +101,10 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
             "/session/{id}",
             get(get_session_api).delete(delete_session_api).patch(rename_session_api),
         )
+        .route(
+            "/session/{id}/segments/{seg_id}",
+            axum::routing::patch(update_segment_api).delete(delete_segment_api),
+        )
         .route("/templates", get(list_templates_api))
         .route("/chat/threads", get(list_chat_threads_api).post(create_chat_thread_api))
         .route(
@@ -637,6 +641,46 @@ async fn delete_session_api(
     }
     match state.sessions.delete_session(id) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateSegmentBody {
+    /// 修正后的转写文本。
+    text: String,
+}
+
+/// 编辑某条转写段文本（历史详情纠错）。段改完后纪要/智能纪要/会中要点
+/// 会一并清除，前端可引导用户重新整理生成。
+async fn update_segment_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath((id, seg_id)): AxumPath<(i64, i64)>,
+    Json(body): Json<UpdateSegmentBody>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    match state.sessions.update_segment(id, seg_id, &body.text) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "转写段不存在或不属于该会话" }))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// 删除某条转写段（历史详情纠错）。同样清除派生的纪要/要点。
+async fn delete_segment_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    AxumPath((id, seg_id)): AxumPath<(i64, i64)>,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    match state.sessions.delete_segment(id, seg_id) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "转写段不存在或不属于该会话" }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
 }

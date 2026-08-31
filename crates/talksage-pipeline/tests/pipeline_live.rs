@@ -155,7 +155,7 @@ fn file_input_produces_status_and_segments() {
     let final_segs: Vec<talksage_core::TranscriptSegment> = evs
         .iter()
         .filter_map(|e| match e {
-            DomainEvent::Segment { speaker_id, speaker_label, speaker_attribution, text, is_partial: false, ts_ms, duration_ms, .. } => Some(talksage_core::TranscriptSegment {
+            DomainEvent::Segment { speaker_id, speaker_label, speaker_attribution, text, is_partial: false, ts_ms, duration_ms, .. } => Some(talksage_core::TranscriptSegment { id: None,
                 speaker_id: *speaker_id,
                 speaker_label: speaker_label.clone(),
                 speaker_attribution: speaker_attribution.clone(),

@@ -15,6 +15,7 @@ import AsidePanel from "./components/AsidePanel";
 import HistorySection from "./sections/HistorySection";
 import SettingsSection from "./sections/SettingsSection";
 import ModelsSection from "./sections/ModelsSection";
+import KnowledgeSection from "./sections/KnowledgeSection";
 import ChatSection from "./sections/ChatSection";
 import DebugWindow from "./sections/DebugWindow";
 import type { TermItem } from "./sections/TermsSection";
@@ -44,6 +45,7 @@ const PAGE_TITLES: Record<string, string> = {
   history: "历史会话",
   chat: "AI 助手",
   models: "模型管理",
+  knowledge: "知识管理",
   settings: "设置",
 };
 
@@ -376,6 +378,7 @@ export default function App() {
     { key: "history", label: "历史会话", dot: "var(--term)", badge: String(sessions.length), active: navPage === "history" },
     { key: "chat", label: "AI 助手", dot: "var(--me)", badge: "", active: navPage === "chat" },
     { key: "models", label: "模型管理", dot: "var(--client)", badge: "", active: navPage === "models" },
+    { key: "knowledge", label: "知识管理", dot: "var(--term)", badge: "", active: navPage === "knowledge" },
     { key: "settings", label: "设置", dot: "var(--brief)", badge: "", active: navPage === "settings" },
   ];
 
@@ -537,6 +540,16 @@ export default function App() {
     },
     [refreshHistory],
   );
+
+  /** 编辑某条转写段（历史详情纠错）。后端会顺带清除旧纪要/要点。 */
+  const handleUpdateSegment = useCallback(async (sessionId: number, segmentId: number, text: string) => {
+    await api.updateSegment(sessionId, segmentId, text);
+  }, []);
+
+  /** 删除某条转写段（历史详情纠错）。 */
+  const handleDeleteSegment = useCallback(async (sessionId: number, segmentId: number) => {
+    await api.deleteSegment(sessionId, segmentId);
+  }, []);
 
   const handleGenerateNotes = useCallback(
     async (templateId: string) => {
@@ -840,8 +853,8 @@ export default function App() {
 
       {/* 主区：不滚动，滚动交给内部子区域（转写/要点/历史/设置各自 flex+overflow） */}
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", padding: 14, gap: 12, overflow: "hidden", position: "relative" }}>
-        {/* 页头：五个页面共用同一层级的标题；场景按钮与计时徽章只属于语音转写
-            （它们说的是"这场会"，在历史/助手/模型/设置页没有意义） */}
+        {/* 页头：各页面共用同一层级的标题；场景按钮与计时徽章只属于语音转写
+            （它们说的是"这场会"，在历史/助手/模型/知识/设置页没有意义） */}
         <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
           <h1 style={{ fontSize: 18, margin: 0 }}>{PAGE_TITLES[navPage] ?? "会议辅助"}</h1>
           {navPage === "chat" && (
@@ -1088,6 +1101,8 @@ export default function App() {
                 onRenameSession={handleRenameSession}
                 onDeleteSession={handleDeleteSession}
                 onDeleteSessions={handleDeleteSessions}
+                onUpdateSegment={handleUpdateSegment}
+                onDeleteSegment={handleDeleteSegment}
                 notesBusy={notesBusy}
                 trioBusy={trioBusy}
               />
@@ -1107,6 +1122,19 @@ export default function App() {
           <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
             <div style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "var(--pad)", display: "flex", flexDirection: "column" }}>
               <ModelsSection listening={listening} />
+            </div>
+          </section>
+        )}
+
+        {navPage === "knowledge" && (
+          <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+            <div style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "var(--pad)", display: "flex", flexDirection: "column" }}>
+              <KnowledgeSection
+                config={config}
+                onSave={handleSaveConfig}
+                pinnedNotePaths={pinnedNotePaths}
+                onTogglePin={(path) => setPinnedNotePaths((prev) => togglePinnedPath(prev, path))}
+              />
             </div>
           </section>
         )}

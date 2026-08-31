@@ -58,6 +58,29 @@ function QualityBadge({ quality }: { quality?: string }) {
   );
 }
 
+/** 删除图标（feather trash-2，随 currentColor 着色）。 */
+function TrashIcon({ size = 12 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ display: "block" }}
+    >
+      <path d="M3 6h18" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <line x1="10" y1="11" x2="10" y2="17" />
+      <line x1="14" y1="11" x2="14" y2="17" />
+    </svg>
+  );
+}
+
 export default function HistorySection({
   sessions,
   searchResults,
@@ -75,6 +98,8 @@ export default function HistorySection({
   onRenameSession,
   onDeleteSession,
   onDeleteSessions,
+  onUpdateSegment,
+  onDeleteSegment,
   notesBusy,
   trioBusy,
 }: {
@@ -83,7 +108,7 @@ export default function HistorySection({
   detail: SessionDetail | null;
   templates: NotesTemplate[];
   onSearch: (q: string) => void;
-  onSelect: (id: number) => void;
+  onSelect: (id: number) => void | Promise<void>;
   onRefresh: () => void;
   onGenerateNotes: (templateId: string) => void;
   onGenerateTrio: (meetingName: string, meetingDescription: string) => void;
@@ -95,6 +120,10 @@ export default function HistorySection({
   onRenameSession: (id: number, title: string) => void;
   onDeleteSession: (id: number) => void;
   onDeleteSessions: (ids: number[]) => void;
+  /** 编辑某条转写段文本（改完后旧纪要/要点会被后端清除，界面随之刷新）。 */
+  onUpdateSegment: (sessionId: number, segmentId: number, text: string) => Promise<void>;
+  /** 删除某条转写段。 */
+  onDeleteSegment: (sessionId: number, segmentId: number) => Promise<void>;
   notesBusy: boolean;
   trioBusy: boolean;
 }) {
@@ -115,6 +144,27 @@ export default function HistorySection({
   // 重命名：正在编辑的会话 id + 输入框草稿（列表与详情页共用一套状态，同时只会开一个）
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  // 转写段编辑：正在编辑的段 id + 草稿（一次只开一行）
+  const [editingSeg, setEditingSeg] = useState<{ id: number; draft: string } | null>(null);
+  // 转写行 hover（悬停提示可点击编辑）
+  const [hoverSegId, setHoverSegId] = useState<number | null>(null);
+  // 转写段删除二次确认（第一次点击进入确认态，3 秒后自动恢复）
+  const [confirmDeleteSegId, setConfirmDeleteSegId] = useState<number | null>(null);
+  // 转写段多选（Ctrl/⌘ + 点击切换；非空时出现批量删除工具条）
+  const [selectedSegIds, setSelectedSegIds] = useState<Set<number>>(new Set());
+  const [confirmBatchSeg, setConfirmBatchSeg] = useState(false);
+  // 转写编辑/删除后的提示（派生数据已清除，可重新整理）
+  const [segMsg, setSegMsg] = useState("");
+
+  // 详情刷新后清理多选集合里已不存在的段 id（比如刚被单条删除的行）
+  useEffect(() => {
+    if (!detail) return;
+    const valid = new Set(detail.segments.map((s) => s.id).filter((x): x is number => typeof x === "number"));
+    setSelectedSegIds((prev) => {
+      const next = new Set([...prev].filter((id) => valid.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [detail?.segments]);
 
   /** 导出会话内容：markdown / text / audio。桌面端返回落盘路径，浏览器模式触发下载。 */
   const runExport = useCallback(
@@ -218,6 +268,86 @@ export default function HistorySection({
     } else {
       setConfirmDeleteId(id);
       setTimeout(() => setConfirmDeleteId((c) => (c === id ? null : c)), 3000);
+    }
+  }
+
+  /** 转写段编辑：进入编辑态（草稿预填当前文本）。 */
+  function startEditSeg(id: number, text: string) {
+    setEditingSeg({ id, draft: text });
+    setConfirmDeleteSegId(null);
+  }
+
+  /** 转写段编辑：保存。改完后后端已清掉旧纪要/智能纪要/会中要点，重新拉详情对齐。 */
+  async function commitEditSeg() {
+    if (!detail || !editingSeg) return;
+    const sid = detail.id;
+    const segId = editingSeg.id;
+    const next = editingSeg.draft.trim();
+    setEditingSeg(null);
+    if (!next) return;
+    try {
+      await onUpdateSegment(sid, segId, next);
+      await onSelect(sid);
+      setAiHighlights([]);
+      setSegMsg("转写已保存；旧纪要/智能纪要/会中要点已清除，可重新整理生成");
+      setTimeout(() => setSegMsg(""), 6000);
+    } catch (e) {
+      alert(`保存失败: ${e}`);
+    }
+  }
+
+  /** 转写段删除：二次确认后执行，并重拉详情（后端同步清除派生数据）。 */
+  async function confirmDeleteSeg(id: number) {
+    if (!detail) return;
+    if (confirmDeleteSegId === id) {
+      setConfirmDeleteSegId(null);
+      setEditingSeg(null);
+      try {
+        await onDeleteSegment(detail.id, id);
+        await onSelect(detail.id);
+        setAiHighlights([]);
+        setSegMsg("已删除该行；旧纪要/智能纪要/会中要点已清除，可重新整理生成");
+        setTimeout(() => setSegMsg(""), 6000);
+      } catch (e) {
+        alert(`删除失败: ${e}`);
+      }
+    } else {
+      setConfirmDeleteSegId(id);
+      setTimeout(() => setConfirmDeleteSegId((c) => (c === id ? null : c)), 3000);
+    }
+  }
+
+  /** 转写段多选：Ctrl/⌘ + 点击切换选中。 */
+  function toggleSegSelect(id: number) {
+    setSelectedSegIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  /** 批量删除转写段：二次确认后逐条删除并重拉详情。只删当前详情里还存在的段。 */
+  async function confirmBatchDeleteSegs() {
+    if (!detail) return;
+    if (confirmBatchSeg) {
+      setConfirmBatchSeg(false);
+      const ids = [...selectedSegIds];
+      setSelectedSegIds(new Set());
+      setEditingSeg(null);
+      if (ids.length === 0) return;
+      try {
+        await Promise.all(ids.map((id) => onDeleteSegment(detail.id, id)));
+        await onSelect(detail.id);
+        setAiHighlights([]);
+        setSegMsg(`已删除 ${ids.length} 条转写；旧纪要/智能纪要/会中要点已清除，可重新整理生成`);
+        setTimeout(() => setSegMsg(""), 6000);
+      } catch (e) {
+        alert(`部分删除失败: ${e}`);
+      }
+    } else {
+      setConfirmBatchSeg(true);
+      setTimeout(() => setConfirmBatchSeg(false), 3000);
     }
   }
 
@@ -556,9 +686,10 @@ export default function HistorySection({
             );
           })()}
 
-          <div style={{ marginTop: 10, borderTop: "1px dashed var(--border)", paddingTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ marginTop: 10, borderTop: "1px dashed var(--border)", paddingTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <b style={{ fontSize: 12 }}>转写</b>
             <span style={{ fontSize: 10, color: "var(--muted)" }}>{detail.segments.length} 段</span>
+            <span style={{ fontSize: 10, color: "var(--brief)" }}>点击行编辑 · Ctrl/⌘+点击多选批量删除 · 改动后旧纪要/智能纪要/会中要点清除，可重新整理生成</span>
             <button
               onClick={() => void runExport("text")}
               disabled={exporting !== null}
@@ -567,27 +698,170 @@ export default function HistorySection({
               {exporting === "text" ? "导出中…" : "导出文本"}
             </button>
           </div>
+          {segMsg && (
+            <div style={{ marginTop: 6, padding: "5px 8px", borderRadius: 6, background: "var(--me-soft)", border: "1px solid var(--border)", fontSize: 11, color: "var(--text-2)" }}>
+              {segMsg}
+            </div>
+          )}
+          {selectedSegIds.size > 0 && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                marginTop: 6,
+                padding: "5px 8px",
+                borderRadius: 6,
+                background: "var(--me-soft)",
+                border: "1px solid var(--border)",
+                fontSize: 11,
+                flexWrap: "wrap",
+              }}
+            >
+              <span style={{ color: "var(--text-2)" }}>已选 {selectedSegIds.size} 条转写</span>
+              <button
+                onClick={() => {
+                  setSelectedSegIds(new Set());
+                  setConfirmBatchSeg(false);
+                }}
+                style={{ fontSize: 11, padding: "2px 10px", borderRadius: 6, cursor: "pointer", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--muted)" }}
+              >
+                清除选择
+              </button>
+              <button
+                onClick={() => void confirmBatchDeleteSegs()}
+                style={{
+                  marginLeft: "auto",
+                  fontSize: 11,
+                  padding: "2px 10px",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  border: confirmBatchSeg ? "1px solid var(--danger)" : "1px solid var(--border)",
+                  background: "var(--surface-2)",
+                  color: "var(--danger)",
+                }}
+              >
+                {confirmBatchSeg ? `确认删除 ${selectedSegIds.size} 条？` : "删除选中"}
+              </button>
+            </div>
+          )}
           <div style={{ marginTop: 6 }}>
             {detail.segments.map((s, i) => {
-              const sentences = punctuateAndSplit(s.text);
+              const segId = s.id;
+              const editing = editingSeg !== null && editingSeg.id === segId;
+              const selected = typeof segId === "number" && selectedSegIds.has(segId);
+              const clickable = !editing && typeof segId === "number";
               return (
                 <div
                   key={i}
+                  onClick={
+                    clickable
+                      ? (e) => {
+                          if (e.ctrlKey || e.metaKey) {
+                            e.preventDefault();
+                            toggleSegSelect(segId);
+                          } else {
+                            startEditSeg(segId, s.text);
+                          }
+                        }
+                      : undefined
+                  }
+                  onMouseEnter={typeof segId === "number" ? () => setHoverSegId(segId) : undefined}
+                  onMouseLeave={() => setHoverSegId(null)}
+                  title={clickable ? "点击编辑该行；Ctrl/⌘+点击多选" : undefined}
                   style={{
                     marginBottom: 4,
                     wordBreak: "break-word",
-                    padding: "1px 4px",
+                    padding: "2px 4px",
                     borderRadius: 4,
-                    background: segActive(s.speaker_label, s.ts_ms, i, s.duration_ms) ? "var(--brief-soft)" : undefined,
+                    display: "flex",
+                    gap: 6,
+                    alignItems: "flex-start",
+                    cursor: clickable ? "pointer" : undefined,
+                    background: segActive(s.speaker_label, s.ts_ms, i, s.duration_ms)
+                      ? "var(--brief-soft)"
+                      : editing
+                        ? "var(--me-soft)"
+                        : selected
+                          ? "var(--me-soft)"
+                          : hoverSegId === segId
+                            ? "var(--surface-2)"
+                            : undefined,
                   }}
                 >
-                  <b style={{ color: s.speaker_id === 1 ? "var(--client)" : "var(--me)" }}>[{s.speaker_label}]</b>{" "}
-                  {sentences.map((sent, j) => (
-                    <span key={j} style={{ color: "var(--text)" }}>
-                      {sent}
-                      {j < sentences.length - 1 && <span style={{ color: "var(--muted)" }}>｜</span>}
-                    </span>
-                  ))}
+                  {editing ? (
+                    <>
+                      <b style={{ color: s.speaker_id === 1 ? "var(--client)" : "var(--me)", flexShrink: 0, paddingTop: 2 }}>[{s.speaker_label}]</b>
+                      <input
+                        autoFocus
+                        value={editingSeg.draft}
+                        onChange={(e) => setEditingSeg({ id: editingSeg.id, draft: e.target.value })}
+                        title="Enter 保存 · Esc 取消"
+                        onKeyDown={(e) => {
+                          // 阻止冒泡：历史页外层有全局快捷键（Space 暂停等）
+                          e.stopPropagation();
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void commitEditSeg();
+                          } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            setEditingSeg(null);
+                          }
+                        }}
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          padding: "2px 6px",
+                          fontSize: 12,
+                          borderRadius: 4,
+                          border: "1px solid var(--me)",
+                          background: "var(--surface-2)",
+                          color: "var(--text)",
+                        }}
+                      />
+                      <button
+                        onClick={() => void commitEditSeg()}
+                        style={{ fontSize: 10, padding: "1px 8px", flexShrink: 0, cursor: "pointer" }}
+                      >
+                        保存
+                      </button>
+                      <button
+                        onClick={() => void confirmDeleteSeg(segId)}
+                        title={confirmDeleteSegId === segId ? "再次点击确认删除" : "删除该行"}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          padding: "3px 5px",
+                          flexShrink: 0,
+                          borderRadius: 5,
+                          cursor: "pointer",
+                          border: confirmDeleteSegId === segId ? "1px solid var(--danger)" : "1px solid var(--border)",
+                          background: "var(--surface-2)",
+                          color: confirmDeleteSegId === segId ? "var(--danger)" : "var(--muted)",
+                        }}
+                      >
+                        <TrashIcon size={11} />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <b style={{ color: s.speaker_id === 1 ? "var(--client)" : "var(--me)" }}>[{s.speaker_label}]</b>{" "}
+                        {(() => {
+                          const sentences = punctuateAndSplit(s.text);
+                          return sentences.map((sent, j) => (
+                            <span key={j} style={{ color: "var(--text)" }}>
+                              {sent}
+                              {j < sentences.length - 1 && <span style={{ color: "var(--muted)" }}>｜</span>}
+                            </span>
+                          ));
+                        })()}
+                      </span>
+                      {selected && (
+                        <span style={{ color: "var(--live)", flexShrink: 0, paddingTop: 1, fontWeight: 700 }}>✓</span>
+                      )}
+                    </>
+                  )}
                 </div>
               );
             })}

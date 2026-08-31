@@ -697,7 +697,7 @@ mod tests {
 
         let obs = KeyPointLlmObserver::new(99, 0); // batch_size 很大，确保不会自动触发
         for i in 0..3 {
-            let seg = TranscriptSegment {
+            let seg = TranscriptSegment { id: None,
                 speaker_id: 0,
                 speaker_label: "讲话者".into(),
                 speaker_attribution: None,
@@ -811,7 +811,7 @@ mod tests {
     #[test]
     fn automatic_result_is_available_immediately_and_invalid_json_restores_buffer() {
         use talksage_llm::MockProvider;
-        let segment = TranscriptSegment {
+        let segment = TranscriptSegment { id: None,
             speaker_id: 0, speaker_label: "我".into(), speaker_attribution: None,
             text: "下周完成 API 文档".into(), is_partial: false,
             ts_ms: 1, duration_ms: 500, rms: 0.2,
