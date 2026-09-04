@@ -20,7 +20,7 @@ import ChatSection from "./sections/ChatSection";
 import DebugWindow from "./sections/DebugWindow";
 import type { TermItem } from "./sections/TermsSection";
 import type { BriefItem } from "./sections/BriefSection";
-import { knowledgeBaseSettings, knowledgeSourceReady, togglePinnedPath, type KnowledgeDoc } from "./lib/knowledge";
+import { knowledgeSourceReady, togglePinnedPath, type KnowledgeDoc } from "./lib/knowledge";
 
 const api = getApi();
 
@@ -323,8 +323,22 @@ export default function App() {
         lastTranslationRef.current[label] = ev.content;
         if (label === "对方") lastTranslationRef.current["客户"] = ev.content;
       }
-      if (ev.type === "brief") {
-        setBriefs((prev) => [...prev.slice(-19), { source: ev.source, text: ev.text }]);
+      if (ev.type === "knowledge_query") {
+        const item: BriefItem = {
+          queryId: ev.query_id,
+          trigger: ev.trigger,
+          query: ev.query,
+          scope: ev.scope,
+          hits: ev.hits.map((h) => ({
+            hitId: h.hit_id,
+            path: h.path,
+            heading: h.heading,
+            excerpt: h.excerpt,
+            score: h.score,
+            pinned: h.pinned,
+          })),
+        };
+        setBriefs((prev) => [...prev.filter((q) => q.queryId !== item.queryId).slice(-19), item]);
       }
       if (ev.type === "metrics") {
         setMetrics(ev.metrics);
@@ -1171,11 +1185,10 @@ export default function App() {
           }
           terms={terms}
           briefs={briefs}
+          listening={listening}
           knowledgeEnabled={knowledgeSourceReady(config)}
-          knowledgeFolder={knowledgeBaseSettings(config).folder}
           knowledgeDocs={kbDocs}
           pinnedPaths={pinnedNotePaths}
-          onTogglePin={(path) => setPinnedNotePaths((prev) => togglePinnedPath(prev, path))}
           expandedTerms={expandedTerms}
           onToggleTerm={(id) => setExpandedTerms((prev) => ({ ...prev, [id]: !prev[id] }))}
           dismissedTermKeys={dismissedTermKeys}

@@ -203,6 +203,14 @@ export type DomainEvent =
   | { type: "translation"; result_id: string; status: "skeleton" | "final"; direction: "zh_en" | "en_zh"; content: string }
   | { type: "key_point"; result_id: string; status: "skeleton" | "final"; category: string; content: string; ts_ms?: number; manual?: boolean; owner?: string; due_date?: string; source_refs?: number[] }
   | { type: "brief"; source: string; text: string }
+  | {
+      type: "knowledge_query";
+      query_id: string;
+      trigger: "key_point" | "term" | "question" | "manual";
+      query: string;
+      scope: "pinned" | "all" | "pinned_then_all";
+      hits: { hit_id: string; path: string; heading: string; excerpt: string; score: number; pinned: boolean }[];
+    }
   | { type: "state"; topic: string; open_questions: string[]; recent_decisions: string[] }
   | { type: "status"; stage: string; message: string }
   | { type: "level"; mic_rms: number; loopback_rms: number }

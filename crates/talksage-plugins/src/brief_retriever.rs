@@ -100,9 +100,9 @@ impl crate::registry::Plugin for BriefRetrieverPluginDef {
     fn descriptor(&self) -> &'static crate::PluginDescriptor {
         static D: crate::PluginDescriptor = crate::PluginDescriptor {
             id: "brief_retriever", label: "简报检索",
-            description: "从本地知识库检索与发言相关的简报；有客户流时跳过主人",
+            description: "兼容旧版简报检索；实时知识查询已由会话协调器接管",
             category: crate::PluginCategory::Analysis, phase: crate::PluginPhase::Observer,
-            capabilities: &[crate::PluginCapability::KnowledgeBase], host_managed: &["include_user"], after: &[],
+            capabilities: &[crate::PluginCapability::KnowledgeBase], host_managed: &["enabled", "include_user"], after: &[],
         };
         &D
     }

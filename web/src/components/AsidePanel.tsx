@@ -4,9 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { BriefItem } from "../sections/BriefSection";
 import type { TermItem } from "../sections/TermsSection";
 import {
-  knowledgeEmptyHint,
   pinnedDocuments,
-  truncateNoteText,
   type KnowledgeDoc,
 } from "../lib/knowledge";
 import { toTermRows } from "../lib/terms";
@@ -16,11 +14,10 @@ export default function AsidePanel({
   onToggleCollapsed,
   terms,
   briefs,
+  listening,
   knowledgeEnabled,
-  knowledgeFolder,
   knowledgeDocs,
   pinnedPaths,
-  onTogglePin,
   expandedTerms,
   onToggleTerm,
   dismissedTermKeys,
@@ -31,11 +28,10 @@ export default function AsidePanel({
   onToggleCollapsed: () => void;
   terms: TermItem[];
   briefs: BriefItem[];
+  listening: boolean;
   knowledgeEnabled: boolean;
-  knowledgeFolder: string;
   knowledgeDocs: KnowledgeDoc[];
   pinnedPaths: string[];
-  onTogglePin: (path: string) => void;
   expandedTerms: Record<string, boolean>;
   onToggleTerm: (resultId: string) => void;
   dismissedTermKeys: ReadonlySet<string>;
@@ -44,13 +40,6 @@ export default function AsidePanel({
   onAskTerm: (term: string) => Promise<void>;
 }) {
   const pinnedNotes = pinnedDocuments(knowledgeDocs, pinnedPaths);
-  const emptyHint = knowledgeEmptyHint({
-    enabled: knowledgeEnabled,
-    folder: knowledgeFolder,
-    docCount: knowledgeDocs.length,
-    pinnedCount: pinnedNotes.length,
-  });
-  const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
   const termRows = toTermRows(terms, dismissedTermKeys);
   const termListRef = useRef<HTMLDivElement>(null);
   const newestTermId = termRows.length > 0 ? termRows[termRows.length - 1].resultId : undefined;
@@ -269,66 +258,47 @@ export default function AsidePanel({
         </div>
       </section>
 
-      {/* 知识库：材料包优先，自动命中卡片仅在 brief_retriever 打开时出现 */}
+      {/* 实时知识关联：这里只显示本场真正执行过的查询；文档浏览和材料包管理在知识管理页。 */}
       <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
           <span style={{ width: 6, height: 6, borderRadius: 2, background: "var(--brief)" }} />
           <b style={{ fontSize: 13 }}>知识库</b>
-          <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>{pinnedNotes.length}</span>
+          <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>查询 {briefs.length}</span>
         </div>
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 9 }}>
-          {emptyHint && <div style={{ color: "var(--muted)", fontSize: 13 }}>{emptyHint}</div>}
-          {pinnedNotes.map((doc) => {
-            const expanded = !!expandedNotes[doc.path];
-            const body = expanded ? doc.text.trim() : truncateNoteText(doc.text);
+          {!knowledgeEnabled && <div style={{ color: "var(--muted)", fontSize: 13 }}>请先在“知识管理”中启用知识库</div>}
+          {knowledgeEnabled && !listening && briefs.length === 0 && (
+            <div style={{ color: "var(--muted)", fontSize: 13 }}>开始实时转写后，将根据要点、专业术语和明确问题查询知识库。{pinnedNotes.length > 0 ? ` 本场材料包 ${pinnedNotes.length} 篇。` : ""}</div>
+          )}
+          {knowledgeEnabled && listening && briefs.length === 0 && (
+            <div style={{ color: "var(--muted)", fontSize: 13 }}>等待要点、专业术语或明确问题…</div>
+          )}
+          {briefs.map((item) => {
+            const triggerLabel = { key_point: "要点", term: "术语", question: "问题", manual: "手动" }[item.trigger];
+            const scopeLabel = item.scope === "pinned" ? "材料包" : item.scope === "pinned_then_all" ? "材料包 → 全库" : "全库";
             return (
-              <div
-                key={doc.path}
-                onClick={() => setExpandedNotes((prev) => ({ ...prev, [doc.path]: !prev[doc.path] }))}
-                style={{ fontSize: 12, lineHeight: 1.6, color: "var(--text-2)", wordBreak: "break-word", padding: "8px 10px", borderRadius: 8, background: "var(--surface-2)", cursor: "pointer" }}
-              >
-                <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 4 }}>
-                  <b style={{ fontSize: 12, color: "var(--text)" }}>{doc.title || doc.path}</b>
-                  <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", flexShrink: 0 }}>{expanded ? "▾" : "▸"}</span>
+              <div key={item.queryId} style={{ padding: "9px 10px", borderRadius: 9, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 5 }}>
+                  <b style={{ fontSize: 11, color: "var(--brief)" }}>{triggerLabel}触发</b>
+                  <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)" }}>{scopeLabel}</span>
                 </div>
-                <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4, fontFamily: "monospace" }}>{doc.path}</div>
-                {body}
+                <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.5, marginBottom: 7 }}>查询：{item.query}</div>
+                {item.hits.length === 0 ? (
+                  <div style={{ fontSize: 11, color: "var(--muted)" }}>已查询，未发现相关知识</div>
+                ) : item.hits.map((hit) => (
+                  <div key={hit.hitId} style={{ borderTop: "1px solid var(--border)", paddingTop: 7, marginTop: 7 }}>
+                    <div style={{ display: "flex", gap: 6, fontSize: 11 }}>
+                      <b style={{ color: "var(--text)" }}>{hit.heading || hit.path}</b>
+                      {hit.pinned && <span style={{ color: "var(--brief)" }}>材料包</span>}
+                      <span style={{ marginLeft: "auto", color: "var(--muted)" }}>{Math.round(hit.score * 100)}%</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "monospace", marginTop: 2 }}>{hit.path}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-2)", lineHeight: 1.55, marginTop: 4 }}>{hit.excerpt}</div>
+                  </div>
+                ))}
               </div>
             );
           })}
-          {knowledgeEnabled && knowledgeDocs.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <div style={{ fontSize: 11, color: "var(--muted)" }}>钉住笔记</div>
-              {knowledgeDocs.map((doc) => {
-                const pinned = pinnedPaths.includes(doc.path);
-                return (
-                  <label
-                    key={doc.path}
-                    style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text)", cursor: "pointer" }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={pinned}
-                      onChange={() => onTogglePin(doc.path)}
-                    />
-                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {doc.title || doc.path}
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-          )}
-          {briefs.length > 0 && (
-            <>
-              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>自动命中</div>
-              {briefs.map((b, i) => (
-                <div key={i} style={{ fontSize: 12, lineHeight: 1.6, color: "var(--text-2)", wordBreak: "break-word", padding: "8px 10px", borderRadius: 8, background: "var(--surface-2)" }}>
-                  {b.text}
-                </div>
-              ))}
-            </>
-          )}
         </div>
       </section>
     </aside>

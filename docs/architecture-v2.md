@@ -286,7 +286,7 @@ flowchart LR
 1. **源插件**（一期仅 `knowledge_obsidian`）：读一个本地 Obsidian vault 的 `.md`/`.txt`，切成带 `source_id` 与相对路径的片段。不订阅转写段，不进场景 `plugin_allowlist`。
 2. **检索底盘** `KnowledgeIndex`（现 `KnowledgeBase`）：词法 + 词组门槛（沿用中文 2-gram / IDF）。`KnowledgeHub` 由配置指纹驱动刷新，给会中 / 纪要 / 助手共用同一份索引。
 3. **消费者**
-   - **实时转写**：会中接话。材料包（用户钉住的笔记正文）优先；`brief_retriever` 自动命中卡片默认关。
+   - **实时转写**：会中接话。只在 final 要点、final 专业术语或明确问句上触发；材料包优先，无命中再回退全库。每次以 `KnowledgeQuery` 记录「为什么查、查了什么、命中哪里」；未开始转写时不展示文档为命中。旧 `brief_retriever` 仅保留兼容，由宿主关闭。
    - **纪要 / 智能纪要**：生成前 retrieve 一次，注入 `{knowledge}`；三路智能纪要共享同一字符串。
    - **AI 助手**：每轮按用户问题 retrieve，有命中才改 system prompt。
 

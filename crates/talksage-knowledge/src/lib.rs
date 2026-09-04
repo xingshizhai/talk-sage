@@ -256,6 +256,27 @@ impl KnowledgeBase {
     /// 「短查询命中加成」会让「我们/这边/一下」这类口水词单独就把分数顶过阈值，
     /// 一开口就贴出整段无关笔记 —— 现在这类词的 IDF 接近 0，且在大仓库里直接不算线索。
     pub fn search(&self, query: &str, top_k: usize, min_score: f32) -> Vec<KBHit> {
+        self.search_filtered(query, top_k, min_score, |_| true)
+    }
+
+    /// 只在指定文档路径中检索，供会中“材料包优先”策略使用。
+    pub fn search_in_paths(
+        &self,
+        query: &str,
+        paths: &std::collections::HashSet<String>,
+        top_k: usize,
+        min_score: f32,
+    ) -> Vec<KBHit> {
+        self.search_filtered(query, top_k, min_score, |chunk| paths.contains(&chunk.source))
+    }
+
+    fn search_filtered(
+        &self,
+        query: &str,
+        top_k: usize,
+        min_score: f32,
+        include: impl Fn(&KBChunk) -> bool,
+    ) -> Vec<KBHit> {
         if self.chunks.is_empty() || query.trim().is_empty() {
             return Vec::new();
         }
@@ -274,6 +295,9 @@ impl KnowledgeBase {
         let (q_runs, q_words) = tokenize_ordered(query);
         let mut scored: Vec<KBHit> = Vec::new();
         for chunk in &self.chunks {
+            if !include(chunk) {
+                continue;
+            }
             if !chunk_has_phrase(chunk, &q_runs, &q_words) {
                 continue;
             }
@@ -663,6 +687,20 @@ mod tests {
         let hits = kb.search("NPI MOQ", 3, 0.05);
         assert!(!hits.is_empty());
         assert_eq!(hits[0].source_id, OBSIDIAN_SOURCE_ID);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scoped_search_only_returns_selected_paths() {
+        let dir = temp_dir("scoped");
+        std::fs::write(dir.join("a.md"), "# A\n\nNPI 样品交期为下周三。").unwrap();
+        std::fs::write(dir.join("b.md"), "# B\n\nNPI 样品交期为下周五。").unwrap();
+        let mut kb = KnowledgeBase::new();
+        kb.index_folder(&dir);
+        let paths = ["b.md".to_string()].into_iter().collect();
+        let hits = kb.search_in_paths("NPI 样品交期", &paths, 3, 0.05);
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|hit| hit.source == "b.md"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

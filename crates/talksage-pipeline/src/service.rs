@@ -778,6 +778,11 @@ impl TalkSageService {
             _ => None,
         };
         let writer_tx = session_writer.as_ref().map(SessionWriter::sender);
+        let knowledge_retriever = cfg
+            .plugin_ctx
+            .kb
+            .clone()
+            .map(|kb| crate::knowledge::LiveKnowledgeRetriever::new(kb, &req.pinned_note_paths));
         // 专业术语有三个来源（term_explainer / key_point_llm 关键词 / 手动查词），
         // 它们互不知情。这里是三条路唯一的共同出口，去重放在这一层，界面和入库
         // 就都不会出现同一个词的两条解释。
@@ -786,10 +791,14 @@ impl TalkSageService {
             if !term_dedup.allow(&ev) {
                 return;
             }
+            let knowledge_event = knowledge_retriever.as_ref().and_then(|r| r.observe(&ev));
             if let Some(writer) = &writer_tx {
                 writer.enqueue(&ev);
             }
             on_event(ev);
+            if let Some(knowledge_event) = knowledge_event {
+                on_event(knowledge_event);
+            }
         });
 
         // 与管道内跑的是同一批实例（HookRegistry 克隆的是 Arc）。
@@ -928,7 +937,9 @@ fn plugin_overrides_for(
     merge_override(
         &mut overrides,
         "brief_retriever",
-        serde_json::json!({ "include_user": !scene.client_enabled }),
+        // 旧插件会按固定冷却对每条转写盲搜。实时检索现由会话级
+        // LiveKnowledgeRetriever 根据要点、术语和明确问题统一编排。
+        serde_json::json!({ "enabled": false, "include_user": !scene.client_enabled }),
     );
 
     // 场景 allowlist 最后裁决：分析类插件不在列表里就关掉。只有分析类受此

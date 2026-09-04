@@ -1,8 +1,11 @@
 // 简报分区：知识库命中片段。
 
 export interface BriefItem {
-  source: string;
-  text: string;
+  queryId: string;
+  trigger: "key_point" | "term" | "question" | "manual";
+  query: string;
+  scope: "pinned" | "all" | "pinned_then_all";
+  hits: { hitId: string; path: string; heading: string; excerpt: string; score: number; pinned: boolean }[];
 }
 
 export default function BriefSection({ items }: { items: BriefItem[] }) {
@@ -20,8 +23,8 @@ export default function BriefSection({ items }: { items: BriefItem[] }) {
       }}
     >
       {items.length === 0 && <div style={{ color: "#64748b" }}>发言命中知识库后，简报显示在这里…</div>}
-      {items.map((b, i) => (
-        <div key={i} style={{ marginBottom: 6, wordBreak: "break-word" }}>
+      {items.map((b) => (
+        <div key={b.queryId} style={{ marginBottom: 6, wordBreak: "break-word" }}>
           <span
             style={{
               display: "inline-block",
@@ -37,7 +40,7 @@ export default function BriefSection({ items }: { items: BriefItem[] }) {
           >
             简报
           </span>
-          <span style={{ color: "#cbd5e1" }}>{b.text}</span>
+          <span style={{ color: "#cbd5e1" }}>{b.query}</span>
         </div>
       ))}
     </div>

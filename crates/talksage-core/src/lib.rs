@@ -66,6 +66,17 @@ pub struct SpeakerAttribution {
     pub voice: Option<VoiceIdentity>,
 }
 
+/// 一次可解释的实时知识库命中。与文档目录分离，只表示本场会议实际检索到的片段。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeHit {
+    pub hit_id: String,
+    pub path: String,
+    pub heading: String,
+    pub excerpt: String,
+    pub score: f32,
+    pub pinned: bool,
+}
+
 impl SpeakerAttribution {
     pub fn from_legacy(source: AudioSource, label: &str) -> Self {
         let role = if label == "我" {
@@ -144,6 +155,16 @@ pub enum DomainEvent {
         result_id: String,
         status: ResultStatus,
         content: String,
+    },
+    /// 由要点、术语或明确问题触发的会话级知识查询。
+    KnowledgeQuery {
+        query_id: String,
+        /// `key_point` / `term` / `question` / `manual`。
+        trigger: String,
+        query: String,
+        /// `pinned` / `all` / `pinned_then_all`。
+        scope: String,
+        hits: Vec<KnowledgeHit>,
     },
     /// 实时翻译结果。
     Translation {
@@ -295,6 +316,7 @@ impl DomainEvent {
             | DomainEvent::Snapshot { .. }
             | DomainEvent::Status { .. }
             | DomainEvent::Brief { .. }
+            | DomainEvent::KnowledgeQuery { .. }
             | DomainEvent::State { .. }
             | DomainEvent::Metrics { .. }
             | DomainEvent::Nudge { .. }
