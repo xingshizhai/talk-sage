@@ -600,7 +600,9 @@ impl TalkSageService {
                     model: spk_model,
                     owner_embedding: owner,
                     threshold: DEFAULT_THRESHOLD,
-                    classify_user_stream: client.is_none(),
+                    // 麦克风也可能收进同室多位参会者；不能因为同时存在回环流
+                    // 就跳过 user 流的声纹聚类。
+                    classify_user_stream: true,
                 })
             } else {
                 log::warn!("多人说话者区分已请求但未启用：缺少 WeSpeaker 模型");

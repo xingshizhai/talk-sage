@@ -15,6 +15,25 @@ describe("TranscriptAccumulator", () => {
     expect(acc.getLines()[0]).toMatchObject({ speakerLabel: "客户2", text: "完整句子", isPartial: false });
   });
 
+  it("keeps the voice identity returned by speaker recognition", () => {
+    const acc = new TranscriptAccumulator();
+    acc.push({ speaker_id: 0, speaker_label: "我", text: "正在说", is_partial: true, ts_ms: 1 });
+    acc.push({
+      speaker_id: 0,
+      speaker_label: "讲话者2",
+      speaker_attribution: { role: "other", voice: { id: "讲话者2", confidence: 0.73 } },
+      text: "完整句子",
+      is_partial: false,
+      ts_ms: 2,
+    });
+
+    expect(acc.getLines()[0]).toMatchObject({
+      speakerLabel: "讲话者2",
+      voiceId: "讲话者2",
+      speakerRole: "other",
+    });
+  });
+
   it("partial 事件增量更新同一行，不新增行", () => {
     const acc = new TranscriptAccumulator();
     acc.push(seg("我", "昨", true));

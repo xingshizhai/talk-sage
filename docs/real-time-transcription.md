@@ -44,9 +44,10 @@ ref 读最新状态，避免闭包过期）。事件类型：
 - `metrics`：会话指标（发言占比/语速/提问/独白/打断/健康分）。
 - `nudge`：会中提示。
 
-`TranscriptAccumulator`（`lib/transcript.ts`）是纯前端聚合器：按 speaker_id 归并
-partial/committed 段，`getLines()` 输出渲染行。**快照与增量事件共用同一个
-accumulator**，保证重连/首帧与滚动追加不重复。
+`TranscriptAccumulator`（`lib/transcript.ts`）是纯前端聚合器：partial 阶段按稳定的
+输入通道 `speaker_id` 对齐，final 到达后同时保留 `speaker_attribution.voice.id`（会话
+内声纹身份）和业务角色。`getLines()` 输出渲染行。**快照与增量事件共用同一个
+accumulator**，保证重连/首帧与滚动追加不重复，快照恢复也不会丢失声纹身份。
 
 ---
 
@@ -128,13 +129,28 @@ idle（已停止，落库 + 录音收尾 + finalizer）
 | `conversation` 一对一会话 | 双流（我/对方） | 用户流 + 客户流、说话人 = 通道 |
 | `bilingual` 双语对话 | 双流 + 翻译 | 启用 translator 插件、翻译策略 |
 | `live_translation` 实时翻译 | 同声传译 | 翻译优先、可能关闭要点 |
-| `meeting` 多人会议 | 双流 + 声纹 | speaker 模式、wespeaker 分离 |
+| `meeting` 多人会议 | 双流 + 声纹 | 麦克风与回环均聚类；可识别主人并区分同室/远端讲话人 |
 | `lecture` 演讲/课堂 | 单流为主 | 长段 VAD、术语/要点侧重 |
 | `custom` 自定义 | 完全由 `[scene.custom]` 裁决 | engine/VAD/插件白名单逐项覆盖 |
 
 场景通过 `plugin_overrides_for`（pipeline service.rs）裁决插件启用与参数，
 **场景切换 = 重新装配会话**，因此设置页离开时若未保存会弹确认（防带着旧场景
 开始监听）。
+
+#### 会议模式的说话人身份
+
+- 会议模式固定启用 `voiceprint`；WeSpeaker 模型可用时，麦克风和系统回环两条流都
+  参与声纹提取，不会再因为回环流存在而跳过麦克风中的多人。
+- 两条流共享模型实例和会话编号分配器，但聚类中心按角色域隔离：麦克风产生
+  `讲话者N`，回环产生 `客户N`，避免扬声器回声造成跨角色误归类。
+- 已注册的主人声纹只在麦克风流匹配；命中后标为“我”。回环流不会命中主人，避免
+  本机回声把远端段误标为“我”。
+- 新声音第一次通过质量门时即原子分配会话内 voice ID；第二个相似片段用于确认并
+  更新聚类中心，但显示身份保持不变，不再发生“讲话者 → 客户1”的跳变。
+- `speaker_id` 继续表示稳定输入通道（兼容 partial/final 对齐、翻译和既有统计）；
+  真正的声纹身份位于 `speaker_attribution.voice.id`，来源和业务角色分别位于
+  `speaker_attribution.source/role`。声纹只能判断是否为同一人，真实姓名和职位仍需
+  用户注册或重命名。
 
 ### 3.3 引擎与路由模式
 

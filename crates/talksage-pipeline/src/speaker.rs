@@ -8,9 +8,12 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sherpa_onnx::{SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig, SpeakerEmbeddingManager};
+use sherpa_onnx::{
+    SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig, SpeakerEmbeddingManager,
+};
 
 /// 说话人判定余弦相似度阈值（wespeaker 模型经验值）。
 pub const DEFAULT_THRESHOLD: f32 = 0.5;
@@ -22,6 +25,15 @@ const SAMPLE_RATE: usize = 16_000;
 const FRAME_SAMPLES: usize = 320; // 20ms
 const MIN_VOICED_SAMPLES: usize = SAMPLE_RATE; // 至少 1s 有效人声
 const MAX_CLIENT_SPEAKERS: u32 = 8;
+
+fn session_speaker_label(recognize_owner: bool, id: u32) -> String {
+    let prefix = if recognize_owner {
+        "讲话者"
+    } else {
+        "客户"
+    };
+    format!("{prefix}{id}")
+}
 
 /// 裁掉声纹音频两端静音，并拒绝有效人声不足、过弱或静音占比过高的片段。
 /// 阈值相对当前片段峰值自适应，同时保留很低的绝对下限。
@@ -87,6 +99,8 @@ pub struct SpeakerIdentifier {
     extractor: Mutex<SpeakerEmbeddingExtractor>,
     inner: Mutex<Inner>,
     threshold: f32,
+    /// 查询发生在两条独立 ASR 线程上，编号必须无锁且原子地预留。
+    next_voice_id: AtomicU32,
 }
 
 struct Inner {
@@ -95,14 +109,29 @@ struct Inner {
     prototypes: HashMap<String, (Vec<f32>, u32)>,
     /// 尚未被第二个相似片段确认的新说话人。必须允许多个候选并存，否则
     /// A/B 交替发言会互相覆盖唯一候选，两个身份都永远无法确认。
-    candidates: HashMap<u32, Vec<f32>>,
-    next_client_id: u32,
+    candidates: HashMap<u32, CandidateSpeaker>,
+}
+
+struct CandidateSpeaker {
+    label: String,
+    embedding: Vec<f32>,
 }
 
 enum PendingSpeaker {
-    StartCandidate { id: u32, embedding: Vec<f32> },
-    ConfirmCandidate { id: u32, embedding: Vec<f32> },
-    Update { label: String, embedding: Vec<f32> },
+    StartCandidate {
+        id: u32,
+        label: String,
+        embedding: Vec<f32>,
+    },
+    ConfirmCandidate {
+        id: u32,
+        label: String,
+        embedding: Vec<f32>,
+    },
+    Update {
+        label: String,
+        embedding: Vec<f32>,
+    },
 }
 
 /// 一次说话人查询的结果。持有标签；若是新说话人，还持有待注册的声纹。
@@ -149,6 +178,21 @@ impl SpeakerQuery {
     pub fn similarity(&self) -> Option<f32> {
         self.similarity
     }
+
+    /// 会话内稳定的声纹身份。候选首次出现就分配 ID，使 UI、快照和落库
+    /// 不必等第二句话才知道这是哪位讲话人。
+    pub fn voice_id(&self) -> Option<String> {
+        match self.decision {
+            SpeakerDecision::OwnerMatch => Some("owner".into()),
+            SpeakerDecision::ExistingMatch | SpeakerDecision::GrayZoneReuse => {
+                Some(self.label.clone())
+            }
+            SpeakerDecision::CandidateStarted | SpeakerDecision::CandidateConfirmed => {
+                Some(self.label.clone())
+            }
+            SpeakerDecision::LowQualityFallback | SpeakerDecision::SpeakerLimitFallback => None,
+        }
+    }
 }
 
 impl SpeakerIdentifier {
@@ -166,12 +210,12 @@ impl SpeakerIdentifier {
             manager,
             prototypes: HashMap::new(),
             candidates: HashMap::new(),
-            next_client_id: 1,
         };
         let si = Self {
             extractor: Mutex::new(extractor),
             inner: Mutex::new(inner),
             threshold,
+            next_voice_id: AtomicU32::new(1),
         };
         if let Some(emb) = owner_embedding {
             si.add_owner(&emb);
@@ -215,7 +259,8 @@ impl SpeakerIdentifier {
 
     /// 注册使用多个独立窗口提取声纹再聚合，避免一次咳嗽、静音或某个词主导模板。
     pub fn enrollment_embedding(&self, audio: &[f32]) -> Option<Vec<f32>> {
-        self.enrollment_profile(audio).map(|(embedding, _, _)| embedding)
+        self.enrollment_profile(audio)
+            .map(|(embedding, _, _)| embedding)
     }
 
     /// 返回聚合声纹、裁剪后的有效区间采样数、成功窗口数，供注册 UI 展示质量反馈。
@@ -238,7 +283,8 @@ impl SpeakerIdentifier {
     /// 判定说话人标签（**纯查询**，不改变识别器状态）：
     /// 1) 匹配主人 → "我"
     /// 2) 匹配已见说话人 → 复用其标签
-    /// 3) 都不匹配 → 预分配 "客户N"，并把 embedding 一起带回，等调用方 `commit`
+    /// 3) 都不匹配 → 按来源预分配“讲话者N”或“客户N”，并把 embedding
+    ///    一起带回，等调用方 `commit`
     /// 音频不足或模型失败 → 返回 `fallback`（流默认标签）。
     ///
     /// 拆成「查询 + commit」是因为产生点的 filter 链可能把这一段吞掉：
@@ -250,7 +296,12 @@ impl SpeakerIdentifier {
 
     /// 按业务角色查询。回环/客户流设置 `recognize_owner=false`，即使扬声器回声
     /// 与主人声纹相似，也保持客户通道角色，不把它改写成“我”。
-    pub fn query_for_role(&self, audio: &[f32], fallback: &str, recognize_owner: bool) -> SpeakerQuery {
+    pub fn query_for_role(
+        &self,
+        audio: &[f32],
+        fallback: &str,
+        recognize_owner: bool,
+    ) -> SpeakerQuery {
         let Some(emb) = self.compute_embedding(audio) else {
             return SpeakerQuery {
                 label: fallback.to_string(),
@@ -283,43 +334,73 @@ impl SpeakerIdentifier {
             }
         }
 
+        let local_prefix = if recognize_owner {
+            "讲话者"
+        } else {
+            "客户"
+        };
         let nearest = inner
             .prototypes
             .iter()
             .filter(|(name, _)| name.as_str() != "我")
-            .map(|(name, (center, _))| (name, cosine_similarity(center, &emb)))
+            // 麦克风与系统回环属于不同角色域。共享 extractor/编号，但不共享
+            // 聚类中心，避免扬声器回声把本地参会者归成“客户”，反之亦然。
+            .filter(|(name, _)| name.starts_with(local_prefix))
+            .map(|(name, (center, _))| (name.clone(), cosine_similarity(center, &emb)))
             .max_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((name, similarity)) = nearest.as_ref() {
             // 灰区仍复用最近客户，避免同一人在音色波动时刷出客户2/3；中心在
             // filter 放行后才更新，低于灰区才认为是明确的新说话人。
             if *similarity >= (self.threshold - 0.08).max(0.0) {
                 return SpeakerQuery {
-                    label: (*name).clone(),
+                    label: name.clone(),
                     decision: if *similarity >= self.threshold {
                         SpeakerDecision::ExistingMatch
                     } else {
                         SpeakerDecision::GrayZoneReuse
                     },
                     similarity: Some(*similarity),
-                    pending: Some(PendingSpeaker::Update { label: (*name).clone(), embedding: emb }),
+                    pending: Some(PendingSpeaker::Update {
+                        label: name.clone(),
+                        embedding: emb,
+                    }),
                 };
             }
         }
         let candidate_threshold = (self.threshold - 0.08).max(0.0);
-        let candidate = inner.candidates.iter()
-            .map(|(id, center)| (*id, cosine_similarity(center, &emb)))
-            .max_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((id, similarity)) = candidate {
+        let candidate = inner
+            .candidates
+            .iter()
+            .filter(|(_, candidate)| candidate.label.starts_with(local_prefix))
+            .map(|(id, candidate)| {
+                (
+                    *id,
+                    candidate.label.clone(),
+                    cosine_similarity(&candidate.embedding, &emb),
+                )
+            })
+            .max_by(|a, b| a.2.total_cmp(&b.2));
+        if let Some((id, label, similarity)) = candidate {
             if similarity >= candidate_threshold {
                 return SpeakerQuery {
-                    label: format!("客户{id}"),
+                    label: label.clone(),
                     decision: SpeakerDecision::CandidateConfirmed,
                     similarity: Some(similarity),
-                    pending: Some(PendingSpeaker::ConfirmCandidate { id, embedding: emb }),
+                    pending: Some(PendingSpeaker::ConfirmCandidate {
+                        id,
+                        label,
+                        embedding: emb,
+                    }),
                 };
             }
         }
-        if inner.next_client_id > MAX_CLIENT_SPEAKERS {
+        let discovered = inner
+            .prototypes
+            .keys()
+            .filter(|name| name.as_str() != "我")
+            .count()
+            + inner.candidates.len();
+        if discovered >= MAX_CLIENT_SPEAKERS as usize {
             // 防止异常环境持续制造无界聚类；保留通用角色，不污染已有中心。
             return SpeakerQuery {
                 label: fallback.to_string(),
@@ -328,13 +409,19 @@ impl SpeakerIdentifier {
                 pending: None,
             };
         }
-        let id = inner.next_client_id;
+        let id = self.next_voice_id.fetch_add(1, Ordering::Relaxed);
+        // ID 在查询时即预留。注册仍延迟到 filter 放行后的 commit，但编号分配
+        // 不能延迟：双流 ASR 线程可能同时查询，否则两位讲话人会拿到同一个 ID。
+        let label = session_speaker_label(recognize_owner, id);
         SpeakerQuery {
-            // 第一次只显示稳定业务角色；第二个相似片段确认后才显示编号。
-            label: fallback.to_string(),
+            label: label.clone(),
             decision: SpeakerDecision::CandidateStarted,
             similarity: nearest.as_ref().map(|(_, similarity)| *similarity),
-            pending: Some(PendingSpeaker::StartCandidate { id, embedding: emb }),
+            pending: Some(PendingSpeaker::StartCandidate {
+                id,
+                label,
+                embedding: emb,
+            }),
         }
     }
 
@@ -346,19 +433,34 @@ impl SpeakerIdentifier {
         };
         let mut inner = self.inner.lock().unwrap();
         match pending {
-            PendingSpeaker::StartCandidate { id, embedding } => {
-                inner.candidates.insert(*id, embedding.clone());
-                inner.next_client_id = inner.next_client_id.max(id + 1);
+            PendingSpeaker::StartCandidate {
+                id,
+                label,
+                embedding,
+            } => {
+                inner.candidates.insert(
+                    *id,
+                    CandidateSpeaker {
+                        label: label.clone(),
+                        embedding: embedding.clone(),
+                    },
+                );
                 false
             }
-            PendingSpeaker::ConfirmCandidate { id, embedding } => {
-                let label = format!("客户{id}");
-                if inner.prototypes.contains_key(&label) || !inner.manager.add(&label, embedding) {
+            PendingSpeaker::ConfirmCandidate {
+                id,
+                label,
+                embedding,
+            } => {
+                if inner.prototypes.contains_key(label.as_str())
+                    || !inner.manager.add(label.as_str(), embedding)
+                {
                     return false;
                 }
-                inner.prototypes.insert(label, (embedding.clone(), 1));
+                inner
+                    .prototypes
+                    .insert(label.clone(), (embedding.clone(), 1));
                 inner.candidates.remove(id);
-                inner.next_client_id = inner.next_client_id.max(id + 1);
                 true
             }
             PendingSpeaker::Update { label, embedding } => {
@@ -429,7 +531,12 @@ pub fn load_owner_embedding(data_dir: &Path) -> Option<Vec<f32>> {
     let raw = raw.trim_start_matches('\u{feff}');
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let values = v.get("values")?.as_array()?;
-    Some(values.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
+    Some(
+        values
+            .iter()
+            .filter_map(|x| x.as_f64().map(|f| f as f32))
+            .collect(),
+    )
 }
 
 /// 删除主人声纹。
@@ -481,6 +588,12 @@ mod tests {
         // 无模型：SpeakerIdentifier::new 返回 None，identify 不可用 → 由调用方用 fallback
         let model = Path::new("nonexistent-model.onnx");
         assert!(SpeakerIdentifier::new(model, None, DEFAULT_THRESHOLD).is_none());
+    }
+
+    #[test]
+    fn session_identity_keeps_microphone_and_loopback_roles_distinct() {
+        assert_eq!(session_speaker_label(true, 1), "讲话者1");
+        assert_eq!(session_speaker_label(false, 2), "客户2");
     }
 
     #[test]

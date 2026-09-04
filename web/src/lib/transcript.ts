@@ -10,6 +10,8 @@ export interface TranscriptLine {
   text: string;
   isPartial: boolean;
   tsMs: number;
+  voiceId?: string;
+  speakerRole?: "owner" | "client" | "other" | "unknown";
 }
 
 /** segment 事件的最小形状（与 Rust DomainEvent::Segment 对应）。 */
@@ -19,6 +21,10 @@ export interface SegmentEvent {
   text: string;
   is_partial: boolean;
   ts_ms?: number;
+  speaker_attribution?: {
+    role: "owner" | "client" | "other" | "unknown";
+    voice?: { id: string; confidence?: number };
+  };
 }
 
 /** 转写行聚合器：增量处理 segment 事件，输出稳定的行列表。 */
@@ -54,6 +60,8 @@ export class TranscriptAccumulator {
   /** 处理一条 segment 事件。 */
   push(seg: SegmentEvent): void {
     const tsMs = seg.ts_ms ?? Date.now();
+    const voiceId = seg.speaker_attribution?.voice?.id;
+    const speakerRole = seg.speaker_attribution?.role;
     // 声纹只允许修改显示标签；稳定的通道/角色 ID 用于把 partial 与 final 对齐。
     const speakerKey = seg.speaker_id === undefined ? seg.speaker_label : `id:${seg.speaker_id}`;
     if (seg.is_partial) {
@@ -75,12 +83,12 @@ export class TranscriptAccumulator {
         // 固化该说话人的未完成行
         this.partialKeyBySpeaker.delete(speakerKey);
         this.lines = this.lines.map((l) =>
-          l.key === key ? { ...l, speakerLabel: seg.speaker_label, text: seg.text, isPartial: false, tsMs } : l,
+          l.key === key ? { ...l, speakerLabel: seg.speaker_label, text: seg.text, isPartial: false, tsMs, voiceId, speakerRole } : l,
         );
       } else {
         // 直接新增一行
         const k = this.nextKey++;
-        this.lines = [...this.lines, { key: k, speakerLabel: seg.speaker_label, text: seg.text, isPartial: false, tsMs }];
+        this.lines = [...this.lines, { key: k, speakerLabel: seg.speaker_label, text: seg.text, isPartial: false, tsMs, voiceId, speakerRole }];
       }
     }
   }

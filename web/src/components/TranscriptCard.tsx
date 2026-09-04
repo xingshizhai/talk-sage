@@ -14,6 +14,8 @@ export interface TimelineLine {
   engine: string;
   text: string;
   isPartial: boolean;
+  voiceId?: string;
+  speakerRole?: "owner" | "client" | "other" | "unknown";
   translation?: string;
 }
 
@@ -137,7 +139,7 @@ export default function TranscriptCard({
             const sentences = punctuateAndSplit(l.text);
             return (
               <div key={l.key} style={{ fontSize: 12, color: "var(--text-2)", wordBreak: "break-word" }}>
-                <span style={{ color: l.speakerColor, fontWeight: 600 }}>[{l.speaker}]</span>{" "}
+                <span title={l.voiceId ? `声纹身份：${l.voiceId}` : undefined} style={{ color: l.speakerColor, fontWeight: 600 }}>[{l.speaker}]</span>{" "}
                 {sentences.map((s, j) => (
                   <span key={j} style={{ color: l.isPartial ? "var(--muted)" : "var(--text)", marginRight: 6 }}>
                     {s}
@@ -167,7 +169,7 @@ export default function TranscriptCard({
                 <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "monospace", paddingTop: 2 }}>{l.time}</span>
               )}
               <div style={{ wordBreak: "break-word" }}>
-                <span style={{ fontSize: 10, fontWeight: 700, color: l.speakerColor, marginRight: 6 }}>
+                <span title={l.voiceId ? `声纹身份：${l.voiceId}` : undefined} style={{ fontSize: 10, fontWeight: 700, color: l.speakerColor, marginRight: 6 }}>
                   {l.speaker}
                 </span>
                 <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "monospace", marginRight: 6 }}>

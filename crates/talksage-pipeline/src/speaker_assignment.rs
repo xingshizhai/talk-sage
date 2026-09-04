@@ -5,12 +5,13 @@
 use crate::speaker::{SharedSpeaker, SpeakerDecision};
 use talksage_core::{AudioSource, SpeakerAttribution, VoiceIdentity};
 
-fn is_stable_voice_decision(decision: SpeakerDecision) -> bool {
+fn has_voice_identity(decision: SpeakerDecision) -> bool {
     matches!(
         decision,
         SpeakerDecision::OwnerMatch
             | SpeakerDecision::ExistingMatch
             | SpeakerDecision::GrayZoneReuse
+            | SpeakerDecision::CandidateStarted
             | SpeakerDecision::CandidateConfirmed
     )
 }
@@ -52,13 +53,11 @@ impl SpeakerAssignment {
         let label = query.label().to_string();
         let diagnostic = Some((query.decision(), query.similarity()));
         let mut attribution = SpeakerAttribution::from_legacy(source, &label);
-        if is_stable_voice_decision(query.decision()) {
+        if has_voice_identity(query.decision()) {
             attribution.voice = Some(VoiceIdentity {
-                id: if label == "我" {
-                    "owner".into()
-                } else {
-                    label.clone()
-                },
+                id: query
+                    .voice_id()
+                    .expect("voice-bearing decision must have an id"),
                 confidence: query.similarity(),
             });
         }
@@ -155,15 +154,15 @@ mod tests {
     }
 
     #[test]
-    fn provisional_or_fallback_decisions_are_not_exposed_as_stable_voice_ids() {
+    fn candidates_get_session_voice_ids_but_fallbacks_do_not() {
         for decision in [
             SpeakerDecision::LowQualityFallback,
-            SpeakerDecision::CandidateStarted,
             SpeakerDecision::SpeakerLimitFallback,
         ] {
-            assert!(!is_stable_voice_decision(decision));
+            assert!(!has_voice_identity(decision));
         }
-        assert!(is_stable_voice_decision(SpeakerDecision::OwnerMatch));
-        assert!(is_stable_voice_decision(SpeakerDecision::CandidateConfirmed));
+        assert!(has_voice_identity(SpeakerDecision::CandidateStarted));
+        assert!(has_voice_identity(SpeakerDecision::OwnerMatch));
+        assert!(has_voice_identity(SpeakerDecision::CandidateConfirmed));
     }
 }

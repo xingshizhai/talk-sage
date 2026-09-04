@@ -244,7 +244,7 @@ flowchart LR
 - **引擎池**：`EnginePool` 按 `(kind, model_dir, options.signature())` 缓存，含 provider 隔离；GPU 引擎与 CPU 引擎独立缓存
 - **GPU 状态 API**：`GET /api/asr/gpu_status` + Tauri `get_gpu_status` → `{backend, display_name, hardware_candidate, is_accelerated, effective_route, route_error}`
 - **模型管理**：模型目录解析、可选状态、断点续传、磁盘预检、完整性校验与下载日志见 [模型管理架构](model-management.md)
-- **说话人**：角色策略分为关闭、按物理通道和 WeSpeaker 声纹聚类。只有多人会议（或自定义 voiceprint）加载声纹模型。主人声纹不是聚类前置条件，只负责把匹配身份命名为”我”。段内使用 1.5s 滑动声纹窗口、500ms 步长和连续两次确认检测换人，确认后复用 `finish_speech` 安全切段。推理由每流容量 1 的后台 worker 执行，忙时跳过新窗口而不阻塞 ASR
+- **说话人**：角色策略分为关闭、按物理通道和 WeSpeaker 声纹聚类。只有多人会议（或自定义 voiceprint）加载声纹模型。会议双流中的麦克风和回环都参与识别；主人声纹只在麦克风域匹配，其他麦克风声音命名为 `讲话者N`，回环声音命名为 `客户N`。两域共享 extractor 和原子 voice ID 分配器，但隔离聚类中心，避免回声造成角色串线。新身份首次出现即获得会话内 voice ID，第二个相似片段负责确认和更新中心。主人声纹不是聚类前置条件，只负责把匹配身份命名为“我”。段内使用 1.5s 滑动声纹窗口、500ms 步长和连续两次确认检测换人，确认后复用 `finish_speech` 安全切段。推理由每流容量 1 的后台 worker 执行，忙时跳过新窗口而不阻塞 ASR。
 
 ### 8.3 管道与插件（talksage-pipeline / talksage-plugins）
 
@@ -258,7 +258,7 @@ flowchart LR
 
 ### 8.4 会话域（talksage-session）
 
-- SQLite schema（沿旧版扩展）：`sessions`（含录音文件路径、workspace、user）、`segments`（含 speaker_id 与可选 `speaker_attribution` JSON）、`terms`、`translations`、`key_points`、`notes`
+- SQLite schema（沿旧版扩展）：`sessions`（含录音文件路径、workspace、user）、`segments`（含兼容通道字段 `speaker_id` 与可选 `speaker_attribution` JSON；后者保存 source/role/voice identity）、`terms`、`translations`、`key_points`、`notes`
 - Markdown 导出（增量追加，不再全量重写）
 - 历史检索：SQL LIKE + 可选全文索引（预留）
 - 兼容迁移：启动时以幂等 `ALTER TABLE` 补齐新增列；旧 segment 没有结构化归属时，根据历史 label 推断角色并把来源标为 unknown
@@ -611,6 +611,8 @@ revision / processed_until_sample / committed_until_sample
 
 - `SpeakerAttribution` 将音频来源、角色、身份和置信度结构化，避免业务继续解析“我/客户 N”等展示文本。
 - 过滤器之后才提交 speaker assignment，防止被短段过滤或跨流去重吞掉的段污染声纹状态。
+- `speaker_id` 保持物理/逻辑输入通道身份，不能用声纹聚类编号覆盖；多人身份使用 `speaker_attribution.voice.id`。这样既保持流式 partial 与 final 的稳定对齐，也不破坏按通道工作的翻译与会话指标。
+- voice ID 使用原子计数器在查询阶段预留，避免两条 ASR 线程同时发现新人时分配相同编号；聚类候选仍只在过滤器放行后提交。
 - 未确认身份使用有界多候选集合，而不是单个候选槽；A/B 交替发言不会互相覆盖，任一候选再次出现即可稳定为“客户 N”。
 - 单个低相似度声纹窗口不会立即换人；连续两个窗口偏离稳定锚点且当前轮次至少 2s 才主动切段。检查节拍不会在设备卡顿恢复后追赶历史窗口。
 - 声纹窗口推理不在 Pipeline 主线程执行；任务队列容量为 1，结果携带 segment generation，旧段迟到结果不会切断新段。底层 WeSpeaker extractor 由互斥锁保护并发安全。

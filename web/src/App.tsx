@@ -233,6 +233,7 @@ export default function App() {
           ev.committed.map((s) => ({
             speaker_id: s.speaker_id,
             speaker_label: s.speaker_label,
+            speaker_attribution: s.speaker_attribution,
             text: s.text,
             is_partial: false,
             ts_ms: s.ts_ms,
@@ -256,6 +257,8 @@ export default function App() {
               engine: st.engine,
               text: l.text,
               isPartial: l.isPartial,
+              voiceId: l.voiceId,
+              speakerRole: l.speakerRole,
               translation: lastTranslationRef.current[l.speakerLabel],
             };
           }),
@@ -279,6 +282,8 @@ export default function App() {
               engine: st.engine,
               text: l.text,
               isPartial: l.isPartial,
+              voiceId: l.voiceId,
+              speakerRole: l.speakerRole,
               translation: lastTranslationRef.current[l.speakerLabel],
             };
           }),
