@@ -942,3 +942,30 @@ async fn save_config_accepts_a_newly_typed_api_key() {
     assert_eq!(post_config(&router, &body).await, StatusCode::OK);
     assert_eq!(state.config.snapshot().llm.providers["deepseek"].api_key, "sk-typed-by-user");
 }
+
+/// 会议文字通道契约：未在监听时注入返回 409（无需音频设备/模型即可验证路由与鉴权）。
+#[tokio::test]
+async fn live_typed_requires_running_session() {
+    let router = build_router(test_state(), &std::path::PathBuf::from("nonexistent-dist"));
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/live/typed")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"你好，这条文字要并入会议"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "未监听时应返回 conflict");
+}
+
+/// 引擎实测报告：无 `talksage bench --save-report` 产物时返回空对象。
+#[tokio::test]
+async fn asr_bench_returns_empty_without_report() {
+    let (status, body) = get("/api/asr/bench").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.trim(), "{}", "无评测报告时应返回空对象，而不是报错: {body}");
+}

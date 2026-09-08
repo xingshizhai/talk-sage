@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AppApi, AppConfig, AsrModelInfo, AsrRuntimeStatus, ChatMessageRecord, ChatSendResult, ChatThread, DomainEvent, NotesTemplate, OfflineUpgradeResult, PluginMeta, PluginStatusInfo, SegmentHit, SessionDetail, SessionRecord, TrioSummary, UpdateCheckResult } from "./api";
+import type { AppApi, AppConfig, AsrModelInfo, AsrRuntimeStatus, BenchSummary, ChatMessageRecord, ChatSendResult, ChatThread, DomainEvent, NotesTemplate, OfflineUpgradeResult, PluginMeta, PluginStatusInfo, SegmentHit, SessionDetail, SessionRecord, TrioSummary, TypedInjectResult, UpdateCheckResult } from "./api";
 
 /** 统一 fetch 辅助（同源 /api）。 */
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -50,6 +50,10 @@ export const ipcApi: AppApi = {
     return invoke<AsrModelInfo[]>("list_asr_models");
   },
 
+  async getAsrBench(): Promise<Record<string, BenchSummary>> {
+    return invoke<Record<string, BenchSummary>>("get_asr_bench");
+  },
+
   async downloadModel(engine: string): Promise<void> {
     await invoke("download_model", { engine });
   },
@@ -96,6 +100,10 @@ export const ipcApi: AppApi = {
 
   async setNoiseLevel(level: number): Promise<void> {
     await invoke("set_noise_level", { level });
+  },
+
+  async injectText(text: string, author?: string): Promise<TypedInjectResult> {
+    return invoke<TypedInjectResult>("inject_text", { text, author: author ?? null });
   },
 
   async flushKeyPoints(): Promise<string> {
@@ -305,6 +313,10 @@ export const httpApi: AppApi = {
     return req<AsrModelInfo[]>("/asr/models");
   },
 
+  async getAsrBench(): Promise<Record<string, BenchSummary>> {
+    return req<Record<string, BenchSummary>>("/asr/bench");
+  },
+
   async downloadModel(engine: string): Promise<void> {
     await req(`/asr/models/${encodeURIComponent(engine)}/download`, { method: "POST" });
   },
@@ -367,6 +379,14 @@ export const httpApi: AppApi = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ level }),
+    });
+  },
+
+  async injectText(text: string, author?: string): Promise<TypedInjectResult> {
+    return req<TypedInjectResult>("/live/typed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, author: author ?? null }),
     });
   },
 

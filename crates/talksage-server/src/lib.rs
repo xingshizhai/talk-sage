@@ -128,9 +128,11 @@ pub fn build_router(state: ServerState, web_dist: &PathBuf) -> Router {
         .route("/listen/start", axum::routing::post(start_listen_api))
         .route("/listen/stop", axum::routing::post(stop_listen_api))
         .route("/listen/pause", axum::routing::post(pause_listen_api))
+        .route("/live/typed", axum::routing::post(inject_typed_text_api))
         .route("/noise_level", axum::routing::post(set_noise_level_api))
         .route("/key_points/flush", axum::routing::post(flush_key_points_api))
         .route("/asr/gpu_status", get(gpu_status_handler))
+        .route("/asr/bench", get(asr_bench_api))
         .route("/asr/test", axum::routing::post(test_aliyun_asr_api))
         .route("/voiceprint/status", axum::routing::get(voiceprint_status_api))
         .route("/voiceprint/enroll", axum::routing::post(voiceprint_enroll_api))
@@ -315,6 +317,20 @@ async fn plugin_status_api(State(state): State<ServerState>, headers: axum::http
     Json(state.service.plugin_registrations()).into_response()
 }
 
+/// 模型评测报告（`talksage bench --save-report` 写入 <data_dir>/bench/latest.json，
+/// 按引擎 id 索引的最近一次实测：CER/WER + RTF + 首段延迟）。文件不存在返回 {}。
+async fn asr_bench_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let path = state.config.data_dir().join("bench").join("latest.json");
+    let body = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    Json(body).into_response()
+}
+
 async fn asr_models_api(State(state): State<ServerState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
@@ -325,7 +341,7 @@ async fn asr_models_api(State(state): State<ServerState>, headers: axum::http::H
         serde_json::json!({
             "id": kind.display_name(), "label": p.label, "languages": p.languages,
             "streaming": p.streaming, "speed": p.speed, "description": p.description,
-            "selectable": p.selectable,
+            "selectable": p.selectable, "cost": p.cost,
             "installed": root.as_ref().is_some_and(|r| kind.is_available(r)),
             "size_mb": root.as_ref().map(|r| talksage_asr::models::installed_size_mb(kind, r)).unwrap_or(0),
             "download_size_mb": talksage_asr::models::download_size_mb(kind),
@@ -340,6 +356,7 @@ async fn asr_models_api(State(state): State<ServerState>, headers: axum::http::H
         "speed": "fast",
         "description": "CT-Transformer 中英文标点预测，用于流式引擎语义分句",
         "selectable": false,
+        "cost": "本地推理（仅电费）",
         "installed": root.as_ref().is_some_and(|r| talksage_asr::is_punct_model_installed(r)),
         "size_mb": 0,
         "download_size_mb": talksage_asr::punct_download_size_mb(),
@@ -1233,6 +1250,49 @@ async fn flush_key_points_api(
             let msg = p.flush_key_points();
             (StatusCode::OK, Json(serde_json::json!({ "ok": true, "msg": msg }))).into_response()
         }
+        None => (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "not listening" }))).into_response(),
+    }
+}
+
+/// 会议文字通道请求体。
+#[derive(serde::Deserialize)]
+struct TypedTextBody {
+    #[serde(default)]
+    text: String,
+    /// 可选作者名（缺省显示为「文字」）。
+    #[serde(default)]
+    author: Option<String>,
+}
+
+/// 会议文字通道（headless）：向当前会话注入一条打字文本。
+///
+/// 会话必须正在监听/导入中；注入成功即经 WS 广播一条 final Segment 事件
+/// （source=typed_text），同时随会话落库。
+async fn inject_typed_text_api(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if !token_ok(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let parsed: TypedTextBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("请求体解析失败: {e}") }))).into_response();
+        }
+    };
+    match state.running.lock().unwrap().as_ref() {
+        Some(running) => match running.inject_text(&parsed.text, parsed.author.as_deref()) {
+            Ok(ts_ms) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true, "ts_ms": ts_ms, "session_id": running.session_id(),
+                })),
+            )
+                .into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+        },
         None => (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "not listening" }))).into_response(),
     }
 }

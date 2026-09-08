@@ -99,3 +99,13 @@ python3 scripts/download_models.py legacy
 ```
 
 下载器测试覆盖代理、取消清理、HTTP Range 续传、归档逐条读取、标点模型提取、SHA-1 标记、最小文件大小和空间预算。涉及 `127.0.0.1` 临时 HTTP 服务的测试在受限沙箱中需要网络绑定权限。
+
+## 引擎实测（评测透明化）
+
+`talksage bench --dir <语料> --engine <id> --save-report` 会把本机实测（语料目录、
+文件数、平均 CER/WER、RTF、首词延迟、逐文件明细）写入 `<data_dir>/bench/latest.json`
+（按引擎 id 索引，保留各引擎最近一次）。「模型管理」页与 `/api/asr/bench`、
+桌面 `get_asr_bench` 读取同一份文件：模型卡片下方显示最近一次实测结果，便于
+换引擎/换语料横向对比准确率与速度（参考 MAI-Transcribe 的“评测即产品”做法，
+数字永远来自本机固定语料，而不是厂商宣传）。
+

@@ -40,6 +40,9 @@
 - **System tray** — Windows: minimizing hides the window into the tray (click the icon to restore); macOS: follows platform conventions with a menu-bar icon that toggles the window
 - **Fixed-corpus benchmark** — `talksage bench` streams through `*.wav` corpora (engine pool warm start, model reused in-process) and reports **CER/WER accuracy + real-time factor (RTF) + first-token latency** for regression testing (borrows WhisperLiveKit's bench)
 - **OpenAI-compatible transcription API** — the headless server exposes `POST /v1/audio/transcriptions` and `GET /v1/models`; existing OpenAI-ecosystem clients (whisper-style tools, curl, openai SDK) can point at this machine for **fully local transcription** (Bearer auth, json/text/verbose_json, any-sample-rate wav auto-resampled)
+- **Meeting text channel** — type questions/comments during a live session (desktop or headless, e.g. remote attendees); the text merges into the transcript stream in real time as a `typed_text` segment (same timeline, persisted to the session, zero audio metrics)
+- **Data-driven scene presets** — "interview debrief / QA review / sales visit" come as configuration-defined templates (base preset + parameter overrides, editable & extendable in `talksage.toml` under `[scene] presets`); applying one switches into a fully-editable custom scene, and adding a new scenario needs **no Rust code**
+- **Measured engine transparency** — `talksage bench --save-report` stores your own corpus CER/WER + RTF + first-token latency per engine; 模型管理 shows the latest local measurement next to each model so accuracy/speed/cost trade-offs are visible (borrows MAI-Transcribe's "benchmark as product" practice)
 - **Short-segment suppression** — `audio.min_segment_ms` (min commit duration, adjustable in Settings) drops final segments shorter than the threshold, so stray "click/pop" blips in noisy sessions no longer pollute transcripts or history
 - **Live conversation metrics** — real-time talk ratio (me vs them), speaking pace (WPM), question count, monologue detection, interruptions, and a **0–100 health score** (pure stats, no LLM; borrows Call.md's conversation-metrics)
 - **Live coaching nudges** — rule-driven, 2-minute-cooldown hints (talk imbalance / too few questions / fast pace / confirm next steps near the end) shown as dismissible cards (borrows Call.md's nudge-engine)
@@ -148,6 +151,8 @@ curl http://127.0.0.1:8080/v1/audio/transcriptions \
 | Task | How |
 |---|---|
 | Start listening | Left panel ▶ 开始监听 (jumps to live transcript) |
+| Type into a live meeting | 实时转写页顶部「文字通道」：Enter 发送并实时并入转写（远程参会者提问/补充） |
+| Apply a scene preset | 设置 → 场景模式 → 自定义 → 「数据化场景模板」一键套用（面试复盘/客服质检/客户陪访，可在 talksage.toml 自行增补） |
 | Import meeting media | Live transcript → 导入录音文件 (WAV / MP3 / MP4 / M4A) |
 | Register your voice | Settings → 声音标识 → 录制我的声音 (6 s) |
 | Tune mic level / noise gate | Left panel while listening: 麦克风电平 meter + noise-gate threshold slider (live, no restart) |
@@ -161,7 +166,7 @@ curl http://127.0.0.1:8080/v1/audio/transcriptions \
 | Config | `talksage config path`; `config get [dotted.path]`; `config set <path> <value>` (secrets masked) |
 | Logs | `talksage logs [--lines 200]` |
 | Offline speaker timeline | `talksage diarize audio.wav [--speakers N]` (pyannote segmentation + WeSpeaker clustering) |
-| Fixed-corpus benchmark | `talksage bench [--dir corpus] [--engine paraformer-zh\|zipformer-en] [--limit N]` (CER/WER, RTF, first-token latency) |
+| Fixed-corpus benchmark | `talksage bench [--dir corpus] [--engine paraformer-zh\|zipformer-en] [--limit N]` (CER/WER, RTF, first-token latency)；加 `--save-report` 会把本机实测写入模型管理页「引擎实测」 |
 | Short-segment suppression | Settings → 音频处理 → 最短提交时长 (ms, 0 = off); or `[audio] min_segment_ms` in config |
 
 ### The recording → trim → replay loop

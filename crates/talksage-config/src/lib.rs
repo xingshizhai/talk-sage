@@ -348,6 +348,12 @@ pub struct SceneConfig {
     pub mode: SceneMode,
     /// 自定义模式的完整参数（其他模式忽略；初始为会议模板副本）。
     pub custom: SceneParams,
+    /// 数据化场景模板库：内置 + 用户在 talksage.toml 自定义，套用后写入 custom。
+    #[serde(default)]
+    pub presets: Vec<ScenePreset>,
+    /// 当前 custom 由哪个模板套用而来（仅展示用；改了模式即清除）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_preset: Option<String>,
 }
 
 impl Default for SceneConfig {
@@ -355,6 +361,8 @@ impl Default for SceneConfig {
         Self {
             mode: SceneMode::Conversation,
             custom: scene_params(SceneMode::Custom),
+            presets: default_scene_presets(),
+            active_preset: None,
         }
     }
 }
@@ -380,6 +388,115 @@ impl SceneConfig {
             SceneMode::Custom => "自定义",
         }
     }
+
+    /// 自定义模式当前由哪个数据化模板套用而来（用于 UI 高亮；非自定义返回 None）。
+    pub fn active_preset_label(&self) -> Option<&str> {
+        if self.mode != SceneMode::Custom {
+            return None;
+        }
+        let id = self.active_preset.as_deref()?;
+        self.presets.iter().find(|p| p.id == id).map(|p| p.label.as_str())
+    }
+}
+
+/// 数据化场景预设：一类「开箱即用」场景的定义。
+///
+/// 关键设计：**预设是数据，不是代码**。内置三个示例（面试复盘/客服质检/客户陪访），
+/// 用户也可在 `talksage.toml` 的 `[scene] presets` 里追加自己的模板（基底 +
+/// 覆盖参数），新增场景不再需要改 Rust。套用动作 = 以 `base` 模板为基底、
+/// 叠加 `overrides` 解析出完整 SceneParams 写入 `scene.custom` 并把模式切到
+/// `Custom`（之后可继续微调，微调不影响模板本身）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScenePreset {
+    /// 唯一 id（套用/去重键）。
+    pub id: String,
+    /// 展示名（如「面试复盘」）。
+    pub label: String,
+    /// 一句话用途说明（UI tooltip / 描述）。
+    #[serde(default)]
+    pub description: String,
+    /// 基底模板（必须是内置非 Custom 模式）。
+    pub base: SceneMode,
+    /// 覆盖参数（键名与 [`SceneParams`] 一致，见 [`apply_scene_params`]）。
+    #[serde(default)]
+    pub overrides: serde_json::Map<String, serde_json::Value>,
+    /// 该预设建议的默认纪要模板 id（见 talksage-notes；套用时写入默认纪要模板）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_template: Option<String>,
+}
+
+impl Default for ScenePreset {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            description: String::new(),
+            base: SceneMode::Conversation,
+            overrides: serde_json::Map::new(),
+            notes_template: None,
+        }
+    }
+}
+
+impl ScenePreset {
+    /// 解析出该预设的完整有效参数：基底模板 + 覆盖。
+    pub fn resolve(&self) -> SceneParams {
+        let base = if self.base == SceneMode::Custom {
+            // 不允许以 Custom 为基底（会退化成它自己的 custom，产生循环）
+            SceneMode::Meeting
+        } else {
+            self.base
+        };
+        let mut params = scene_params(base);
+        if !self.overrides.is_empty() {
+            apply_scene_params(&mut params, &serde_json::Value::Object(self.overrides.clone()));
+        }
+        params
+    }
+}
+
+/// 内置数据化场景模板（示例三件套：面试复盘 / 客服质检 / 客户陪访）。
+pub fn default_scene_presets() -> Vec<ScenePreset> {
+    let preset = |id: &str,
+                  label: &str,
+                  description: &str,
+                  base: SceneMode,
+                  overrides: serde_json::Map<String, serde_json::Value>,
+                  notes_template: Option<&str>| ScenePreset {
+        id: id.to_string(),
+        label: label.to_string(),
+        description: description.to_string(),
+        base,
+        overrides,
+        notes_template: notes_template.map(str::to_string),
+    };
+    vec![
+        preset(
+            "interview_debrief",
+            "面试复盘",
+            "多人会议基底的录音复盘：声纹区分候选人/面试官，术语与要点全开（主用于面试录音回听与复盘）",
+            SceneMode::Meeting,
+            serde_json::json!({ "asr_segment_ms": 8000 }).as_object().unwrap().clone(),
+            Some("standard_meeting"),
+        ),
+        preset(
+            "quality_assurance",
+            "客服质检",
+            "一对一通话基线，短段及时提交、打开角色区分，便于逐段质检与话术复盘",
+            SceneMode::Conversation,
+            serde_json::json!({ "min_segment_ms": 0, "noise_auto_detect": false }).as_object().unwrap().clone(),
+            Some("daily_standup"),
+        ),
+        preset(
+            "sales_visit",
+            "客户陪访",
+            "一对一会话基线：我方+客户双流，术语/要点/简报全开，适合销售陪访录音复盘",
+            SceneMode::Conversation,
+            serde_json::json!({ "asr_segment_ms": 5000 }).as_object().unwrap().clone(),
+            Some("negotiation"),
+        ),
+    ]
 }
 
 impl SceneParams {
@@ -1293,6 +1410,13 @@ fn merge_config(default: Config, user: Config) -> Config {
                 speaker_mode: user.scene.custom.speaker_mode,
                 noise_auto_detect: user.scene.custom.noise_auto_detect,
             },
+            // 模板库：用户写了就用用户的（含自定义模板），否则回退内置模板
+            presets: if user.scene.presets.is_empty() {
+                default.scene.presets
+            } else {
+                user.scene.presets
+            },
+            active_preset: user.scene.active_preset,
         },
     };
     sync_knowledge_source(&mut config);
@@ -1675,9 +1799,28 @@ pub fn apply_updates(c: &mut Config, updates: &serde_json::Value) {
                 "custom" => SceneMode::Custom,
                 _ => SceneMode::Conversation,
             };
+            // 切回非自定义模式 = 离开模板套用状态
+            if c.scene.mode != SceneMode::Custom {
+                c.scene.active_preset = None;
+            }
         }
         if let Some(cu) = scene.get("custom") {
             apply_scene_params(&mut c.scene.custom, cu);
+        }
+        // 数据化场景模板：一键套用 = 解析出完整 SceneParams 写入 custom 并切到
+        // Custom。未知 id 静默忽略（UI 只发模板列表里存在的 id）。
+        if let Some(pid) = scene.get("apply_preset").and_then(|v| v.as_str()) {
+            if let Some(preset) = c.scene.presets.iter().find(|p| p.id == pid) {
+                c.scene.mode = SceneMode::Custom;
+                c.scene.custom = preset.resolve();
+                c.scene.active_preset = Some(preset.id.clone());
+                // 预设携带默认纪要模板时，联动全局默认模板（plugins.notes.template）。
+                if let Some(notes_template) = preset.notes_template.as_deref() {
+                    if !notes_template.trim().is_empty() {
+                        c.plugins.notes.template = notes_template.trim().to_string();
+                    }
+                }
+            }
         }
     }
     sync_knowledge_source(c);
@@ -1992,10 +2135,10 @@ folder = "D:\\Obsidian"
 
         assert_eq!(lecture.vad_max_speech_ms, Some(60_000));
 
-        let cfg = SceneConfig { mode: SceneMode::Meeting, custom: scene_params(SceneMode::Custom) };
+        let cfg = SceneConfig { mode: SceneMode::Meeting, custom: scene_params(SceneMode::Custom), presets: default_scene_presets(), active_preset: None };
         assert_eq!(cfg.effective().vad_preset, meeting.vad_preset);
 
-        let cfg_custom = SceneConfig { mode: SceneMode::Custom, custom: dictation.clone() };
+        let cfg_custom = SceneConfig { mode: SceneMode::Custom, custom: dictation.clone(), presets: default_scene_presets(), active_preset: None };
         assert_eq!(cfg_custom.effective().vad_preset, VadPreset::Sensitive);
     }
 
@@ -2151,6 +2294,84 @@ knob = 42
             &serde_json::json!({ "user_language": "en" }),
         );
         assert_eq!(p.language, "en", "旧键 user_language 应映射到 language");
+    }
+
+    #[test]
+    fn builtin_scene_presets_resolve_over_base_template() {
+        let presets = default_scene_presets();
+        let ids: Vec<_> = presets.iter().map(|p| p.id.as_str()).collect();
+        assert!(ids.contains(&"interview_debrief"));
+        assert!(ids.contains(&"quality_assurance"));
+        assert!(ids.contains(&"sales_visit"));
+        let mut seen = std::collections::HashSet::new();
+        for id in &ids {
+            assert!(seen.insert(id), "预设 id 重复: {id}");
+        }
+        // 面试复盘：以 meeting 为基底，只覆盖 asr_segment_ms
+        let interview = presets.iter().find(|p| p.id == "interview_debrief").unwrap();
+        assert_eq!(interview.base, SceneMode::Meeting);
+        let p = interview.resolve();
+        assert_eq!(p.speaker_mode, SpeakerMode::Voiceprint, "基底 meeting 的声纹策略应保留");
+        assert_eq!(p.asr_segment_ms, 8000, "覆盖参数应生效");
+        assert_eq!(p.plugin_allowlist, scene_params(SceneMode::Meeting).plugin_allowlist);
+    }
+
+    #[test]
+    fn apply_preset_update_materializes_custom_params() {
+        let mut cfg = Config::default();
+        apply_updates(&mut cfg, &serde_json::json!({ "scene": { "apply_preset": "sales_visit" } }));
+        assert_eq!(cfg.scene.mode, SceneMode::Custom, "套用模板应切到自定义模式");
+        assert_eq!(cfg.scene.active_preset.as_deref(), Some("sales_visit"));
+        let conv = scene_params(SceneMode::Conversation);
+        assert_eq!(cfg.scene.custom.client_enabled, conv.client_enabled);
+        assert_eq!(cfg.scene.custom.language, "zh");
+        assert_eq!(cfg.scene.custom.asr_segment_ms, 5000, "sales_visit 覆盖 asr_segment_ms");
+        assert_eq!(cfg.plugins.notes.template, "negotiation", "预设应联动全局默认纪要模板");
+        // 未知 id：静默忽略，不破坏现状
+        let mut cfg2 = Config::default();
+        apply_updates(&mut cfg2, &serde_json::json!({ "scene": { "apply_preset": "nope" } }));
+        assert_eq!(cfg2.scene.mode, SceneMode::Conversation);
+        assert_eq!(cfg2.scene.active_preset, None);
+        assert_eq!(cfg2.plugins.notes.template, "standard_meeting");
+        // 切回内置模式清除 active 标记
+        let mut cfg3 = Config::default();
+        apply_updates(&mut cfg3, &serde_json::json!({ "scene": { "apply_preset": "quality_assurance" } }));
+        apply_updates(&mut cfg3, &serde_json::json!({ "scene": { "mode": "lecture" } }));
+        assert_eq!(cfg3.scene.active_preset, None);
+    }
+
+    #[test]
+    fn user_defined_scene_preset_survives_toml_roundtrip() {
+        let _env = env_lock();
+        let dir = std::env::temp_dir().join(format!("talksage-cfg-preset-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("talksage.toml");
+        std::fs::write(
+            &file,
+            r#"[scene]
+mode = "conversation"
+
+[[scene.presets]]
+id = "court_review"
+label = "庭审核对"
+description = "会议基底的庭审录音复盘（自定义模板示例）"
+base = "meeting"
+notes_template = "negotiation"
+
+[scene.presets.overrides]
+asr_segment_ms = 10000
+min_segment_ms = 0
+"#,
+        )
+        .unwrap();
+        let cfg = ConfigManager::load(None, Some(&file)).unwrap().snapshot();
+        let court = cfg.scene.presets.iter().find(|p| p.id == "court_review").expect("自定义模板应解析");
+        assert_eq!(court.label, "庭审核对");
+        assert_eq!(court.base, SceneMode::Meeting);
+        assert_eq!(court.notes_template.as_deref(), Some("negotiation"), "自定义模板的 notes_template 应往返保留");
+        assert_eq!(court.resolve().asr_segment_ms, 10_000);
+        assert_eq!(court.resolve().speaker_mode, SpeakerMode::Voiceprint);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

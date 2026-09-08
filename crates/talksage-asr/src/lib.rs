@@ -136,6 +136,8 @@ pub struct ModelProfile {
     pub description: &'static str,
     /// 是否已经有可运行的引擎适配器；false 时只允许预下载模型。
     pub selectable: bool,
+    /// 成本口径（引擎选择对比用；不写死具体价格，指向按量/本地语义）。
+    pub cost: &'static str,
 }
 
 impl EngineKind {
@@ -196,14 +198,14 @@ impl EngineKind {
 
     pub fn profile(self) -> ModelProfile {
         match self {
-            Self::ParaformerZh => ModelProfile { kind: self, label: "Paraformer 中文（旧诊断模型）", languages: "zh", streaming: true, speed: "realtime", description: "仅保留给自动化测试，不再作为产品模型", selectable: false },
-            Self::ZipformerEn => ModelProfile { kind: self, label: "Zipformer 英文（旧诊断模型）", languages: "en", streaming: true, speed: "realtime", description: "仅保留给自动化测试，不再作为产品模型", selectable: false },
-            Self::WhisperBase => ModelProfile { kind: self, label: "Whisper base ONNX（旧模型）", languages: "multilingual", streaming: false, speed: "balanced", description: "旧 sherpa ONNX 模型，不再提供下载", selectable: false },
-            Self::WhisperSmall => ModelProfile { kind: self, label: "Whisper small ONNX（旧模型）", languages: "multilingual", streaming: false, speed: "accurate", description: "旧 sherpa ONNX 模型，不再提供下载", selectable: false },
-            Self::Qwen3Asr => ModelProfile { kind: self, label: "Qwen3-ASR 0.6B int8", languages: "multilingual", streaming: false, speed: "accurate", description: "CUDA/CPU 本地高精度模型；中文与专业术语优先", selectable: true },
-            Self::WhisperMediumMetal => ModelProfile { kind: self, label: "Whisper medium Q5_0（whisper.cpp GPU，轻量）", languages: "multilingual", streaming: false, speed: "realtime", description: "whisper.cpp GPU 轻量模型（macOS Metal / Windows Vulkan），约 317 MiB；GPU 算力有限时优先选择", selectable: cfg!(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"))) },
-            Self::WhisperLargeV3TurboMetal => ModelProfile { kind: self, label: "Whisper large-v3-turbo Q5_0（whisper.cpp GPU）", languages: "multilingual", streaming: false, speed: "balanced", description: "whisper.cpp GPU 段级识别（macOS Metal / Windows Vulkan），约 547 MiB；中文/中英混说鲁棒性好", selectable: cfg!(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"))) },
-            Self::AliyunCloud => ModelProfile { kind: self, label: "阿里云实时语音", languages: "zh,en", streaming: true, speed: "realtime", description: "云端流式识别，需配置 AccessKey；无本地 GPU 时自动启用", selectable: true },
+            Self::ParaformerZh => ModelProfile { kind: self, label: "Paraformer 中文（旧诊断模型）", languages: "zh", streaming: true, speed: "realtime", description: "仅保留给自动化测试，不再作为产品模型", selectable: false, cost: "本地推理（仅电费）" },
+            Self::ZipformerEn => ModelProfile { kind: self, label: "Zipformer 英文（旧诊断模型）", languages: "en", streaming: true, speed: "realtime", description: "仅保留给自动化测试，不再作为产品模型", selectable: false, cost: "本地推理（仅电费）" },
+            Self::WhisperBase => ModelProfile { kind: self, label: "Whisper base ONNX（旧模型）", languages: "multilingual", streaming: false, speed: "balanced", description: "旧 sherpa ONNX 模型，不再提供下载", selectable: false, cost: "本地推理（仅电费）" },
+            Self::WhisperSmall => ModelProfile { kind: self, label: "Whisper small ONNX（旧模型）", languages: "multilingual", streaming: false, speed: "accurate", description: "旧 sherpa ONNX 模型，不再提供下载", selectable: false, cost: "本地推理（仅电费）" },
+            Self::Qwen3Asr => ModelProfile { kind: self, label: "Qwen3-ASR 0.6B int8", languages: "multilingual", streaming: false, speed: "accurate", description: "CUDA/CPU 本地高精度模型；中文与专业术语优先", selectable: true, cost: "本地推理（仅电费）" },
+            Self::WhisperMediumMetal => ModelProfile { kind: self, label: "Whisper medium Q5_0（whisper.cpp GPU，轻量）", languages: "multilingual", streaming: false, speed: "realtime", description: "whisper.cpp GPU 轻量模型（macOS Metal / Windows Vulkan），约 317 MiB；GPU 算力有限时优先选择", selectable: cfg!(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"))), cost: "本地推理（仅电费）" },
+            Self::WhisperLargeV3TurboMetal => ModelProfile { kind: self, label: "Whisper large-v3-turbo Q5_0（whisper.cpp GPU）", languages: "multilingual", streaming: false, speed: "balanced", description: "whisper.cpp GPU 段级识别（macOS Metal / Windows Vulkan），约 547 MiB；中文/中英混说鲁棒性好", selectable: cfg!(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", feature = "vulkan-gpu"))), cost: "本地推理（仅电费）" },
+            Self::AliyunCloud => ModelProfile { kind: self, label: "阿里云实时语音", languages: "zh,en", streaming: true, speed: "realtime", description: "云端流式识别，需配置 AccessKey；无本地 GPU 时自动启用", selectable: true, cost: "云端按量计费（见服务商定价）" },
         }
     }
 

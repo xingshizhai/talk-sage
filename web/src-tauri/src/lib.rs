@@ -116,6 +116,7 @@ fn list_asr_models() -> Vec<serde_json::Value> {
                 "speed": p.speed,
                 "description": p.description,
                 "selectable": p.selectable,
+                "cost": p.cost,
                 "installed": root.as_ref().is_some_and(|r| kind.is_available(r)),
                 "size_mb": root.as_ref().map(|r| talksage_asr::models::installed_size_mb(kind, r)).unwrap_or(0),
                 "download_size_mb": talksage_asr::models::download_size_mb(kind),
@@ -131,6 +132,7 @@ fn list_asr_models() -> Vec<serde_json::Value> {
         "speed": "fast",
         "description": "CT-Transformer 中英文标点预测，用于流式引擎语义分句",
         "selectable": false,
+        "cost": "本地推理（仅电费）",
         "installed": root.as_ref().is_some_and(|r| talksage_asr::is_punct_model_installed(r)),
         "size_mb": 0,
         "download_size_mb": talksage_asr::punct_download_size_mb(),
@@ -556,6 +558,21 @@ fn set_noise_level(level: f32, state: tauri::State<'_, AppState>) -> Result<(), 
     }
 }
 
+/// 会议文字通道（桌面）：向当前会话注入一条打字文本。
+///
+/// 与语音段走同一条事件 sink：实时广播 + 随会话落库。返回注入时间戳（ms）。
+#[tauri::command]
+fn inject_text(text: String, author: Option<String>, state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let guard = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+    match guard.as_ref() {
+        Some(running) => {
+            let ts_ms = running.inject_text(&text, author.as_deref()).map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "ts_ms": ts_ms, "session_id": running.session_id() }))
+        }
+        None => Err("未在监听中".into()),
+    }
+}
+
 /// 说话人声纹状态：模型是否可用、主人是否已注册。
 #[tauri::command]
 fn get_voiceprint_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
@@ -899,6 +916,16 @@ fn export_session_audio(session_id: i64, state: tauri::State<'_, AppState>) -> R
     Ok(dst.display().to_string())
 }
 
+/// 模型评测报告（读取 `talksage bench --save-report` 写入的最新报告，按引擎索引）。
+#[tauri::command]
+fn get_asr_bench(state: tauri::State<'_, AppState>) -> serde_json::Value {
+    let path = state.config.data_dir().join("bench").join("latest.json");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
 /// GPU 后端状态（加速后端探测）。
 #[tauri::command]
 fn get_gpu_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
@@ -1224,6 +1251,7 @@ pub fn run() {
             set_listen_paused,
             set_file_playback_speed,
             flush_key_points,
+            inject_text,
             set_noise_level,
             get_voiceprint_status,
             enroll_voice,
@@ -1255,6 +1283,7 @@ pub fn run() {
             test_llm,
             read_logs,
             get_gpu_status,
+            get_asr_bench,
             test_aliyun_asr,
             pick_audio_file,
             pick_folder,

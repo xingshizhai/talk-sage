@@ -10,6 +10,7 @@ import { cssVars, type Theme } from "./lib/theme";
 import { loadTheme, saveTheme, loadTranscriptMode, saveTranscriptMode, loadAsideCollapsed, saveAsideCollapsed } from "./lib/prefs";
 import SideNav, { type HealthRow, type NavItem } from "./components/SideNav";
 import TranscriptCard, { fmtElapsed, type TimelineLine, type TranscriptMode } from "./components/TranscriptCard";
+import TypedInput from "./components/TypedInput";
 import KeyPointsCard from "./components/KeyPointsCard";
 import AsidePanel from "./components/AsidePanel";
 import HistorySection from "./sections/HistorySection";
@@ -34,6 +35,7 @@ const SPEAKER_STYLE: Record<string, { color: string; engine: string }> = {
   我: { color: "var(--me)", engine: "qwen3-asr" },
   客户: { color: "var(--client)", engine: "qwen3-asr" },
   对方: { color: "var(--client)", engine: "qwen3-asr" },
+  文字: { color: "var(--typed-text, #8f7ae5)", engine: "文字" },
 };
 
 // 动态说话人（客户1/客户2…）循环配色
@@ -1054,6 +1056,17 @@ export default function App() {
                 </button>
                 <span style={{ alignSelf: "center", fontSize: 11, color: "var(--muted)" }}>或使用左侧"开始监听"进行实时转写 · 支持 WAV、MP3、MP4</span>
               </div>
+            )}
+
+            {/* 会议文字通道：监听中可输入文字实时并入转写（远程参会者提问/补充） */}
+            {listening && (
+              <TypedInput
+                disabled={paused}
+                onSend={async (text) => {
+                  await api.injectText(text);
+                }}
+                onError={(msg) => setStatus(msg)}
+              />
             )}
 
             <TranscriptCard

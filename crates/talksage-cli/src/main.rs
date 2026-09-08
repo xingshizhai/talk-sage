@@ -66,7 +66,7 @@ fn main() -> ExitCode {
             model,
         } => cmd_trim(&path, output.as_deref(), &preset, model.as_deref()),
         Command::Record { seconds, dir, input } => cmd_record(seconds, dir.as_deref(), &input),
-        Command::Bench { dir, engine, limit } => cmd_bench(dir.as_deref(), &engine, limit),
+        Command::Bench { dir, engine, limit, language, save_report } => cmd_bench(dir.as_deref(), &engine, limit, language.as_deref(), save_report),
         Command::Diarize { path, speakers } => cmd_diarize(&path, speakers),
         Command::Doctor => cmd_doctor(),
     }
@@ -489,7 +489,7 @@ fn cmd_record_mic(path: &std::path::Path, seconds: u64) -> ExitCode {
 /// 有同名 `.txt` 参考文本时计算 CER（中文）/ WER（英文），并输出
 /// 端到端实时系数（处理耗时/音频时长）与首段 final 延迟。
 /// 文件输入会按真实时间喂块，因此该系数包含音频播放时间，不是纯模型计算 RTF。
-fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode {
+fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>, language: Option<&str>, save_report: bool) -> ExitCode {
     let kind = match EngineKind::from_name(engine) {
         Some(k) => k,
         None => {
@@ -549,6 +549,7 @@ fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode 
     let mut total_err_n = 0usize;
     let mut total_latency = 0.0f64;
     let mut latency_n = 0usize;
+    let mut rows: Vec<serde_json::Value> = Vec::new();
 
     for wav in &wavs {
         let base = wav.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -581,6 +582,13 @@ fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode 
                         talksage_core::wer(r, &tr.text)
                     }
                 });
+                rows.push(serde_json::json!({
+                    "file": base,
+                    "audio_secs": audio_secs,
+                    "cer_wer_pct": err.map(|v| v * 100.0),
+                    "rtf": rtf,
+                    "first_latency_ms": latency_ms,
+                }));
                 if let Some(e) = err {
                     total_err += e as f64;
                     total_err_n += 1;
@@ -617,7 +625,73 @@ fn cmd_bench(dir: Option<&str>, engine: &str, limit: Option<usize>) -> ExitCode 
         if latency_n == 0 { "（无 final 段）".to_string() } else { String::new() },
     );
     println!("实时系数约 1 表示管道能跟随音频时钟；它包含文件实时喂入时间。准备参考文本（<同名>.txt）即可得到准确率。");
+    if save_report {
+        match save_bench_report(
+            kind,
+            dir.display().to_string(),
+            wavs.len(),
+            language,
+            &serde_json::json!({
+                "cer_wer_pct": if total_err_n > 0 { Some(avg_err * 100.0) } else { None },
+                "rtf": avg_rtf,
+                "first_latency_ms": if latency_n > 0 { Some(avg_latency) } else { None },
+            }),
+            &rows,
+        ) {
+            Ok(path) => println!("评测结果已保存: {}", path.display()),
+            Err(e) => eprintln!("评测结果保存失败: {e}"),
+        }
+    }
     ExitCode::SUCCESS
+}
+
+/// 把本次 bench 汇总写进 `<data_dir>/bench/latest.json`（按引擎 id 索引，保留各引擎最近一次）。
+///
+/// 桌面/headless 的「模型管理 → 评测」读同一份文件，让实测准确率/速度在 UI 里可见。
+fn save_bench_report(
+    kind: EngineKind,
+    corpus: String,
+    files: usize,
+    language: Option<&str>,
+    avg: &serde_json::Value,
+    rows: &[serde_json::Value],
+) -> anyhow::Result<std::path::PathBuf> {
+    let data_dir = match talksage_config::ConfigManager::load(None, None) {
+        Ok(c) => c.data_dir().to_path_buf(),
+        Err(_) => talksage_config::default_data_dir(),
+    };
+    let bench_dir = data_dir.join("bench");
+    std::fs::create_dir_all(&bench_dir)?;
+    let path = bench_dir.join("latest.json");
+
+    let mut map: serde_json::Map<String, serde_json::Value> = if path.is_file() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    map.insert(
+        kind.display_name().to_string(),
+        serde_json::json!({
+            "engine": kind.display_name(),
+            "label": kind.profile().label,
+            "language": language.unwrap_or("mixed"),
+            "corpus": corpus,
+            "files": files,
+            "measured_at": now_ms,
+            "avg": avg,
+            "rows": rows,
+        }),
+    );
+    std::fs::write(&path, serde_json::to_string_pretty(&serde_json::Value::Object(map))?)?;
+    Ok(path)
 }
 
 /// 对单个 wav 跑流式转写（共享 talksage_pipeline::offline::transcribe_file，

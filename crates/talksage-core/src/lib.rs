@@ -32,6 +32,8 @@ pub enum AudioSource {
     Microphone,
     SystemLoopback,
     ImportedFile,
+    /// 会议文字通道注入的打字文本（远程参会者提问/补充），非音频来源。
+    TypedText,
     #[default]
     Unknown,
 }

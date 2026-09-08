@@ -153,6 +153,12 @@ pub enum Command {
         /// 只处理前 N 个文件
         #[arg(long)]
         limit: Option<usize>,
+        /// 语料语言标签（如 zh / en / 混说），写入评测报告便于按语言对比
+        #[arg(long)]
+        language: Option<String>,
+        /// 保存评测汇总到 <data_dir>/bench/latest.json（模型管理页「评测」展示）
+        #[arg(long)]
+        save_report: bool,
     },
     /// 对完整 wav 运行离线说话人分离，输出精确讲话者时间轴。
     Diarize {

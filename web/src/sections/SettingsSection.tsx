@@ -2,7 +2,7 @@
 // 模型安装/删除在独立的「模型管理」页，不占用本页。
 
 import { useEffect, useLayoutEffect, useState } from "react";
-import type { AppConfig, AsrModelInfo, AsrRuntimeStatus, OfflineUpgradeResult, PluginMeta, PluginStatusInfo, SceneMode, SceneParams, UpdateCheckResult } from "../lib/api";
+import type { AppConfig, AsrModelInfo, AsrRuntimeStatus, OfflineUpgradeResult, PluginMeta, PluginStatusInfo, SceneMode, SceneParams, ScenePresetMeta, UpdateCheckResult } from "../lib/api";
 import type { PluginValues } from "../lib/plugins";
 import { analysisPluginIds, buildPluginUpdates, fieldLabel, initialPluginValues, pluginFields, pluginStatusLabel } from "../lib/plugins";
 import { knowledgeBaseSettings } from "../lib/knowledge";
@@ -603,6 +603,9 @@ export default function SettingsSection({
   );
   const savedSceneLabel = SCENE_MODES.find((m) => m.key === savedSceneMode)?.label ?? savedSceneMode;
   const pendingSceneLabel = SCENE_MODES.find((m) => m.key === sceneMode)?.label ?? sceneMode;
+  // 数据化场景模板（config 提供；自定义场景可一键套用后微调）
+  const scenePresets = (config?.scene as { presets?: ScenePresetMeta[] } | undefined)?.presets ?? [];
+  const activeScenePreset = sceneMode === "custom" ? (config?.scene?.active_preset ?? null) : null;
 
   // 上报给 App：离开设置页前弹确认。卸载时清掉，避免拦截状态残留。
   // 用 layout effect：改完立刻按 ⌘/Ctrl+Shift+L 开始监听时，拦截状态必须在下一个
@@ -650,6 +653,33 @@ export default function SettingsSection({
       setMessage(`恢复默认失败: ${e}`);
     } finally {
       setSaving(false);
+    }
+  }
+
+  const [presetBusy, setPresetBusy] = useState(false);
+
+  /** 一键套用数据化场景模板：Rust 侧解析基底+覆盖写入 custom 并切到自定义模式。 */
+  async function applyScenePreset(id: string) {
+    const meta = scenePresets.find((p) => p.id === id);
+    if (!meta) return;
+    if (!window.confirm(`套用「${meta.label}」会把当前「自定义」参数整体替换为该模板的参数，确定？`)) return;
+    setPresetBusy(true);
+    setMessage("");
+    try {
+      await onSave({ scene: { apply_preset: id } });
+      const fresh = await api.getConfig();
+      const sc = fresh.scene as { mode?: string; custom: SceneParams; active_preset?: string | null };
+      setSceneMode(((sc.mode ?? "custom") === "translation" ? "bilingual" : sc.mode ?? "custom") as SceneMode);
+      setSceneCustom(sc.custom);
+      setSceneLanguage(sc.custom.language);
+      setSceneClientLanguage(sc.custom.client_language);
+      setRebaseTick((t) => t + 1);
+      const notesTemplate = (fresh.plugins as { notes?: { template?: string } } | undefined)?.notes?.template;
+      setMessage(notesTemplate ? `已套用「${meta.label}」场景模板，纪要默认模板已设为「${notesTemplate}」` : `已套用「${meta.label}」场景模板，可在下方继续微调参数`);
+    } catch (e) {
+      setMessage(`套用失败: ${e}`);
+    } finally {
+      setPresetBusy(false);
     }
   }
 
@@ -897,7 +927,45 @@ export default function SettingsSection({
               </div>
             </div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <>
+              {/* 数据化场景模板：配置驱动，一键套用后进入自定义模式并可继续微调 */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+                <div style={{ fontSize: 11, color: "var(--muted)" }}>
+                  数据化场景模板：按需一键套用（之后仍可微调）。模板以配置定义，新增模板无需改代码。
+                </div>
+                {scenePresets.length === 0 ? (
+                  <div style={{ fontSize: 11, color: "var(--muted)" }}>（当前配置没有场景模板）</div>
+                ) : (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {scenePresets.map((p) => {
+                      const active = activeScenePreset === p.id;
+                      return (
+                        <button
+                          key={p.id}
+                          title={p.description || `${p.label}（基底：${p.base}）`}
+                          disabled={presetBusy}
+                          onClick={() => void applyScenePreset(p.id)}
+                          style={{
+                            padding: "4px 10px",
+                            borderRadius: 7,
+                            cursor: "pointer",
+                            border: "1px solid var(--border)",
+                            font: "inherit",
+                            fontSize: 11,
+                            fontWeight: 600,
+                            background: active ? "var(--live)" : "var(--surface-2)",
+                            color: active ? "#fff" : "var(--text-2)",
+                          }}
+                        >
+                          {active ? "✓ " : ""}
+                          {p.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <label style={labelBlock}>
                 VAD 灵敏度：
                 <select
@@ -1007,6 +1075,7 @@ export default function SettingsSection({
                 </span>
               </label>
             </div>
+            </>
           )}
         </div>
       )}

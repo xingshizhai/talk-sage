@@ -1,13 +1,20 @@
 // 模型管理：下载 / 删除 ASR 引擎，与「设置」里的转写参数分开。
 
 import { useEffect, useState, type CSSProperties } from "react";
-import type { AsrModelInfo, DomainEvent } from "../lib/api";
+import type { AsrModelInfo, BenchSummary, DomainEvent } from "../lib/api";
 import { getApi } from "../lib/transport";
 
 const api = getApi();
 
+function fmtBenchDate(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 export default function ModelsSection({ listening }: { listening: boolean }) {
   const [asrModels, setAsrModels] = useState<AsrModelInfo[]>([]);
+  const [bench, setBench] = useState<Record<string, BenchSummary>>({});
   const [modelProgress, setModelProgress] = useState<Record<string, DomainEvent & { type: "model_progress" }>>({});
   const [modelBusy, setModelBusy] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
@@ -17,6 +24,9 @@ export default function ModelsSection({ listening }: { listening: boolean }) {
     api.listAsrModels().then(setAsrModels).catch((e) => {
       console.error("读取 ASR 模型列表失败:", e);
       setMessage(`读取模型列表失败: ${e}`);
+    });
+    api.getAsrBench().then(setBench).catch((e) => {
+      console.error("读取引擎实测报告失败:", e);
     });
   }, []);
 
@@ -85,6 +95,7 @@ export default function ModelsSection({ listening }: { listening: boolean }) {
         {asrModels.length === 0 && <div style={{ fontSize: 12, color: "var(--muted)" }}>加载模型列表…</div>}
         {asrModels.map((m) => {
           const prog = modelProgress[m.id];
+          const b = bench[m.id];
           const active = modelBusy === m.id || (prog && (prog.stage === "downloading" || prog.stage === "extracting"));
           return (
             <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, border: "1px solid var(--border)", borderRadius: 8, padding: "6px 10px", background: "var(--surface-2)" }}>
@@ -97,8 +108,23 @@ export default function ModelsSection({ listening }: { listening: boolean }) {
                 <div style={{ color: "var(--muted)", marginTop: 2 }}>
                   {m.description} · 约 {m.download_size_mb ?? "?"} MB
                   {m.size_mb ? ` · 已占用 ${m.size_mb} MB` : ""}
+                  {m.cost ? ` · ${m.cost}` : ""}
                   {m.downloading && !active ? " · 检测到未完成下载，点击可继续" : ""}
                 </div>
+                {b && (
+                  <div style={{ color: "var(--live)", marginTop: 2, fontSize: 11, lineHeight: 1.5 }}>
+                    实测
+                    {b.avg.cer_wer_pct != null
+                      ? ` CER/WER ${b.avg.cer_wer_pct.toFixed(1)}%`
+                      : "（无参考文本，未测错误率）"}
+                    {` · RTF ${b.avg.rtf.toFixed(2)}`}
+                    {b.avg.first_latency_ms != null ? ` · 首词 ${Math.round(b.avg.first_latency_ms)}ms` : ""}
+                    {` · 语言 ${b.language ?? "mixed"}`}
+                    {` · ${b.files} 个文件`}
+                    {` · ${b.corpus}`}
+                    {` · ${fmtBenchDate(b.measured_at)}`}
+                  </div>
+                )}
                 {active && prog && (prog.stage === "downloading" || prog.stage === "extracting") && (
                   <div style={{ marginTop: 4, height: 5, background: "var(--border)", borderRadius: 3, overflow: "hidden" }}>
                     <div style={{ height: "100%", width: `${prog.percent ?? 0}%`, background: "var(--live)", transition: "width 0.4s linear" }} />
@@ -130,6 +156,11 @@ export default function ModelsSection({ listening }: { listening: boolean }) {
       )}
       <div style={hint}>
         Qwen3-ASR 由官方 GitHub release 提供（HF 仓库为受限私有）。下载、续传、校验和错误会写入应用日志。
+      </div>
+      <div style={hint}>
+        <b>引擎实测（透明评测）：</b>在固定语料目录（*.wav + 同名 .txt 参考文本）上运行
+        <code style={{ background: "var(--surface)", padding: "0 4px", borderRadius: 4 }}>talksage bench --dir &lt;corpus&gt; --engine &lt;id&gt; --save-report</code>
+        ，本页即显示该引擎在本机的错误率（CER/WER）、实时系数与首词延迟——换引擎换语料可横向对比。
       </div>
       {message && (
         <div style={{ marginTop: 8, fontSize: 11, color: message.includes("失败") ? "var(--danger)" : "var(--live)" }}>{message}</div>

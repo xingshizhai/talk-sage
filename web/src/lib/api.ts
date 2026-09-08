@@ -86,6 +86,10 @@ export interface AppConfig {
   scene: {
     mode: SceneMode;
     custom: SceneParams;
+    /** 数据化场景模板库（内置 + 用户在 talksage.toml 自定义）。 */
+    presets?: ScenePresetMeta[];
+    /** custom 由哪个模板套用而来（仅展示；切回非自定义模式即清除）。 */
+    active_preset?: string | null;
   };
   /** 本地知识库（Obsidian 仓库或普通 .md/.txt 文件夹）。 */
   knowledge_base: {
@@ -103,6 +107,17 @@ export type SceneMode =
   | "meeting"
   | "lecture"
   | "custom";
+
+/** 数据化场景模板（配置定义；套用 = 基底 + 覆盖参数 → 写入 custom）。 */
+export interface ScenePresetMeta {
+  id: string;
+  label: string;
+  description?: string;
+  /** 基底内置模板（非 custom）。 */
+  base: SceneMode;
+  /** 建议的默认纪要模板 id（套用时会同步全局默认纪要模板）。 */
+  notes_template?: string | null;
+}
 
 /**
  * 插件元数据（与 Rust 侧 `plugin_metadata()` 对应）。设置页据此**生成**表单。
@@ -177,7 +192,7 @@ export interface SceneParams {
 }
 
 /** 领域事件（与 Rust 侧 DomainEvent 对应，tag = type）。 */
-export type AudioSource = "microphone" | "system_loopback" | "imported_file" | "unknown";
+export type AudioSource = "microphone" | "system_loopback" | "imported_file" | "typed_text" | "unknown";
 export type SpeakerRole = "owner" | "client" | "other" | "unknown";
 export interface SpeakerAttribution {
   source: AudioSource;
@@ -452,6 +467,8 @@ export interface AsrModelInfo {
   description: string;
   /** 已接入可运行引擎；false 表示目前仅可预下载。 */
   selectable?: boolean;
+  /** 成本口径（本地推理仅电费 / 云端按量计费）。 */
+  cost?: string;
   installed: boolean;
   /** 已安装目录磁盘占用（MB）。 */
   size_mb?: number;
@@ -490,10 +507,50 @@ export interface OfflineUpgradeResult {
 }
 
 /** 应用 API 表面。 */
+/** 单文件 bench 行。 */
+export interface BenchRow {
+  file: string;
+  audio_secs: number;
+  /** 有参考文本时为 0..100 的百分数，否则为 null。 */
+  cer_wer_pct: number | null;
+  rtf: number;
+  first_latency_ms: number | null;
+}
+
+/** bench 平均指标（语料内）。 */
+export interface BenchAvg {
+  cer_wer_pct: number | null;
+  rtf: number;
+  first_latency_ms: number | null;
+}
+
+/** `talksage bench --save-report` 写入的一份引擎实测报告。 */
+export interface BenchSummary {
+  engine: string;
+  label: string;
+  /** 语料语言标签（`--language`；缺省 mixed）。 */
+  language?: string;
+  corpus: string;
+  files: number;
+  measured_at: number;
+  avg: BenchAvg;
+  rows: BenchRow[];
+}
+
+/** 会议文字通道注入结果。 */
+export interface TypedInjectResult {
+  /** 注入时间戳（ms，epoch）。 */
+  ts_ms: number;
+  /** 所属会话 id（不落库时为 null）。 */
+  session_id: number | null;
+}
+
 export interface AppApi {
   getVersion(): Promise<string>;
   getConfig(): Promise<AppConfig>;
   getAsrRuntimeStatus(): Promise<AsrRuntimeStatus>;
+  /** 引擎实测报告（`talksage bench --save-report` 写入；按引擎 id 索引，无则空对象）。 */
+  getAsrBench(): Promise<Record<string, BenchSummary>>;
   listAsrModels(): Promise<AsrModelInfo[]>;
   /** 下载/安装 ASR 引擎（进度经 model_progress 事件推送）。 */
   downloadModel(engine: string): Promise<void>;
@@ -518,6 +575,8 @@ export interface AppApi {
   setListenPaused(paused: boolean): Promise<void>;
   /** 实时调节噪音电平阈值（0 = 关闭，监听中生效，无需重启）。 */
   setNoiseLevel(level: number): Promise<void>;
+  /** 会议文字通道：向当前会话注入一条打字文本（实时广播 + 落库）。 */
+  injectText(text: string, author?: string): Promise<TypedInjectResult>;
   /** 手动触发要点聚合：立即处理当前积累的转写段，返回诊断消息。 */
   flushKeyPoints(): Promise<string>;
   /** 说话人声纹状态。 */

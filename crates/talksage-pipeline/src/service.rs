@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use talksage_asr::{EngineKind, EnginePool};
 use talksage_config::{ConfigManager, SpeakerMode, TranslationMode};
-use talksage_core::DomainEvent;
+use talksage_core::{AudioSource, DomainEvent, SpeakerAttribution, SpeakerRole};
 use talksage_llm::{LLMProvider, OpenAICompatProvider};
 use talksage_plugins::{
     HookRegistry, QualityDeps, PluginContext, WebhookDeps,
@@ -169,6 +169,63 @@ impl RunningListen {
 
     pub fn snapshot(&self) -> talksage_core::SessionSnapshot {
         self.runtime.snapshot()
+    }
+
+    /// 会议文字通道：把（远端/本端）打字文本作为一条最终段注入当前会话。
+    ///
+    /// 与语音段共用同一条事件 sink —— 因此会随会话落库（SQLite）、经 WS/IPC
+    /// 广播给所有订阅端，也会被 sink 里的术语去重与知识检索观察器处理。来源
+    /// 记为 [`AudioSource::TypedText`]（非音频）：duration/rms 为 0，不计入
+    /// 语音时长类指标；空文本或超长文本直接拒绝。
+    ///
+    /// 返回注入时间戳（ms）。说明：打字段不经过 ASR/VAD 运行时，因此不会出现
+    /// 在订阅快照里（重连后实时视图只显示语音段，打字段在 History 中完整可见）。
+    pub fn inject_text(&self, text: &str, author: Option<&str>) -> Result<u64> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow!("文字内容不能为空"));
+        }
+        if trimmed.chars().count() > TYPED_TEXT_MAX_CHARS {
+            return Err(anyhow!("单条文字过长（上限 {TYPED_TEXT_MAX_CHARS} 字符）"));
+        }
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        (self.emit)(typed_segment_event(trimmed, author, ts_ms, TYPED_SPEAKER_ID));
+        Ok(ts_ms)
+    }
+}
+
+/// 会议文字通道的保留说话人通道号：与语音流的 0（我）/1（客户/对方）错开，
+/// 避免与任一输入流的 partial/final 对齐键冲突。
+pub(crate) const TYPED_SPEAKER_ID: u32 = 2;
+/// 文字段默认显示名（未提供作者时）。
+pub(crate) const DEFAULT_TYPED_LABEL: &str = "文字";
+/// 单条文字上限（防呆：避免把整份文档误贴进实时流）。
+pub(crate) const TYPED_TEXT_MAX_CHARS: usize = 5000;
+
+/// 构造一条"会议文字通道"最终段事件。
+///
+/// 独立成函数便于单元测试：不依赖 Runtime，直接验证事件形状与落库路径。
+pub(crate) fn typed_segment_event(text: &str, author: Option<&str>, ts_ms: u64, speaker_id: u32) -> DomainEvent {
+    let speaker_label = author.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_TYPED_LABEL);
+    DomainEvent::Segment {
+        speaker_id,
+        speaker_label: speaker_label.to_string(),
+        speaker_attribution: Some(SpeakerAttribution {
+            source: AudioSource::TypedText,
+            role: SpeakerRole::Other,
+            voice: None,
+        }),
+        text: text.to_string(),
+        is_partial: false,
+        ts_ms,
+        duration_ms: 0,
+        rms: 0.0,
+        revision: 0,
+        start_sample: 0,
+        end_sample: 0,
     }
 }
 
@@ -1542,5 +1599,80 @@ mod tests {
             _ => None,
         };
         assert_eq!(user2, Some(EngineKind::Qwen3Asr), "自定义场景应使用场景参数引擎");
+    }
+
+    /// 会议文字通道事件形状：final 段、TypedText 来源、作者标签、零时长/零能量。
+    #[test]
+    fn typed_segment_event_has_typed_source_and_final_shape() {
+        let ev = typed_segment_event("这个需求记录到周五", Some("小王"), 12_345, TYPED_SPEAKER_ID);
+        let DomainEvent::Segment {
+            speaker_id,
+            speaker_label,
+            speaker_attribution,
+            text,
+            is_partial,
+            ts_ms,
+            duration_ms,
+            rms,
+            ..
+        } = &ev
+        else {
+            panic!("typed 事件必须是 Segment");
+        };
+        assert_eq!(*speaker_id, TYPED_SPEAKER_ID);
+        assert_eq!(speaker_label, "小王");
+        assert_eq!(text, "这个需求记录到周五");
+        assert!(!is_partial);
+        assert_eq!(*ts_ms, 12_345);
+        assert_eq!(*duration_ms, 0, "打字文本无语音时长");
+        assert_eq!(*rms, 0.0, "打字文本无能量");
+        let attr = speaker_attribution.as_ref().expect("typed 段应带结构化归属");
+        assert_eq!(attr.source, AudioSource::TypedText);
+        assert_eq!(attr.role, SpeakerRole::Other);
+
+        // 无作者/空作者 → 默认「文字」标签
+        let fallback = typed_segment_event("ok", None, 1, TYPED_SPEAKER_ID);
+        let DomainEvent::Segment { speaker_label, .. } = &fallback else { unreachable!() };
+        assert_eq!(speaker_label, DEFAULT_TYPED_LABEL);
+        let blank_author = typed_segment_event("ok", Some("   "), 1, TYPED_SPEAKER_ID);
+        let DomainEvent::Segment { speaker_label, .. } = &blank_author else { unreachable!() };
+        assert_eq!(speaker_label, DEFAULT_TYPED_LABEL);
+    }
+
+    /// 文字通道事件走真实 SessionWriter 能完整落库：文本/作者/source 语义不丢。
+    #[test]
+    fn typed_text_persists_through_session_writer() {
+        let dir = tempfile_dir::TempDir::new();
+        let store = Arc::new(
+            SessionStore::open(&dir.path().join("sessions.db").to_string_lossy()).unwrap(),
+        );
+        let sid = store.start_session(unix_secs()).unwrap();
+        let mut writer = SessionWriter::start(
+            store.clone(),
+            sid,
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+        )
+        .unwrap();
+        writer
+            .sender()
+            .enqueue(&typed_segment_event("线上问题，优先级 P0", Some("张三"), 999, TYPED_SPEAKER_ID));
+        writer.finish().unwrap();
+        store.end_session(sid, unix_secs()).unwrap();
+
+        let detail = store.get_session(sid).unwrap();
+        let seg = detail
+            .segments
+            .iter()
+            .find(|s| {
+                s.speaker_attribution
+                    .as_ref()
+                    .is_some_and(|a| a.source == AudioSource::TypedText)
+            })
+            .expect("typed 段应持久化");
+        assert_eq!(seg.text, "线上问题，优先级 P0");
+        assert_eq!(seg.speaker_label, "张三");
+        assert_eq!(seg.speaker_id, TYPED_SPEAKER_ID);
+        assert!(!seg.is_partial);
     }
 }
