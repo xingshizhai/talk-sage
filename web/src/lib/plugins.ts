@@ -139,8 +139,17 @@ export function fieldLabel(key: string): string {
     llm_extract: "LLM 自动识别术语",
     min_chars: "触发最短字数",
     user_terms: "自定义关注词（逗号分隔）",
+    threshold: "术语专业门限（低=也收常见词，高=只收高级术语）",
     batch_size: "批量积累段数",
     tail_timeout_ms: "末段超时（ms）",
   };
   return known[key] ?? key;
+}
+
+/** 需要下拉选择的键及其选项（值 → 显示名）。认出的键渲染成 <select>。 */
+export function fieldOptions(key: string): Record<string, string> | null {
+  if (key === "threshold") {
+    return { low: "低（宽松）", medium: "中（默认）", high: "高（严格）" };
+  }
+  return null;
 }

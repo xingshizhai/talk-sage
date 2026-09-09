@@ -42,8 +42,29 @@ fn matched_user_terms(text: &str, terms: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// 专业度门槛：低于这个分数的词对白领/工程师听众没有解释价值。
-const MIN_LEVEL: u8 = 4;
+/// 专业度门限（设置里可选低/中/高）：决定「专业度 ≥ N 的词才值得解释」的 N。
+///
+/// 对照 LLM 自评标尺（1=人人都懂，3=大众媒体常见，5=只有行业内部才懂）：
+/// - 低（low）：≥ 3，也收大众媒体常见词
+/// - 中（medium）：≥ 4，默认，沿用历史行为
+/// - 高（high）：≥ 5，只收行业内部的高级术语，简单词一律忽略
+pub fn threshold_min_level(threshold: &str) -> u8 {
+    match threshold.trim() {
+        "low" => 3,
+        "high" => 5,
+        _ => 4,
+    }
+}
+
+/// 门限的人话标签（拼进 Prompt 与设置说明）。
+pub fn threshold_label(threshold: &str) -> &'static str {
+    match threshold.trim() {
+        "low" => "低（专业度 ≥ 3，也收大众媒体常见词）",
+        "high" => "高（专业度 ≥ 5，只收行业内部术语）",
+        _ => "中（专业度 ≥ 4，默认）",
+    }
+}
+
 /// 单段最多保留几条，避免一次刷屏。
 const MAX_TERMS: usize = 2;
 
@@ -65,9 +86,9 @@ pub struct ExtractedTerm {
 /// 解析并筛选 LLM 输出。每行 `术语 | 专业度 | 解释`。
 ///
 /// prompt 已经写明了收录标准，但模型并不总听话（线上见过「心率」「购物车」
-/// 「天猫超市」），所以这里再卡一道硬门槛：专业度不够的、解释里自述不专业的，
-/// 一律丢弃。用户关注词是用户明确点名要的，不受专业度门槛限制。
-pub fn parse_terms(raw: &str, pinned: &[String]) -> Vec<ExtractedTerm> {
+/// 「天猫超市」），所以这里再卡一道硬门槛：低于 `min_level` 的、解释里自述不
+/// 专业的，一律丢弃。用户关注词是用户明确点名要的，不受专业度门槛限制。
+pub fn parse_terms(raw: &str, pinned: &[String], min_level: u8) -> Vec<ExtractedTerm> {
     let mut out = Vec::new();
     for line in raw.lines() {
         let line = line.trim().trim_start_matches(['-', '*', '•']).trim();
@@ -93,7 +114,7 @@ pub fn parse_terms(raw: &str, pinned: &[String]) -> Vec<ExtractedTerm> {
             .iter()
             .any(|p| p.eq_ignore_ascii_case(&term) || term.to_lowercase().contains(&p.to_lowercase()));
         if !is_pinned {
-            if level < MIN_LEVEL {
+            if level < min_level {
                 continue;
             }
             if CASUAL_MARKERS.iter().any(|m| explanation.contains(m)) {
@@ -167,6 +188,10 @@ pub struct TermExplainerPlugin {
     llm_extract: bool,
     min_chars: usize,
     user_terms: Vec<String>,
+    /// 专业度门限：低于该分的词不解释（low=3 / medium=4 / high=5）。
+    min_level: u8,
+    /// 门限的 Prompt 标签（含当前收录标准说明）。
+    threshold_hint: String,
     /// 已解释过的用户词（会话级去重）。
     explained_terms: Mutex<HashSet<String>>,
     last_llm_trigger_at: Mutex<f64>,
@@ -174,12 +199,21 @@ pub struct TermExplainerPlugin {
 }
 
 impl TermExplainerPlugin {
-    pub fn new(cooldown_seconds: f64, llm_extract: bool, min_chars: usize, user_terms_raw: &str) -> Self {
+    pub fn new(
+        cooldown_seconds: f64,
+        llm_extract: bool,
+        min_chars: usize,
+        user_terms_raw: &str,
+        threshold: &str,
+    ) -> Self {
+        let min_level = threshold_min_level(threshold);
         Self {
             cooldown_seconds,
             llm_extract,
             min_chars,
             user_terms: parse_user_terms(user_terms_raw),
+            min_level,
+            threshold_hint: threshold_label(threshold).to_string(),
             explained_terms: Mutex::new(HashSet::new()),
             last_llm_trigger_at: Mutex::new(0.0),
             pending_result_id: Mutex::new(None),
@@ -270,14 +304,16 @@ impl SegmentObserver for TermExplainerPlugin {
             prompts::TERM_EXPLAINER_USER,
             &[("text", seg.text.trim()), ("pinned_section", &pinned_section)],
         );
-        let raw = llm.complete(&prompt, prompts::TERM_EXPLAINER_SYSTEM)?;
+        // 系统提示里注明本次的收录门限（静态 Prompt 不写死 4 分）
+        let system = format!("{}\n本次收录门限：只输出专业度 ≥ {} 的词 —— 门限：{}", prompts::TERM_EXPLAINER_SYSTEM, self.min_level, self.threshold_hint);
+        let raw = llm.complete(&prompt, &system)?;
         let raw = raw.trim().to_string();
         if raw.is_empty() || is_no_term_response(&raw) {
             log::debug!("term_explainer: LLM 无有效术语，撤销骨架 raw={raw:?}");
             return Ok(self.dismiss_skeleton());
         }
-        // 硬门槛：专业度不够、或解释里自己承认不专业的，一律不出卡片
-        let terms = parse_terms(&raw, &pinned);
+        // 硬门槛：低于当前专业度门限、或解释里自己承认不专业的，一律不出卡片
+        let terms = parse_terms(&raw, &pinned, self.min_level);
         if terms.is_empty() {
             log::debug!("term_explainer: 无够格的专业术语（已过滤），raw={raw:?}");
             return Ok(self.dismiss_skeleton());
@@ -317,7 +353,7 @@ impl crate::registry::Plugin for TermExplainerPluginDef {
         static D: crate::PluginDescriptor = crate::PluginDescriptor {
             id: "term_explainer",
             label: "专业术语",
-            description: "只挑听众可能不懂的行业术语/缩写并解释；常识词不收。支持用户自定义关注词",
+            description: "识别行业术语/缩写并解释，专业门限可调（低/中/高，高只收高级术语）；常识词不收。支持用户自定义关注词",
             category: crate::PluginCategory::Analysis,
             phase: crate::PluginPhase::Observer,
             capabilities: &[crate::PluginCapability::Llm],
@@ -334,7 +370,21 @@ impl crate::registry::Plugin for TermExplainerPluginDef {
             "cooldown_seconds": 20.0,
             "min_chars": 25,
             "user_terms": "",
+            "threshold": "medium",
         }))
+    }
+
+    /// 门限是枚举（low/medium/high），不是任意字符串。
+    fn validate_config(&self, cfg: &crate::registry::PluginConfig) -> Vec<crate::registry::PluginConfigIssue> {
+        let mut issues = cfg.validate_shape(self.id(), &self.default_config());
+        let threshold = cfg.get_str("threshold", "medium");
+        if !matches!(threshold.as_str(), "low" | "medium" | "high") {
+            issues.push(crate::registry::PluginConfigIssue {
+                path: "term_explainer.threshold".into(),
+                message: "必须是 low / medium / high 之一".into(),
+            });
+        }
+        issues
     }
 
     fn register(&self, cfg: &crate::registry::PluginConfig, _ctx: &PluginContext, hooks: &mut crate::registry::HookRegistry) {
@@ -342,11 +392,13 @@ impl crate::registry::Plugin for TermExplainerPluginDef {
         let llm_extract = cfg.get_bool("llm_extract", true);
         let min_chars = cfg.get_u64("min_chars", 25) as usize;
         let user_terms = cfg.get_str("user_terms", "");
+        let threshold = cfg.get_str("threshold", "medium");
         hooks.add_observer(std::sync::Arc::new(TermExplainerPlugin::new(
             cooldown,
             llm_extract,
             min_chars,
             &user_terms,
+            &threshold,
         )));
     }
 }
@@ -413,14 +465,14 @@ mod tests {
 
     #[test]
     fn user_terms_trigger_without_cooldown() {
-        let p = TermExplainerPlugin::new(999.0, false, 5, "NPI, MOQ");
+        let p = TermExplainerPlugin::new(999.0, false, 5, "NPI, MOQ", "medium");
         assert!(p.should_trigger(&seg("We need NPI samples")));
         assert!(!p.should_trigger(&seg("How are you today")));
     }
 
     #[test]
     fn user_terms_deduplicate_across_session() {
-        let p = TermExplainerPlugin::new(0.0, false, 5, "NPI");
+        let p = TermExplainerPlugin::new(0.0, false, 5, "NPI", "medium");
         assert!(p.should_trigger(&seg("We need NPI")));
         p.mark_explained(&["NPI".to_string()]);
         assert!(!p.should_trigger(&seg("NPI status?")));
@@ -428,7 +480,7 @@ mod tests {
 
     #[test]
     fn llm_extract_respects_cooldown() {
-        let p = TermExplainerPlugin::new(999.0, true, 5, "");
+        let p = TermExplainerPlugin::new(999.0, true, 5, "", "medium");
         assert!(p.should_trigger(&seg("请讨论系统架构设计方案")));
         *p.last_llm_trigger_at.lock().unwrap() = now_secs();
         assert!(!p.should_trigger(&seg("另一段关于架构设计的内容")));
@@ -436,14 +488,14 @@ mod tests {
 
     #[test]
     fn llm_extract_respects_min_chars() {
-        let p = TermExplainerPlugin::new(0.0, true, 20, "");
+        let p = TermExplainerPlugin::new(0.0, true, 20, "", "medium");
         assert!(!p.should_trigger(&seg("短段落"))); // < 20 chars
         assert!(p.should_trigger(&seg("这是一段较长的关于系统架构设计的讨论内容")));
     }
 
     #[test]
     fn skeleton_includes_pinned_terms_if_matched() {
-        let p = TermExplainerPlugin::new(0.0, false, 5, "NPI");
+        let p = TermExplainerPlugin::new(0.0, false, 5, "NPI", "medium");
         let events = p.skeleton(&seg("We need NPI samples"));
         match &events[0] {
             DomainEvent::Term { status: ResultStatus::Skeleton, content, .. } => {
@@ -461,10 +513,37 @@ mod tests {
 扛风雨 | 3 | 比喻承受压力，非专业术语。
 鹅腿阿姨 | 4 | 网络热梗，指代特定事件中的争议人物。
 MOQ | 5 | 最小起订量，供应商单次接单的最低数量门槛。";
-        let terms = parse_terms(raw, &[]);
+        let terms = parse_terms(raw, &[], 4);
         assert_eq!(terms.len(), 1, "只应留下 MOQ，实际: {terms:?}");
         assert_eq!(terms[0].term, "MOQ");
         assert_eq!(terms[0].level, 5);
+    }
+
+    /// 专业度门限：低（≥3）收大众媒体常见词；中（≥4）默认；高（≥5）只收行业黑话。
+    #[test]
+    fn parse_terms_honors_configurable_professional_threshold() {
+        let raw = "埋点 | 3 | 记录用户行为的统计技术。
+灰度发布 | 4 | 新版本先放给小比例用户观察。
+对赌协议 | 5 | 业绩未达标时的补偿条款。";
+
+        // 低门限：3/4/5 全收（最多两条）
+        let low = parse_terms(raw, &[], threshold_min_level("low"));
+        assert_eq!(low.len(), 2);
+        assert_eq!(low[0].level, 3, "低门限应收大众媒体常见词");
+
+        // 中门限（默认）：4、5 收，3 丢弃
+        let medium = parse_terms(raw, &[], threshold_min_level("medium"));
+        assert_eq!(medium.len(), 2);
+        assert!(medium.iter().all(|t| t.level >= 4));
+
+        // 高门限：只收 5
+        let high = parse_terms(raw, &[], threshold_min_level("high"));
+        assert_eq!(high.len(), 1);
+        assert_eq!(high[0].level, 5);
+        assert_eq!(high[0].term, "对赌协议");
+
+        // 未知门限回落到 medium
+        assert_eq!(threshold_min_level("超高级"), 4);
     }
 
     /// 最多两条，且拿不到专业度（模型没按格式输出）时宁可不收。
@@ -473,20 +552,23 @@ MOQ | 5 | 最小起订量，供应商单次接单的最低数量门槛。";
         let three = "灰度发布 | 4 | 新版本先放小比例用户。
 对赌协议 | 5 | 业绩未达标时的补偿条款。
 幂等 | 5 | 重复执行结果不变。";
-        assert_eq!(parse_terms(three, &[]).len(), MAX_TERMS);
+        assert_eq!(parse_terms(three, &[], 4).len(), MAX_TERMS);
 
         // 老格式「术语：解释」没有专业度可判，全部丢弃
-        assert!(parse_terms("购物车：电商网站中暂存待购商品的功能。", &[]).is_empty());
+        assert!(parse_terms("购物车：电商网站中暂存待购商品的功能。", &[], 4).is_empty());
     }
 
     /// 用户点名要的词不受专业度门槛限制 —— 那是他自己加的关注词。
     #[test]
     fn parse_terms_keeps_pinned_terms_regardless_of_level() {
         let raw = "验收标准 | 2 | 双方约定的交付合格线。";
-        assert!(parse_terms(raw, &[]).is_empty());
-        let kept = parse_terms(raw, &["验收标准".to_string()]);
+        assert!(parse_terms(raw, &[], 4).is_empty());
+        let kept = parse_terms(raw, &["验收标准".to_string()], 4);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].term, "验收标准");
+        // 高门限下同样豁免
+        let kept_high = parse_terms(raw, &["验收标准".to_string()], 5);
+        assert_eq!(kept_high.len(), 1);
     }
 
     /// 一段里筛不出够格的术语时，应撤销骨架而不是硬塞一条。
@@ -494,7 +576,7 @@ MOQ | 5 | 最小起订量，供应商单次接单的最低数量门槛。";
     fn run_dismisses_skeleton_when_nothing_qualifies() {
         let mock = MockProvider { response: "购物车 | 1 | 电商网站中暂存待购商品的功能。".into() };
         let ctx = PluginContext { kb: None, llm: Some(std::sync::Arc::new(mock)), ..PluginContext::new() };
-        let p = TermExplainerPlugin::new(0.0, true, 5, "");
+        let p = TermExplainerPlugin::new(0.0, true, 5, "", "medium");
         p.skeleton(&seg("这段话里只有购物车这种常识词"));
         match p.run(&seg("这段话里只有购物车这种常识词"), &ctx).unwrap() {
             Some(DomainEvent::Term { status: ResultStatus::Final, content, .. }) => {
@@ -508,10 +590,25 @@ MOQ | 5 | 最小起订量，供应商单次接单的最低数量门槛。";
     fn run_calls_llm_and_returns_final_term() {
         let mock = MockProvider { response: "NPI | 5 | New Product Introduction，新产品导入流程".into() };
         let ctx = PluginContext { kb: None, llm: Some(std::sync::Arc::new(mock)), ..PluginContext::new() };
-        let p = TermExplainerPlugin::new(0.0, true, 5, "");
+        let p = TermExplainerPlugin::new(0.0, true, 5, "", "medium");
         match p.run(&seg("We need NPI samples"), &ctx).unwrap() {
             Some(DomainEvent::Term { status: ResultStatus::Final, content, .. }) => {
                 assert!(content.contains("NPI"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 高门限下，模型返回 4 分词也过不了硬门槛 → 撤销骨架。
+    #[test]
+    fn run_high_threshold_drops_level4_terms() {
+        let mock = MockProvider { response: "灰度发布 | 4 | 新版本先放给小比例用户。".into() };
+        let ctx = PluginContext { kb: None, llm: Some(std::sync::Arc::new(mock)), ..PluginContext::new() };
+        let p = TermExplainerPlugin::new(0.0, true, 5, "", "high");
+        p.skeleton(&seg("这段提到灰度发布"));
+        match p.run(&seg("这段提到灰度发布"), &ctx).unwrap() {
+            Some(DomainEvent::Term { status: ResultStatus::Final, content, .. }) => {
+                assert!(content.is_empty(), "高门限下 4 分词应被丢弃: {content:?}");
             }
             other => panic!("{other:?}"),
         }

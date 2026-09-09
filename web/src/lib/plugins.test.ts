@@ -4,6 +4,8 @@ import {
   analysisPluginIds,
   buildPluginUpdates,
   fieldKind,
+  fieldLabel,
+  fieldOptions,
   initialPluginValues,
   pluginFields,
   pluginStatusLabel,
@@ -181,5 +183,17 @@ describe("analysisPluginIds", () => {
 
   it("元数据为空时返回空列表", () => {
     expect(analysisPluginIds([])).toEqual([]);
+  });
+});
+
+describe("fieldOptions / fieldLabel", () => {
+  it("threshold 渲染成低/中/高下拉，其余键无下拉", () => {
+    expect(fieldOptions("threshold")).toEqual({ low: "低（宽松）", medium: "中（默认）", high: "高（严格）" });
+    expect(fieldOptions("enabled")).toBeNull();
+    expect(fieldOptions("user_terms")).toBeNull();
+  });
+
+  it("threshold 有可读标签", () => {
+    expect(fieldLabel("threshold")).toContain("专业门限");
   });
 });

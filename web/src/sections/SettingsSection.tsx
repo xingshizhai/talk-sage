@@ -4,7 +4,7 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import type { AppConfig, AsrModelInfo, AsrRuntimeStatus, OfflineUpgradeResult, PluginMeta, PluginStatusInfo, SceneMode, SceneParams, ScenePresetMeta, UpdateCheckResult } from "../lib/api";
 import type { PluginValues } from "../lib/plugins";
-import { analysisPluginIds, buildPluginUpdates, fieldLabel, initialPluginValues, pluginFields, pluginStatusLabel } from "../lib/plugins";
+import { analysisPluginIds, buildPluginUpdates, fieldLabel, fieldOptions, initialPluginValues, pluginFields, pluginStatusLabel } from "../lib/plugins";
 import { knowledgeBaseSettings } from "../lib/knowledge";
 import { llmProviderApiKey } from "../lib/llm";
 import { getApi } from "../lib/transport";
@@ -381,6 +381,7 @@ export default function SettingsSection({
               );
             }
             const dim = locked || !userEnabled;
+            const options = fieldOptions(f.key);
             return (
               <label key={f.key} style={{ ...labelBlock, marginLeft: 20, opacity: dim ? 0.5 : 1 }}>
                 {f.kind === "bool" ? (
@@ -392,6 +393,22 @@ export default function SettingsSection({
                       onChange={(e) => setPluginField(meta.id, f.key, e.target.checked)}
                     />{" "}
                     {fieldLabel(f.key)}
+                  </>
+                ) : options ? (
+                  <>
+                    {fieldLabel(f.key)}：
+                    <select
+                      disabled={locked}
+                      value={typeof values[f.key] === "string" ? (values[f.key] as string) : (f.default as string)}
+                      onChange={(e) => setPluginField(meta.id, f.key, e.target.value)}
+                      style={{ ...inputStyle, marginLeft: 8 }}
+                    >
+                      {Object.entries(options).map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
                   </>
                 ) : f.kind === "number" ? (
                   <>
