@@ -1246,6 +1246,16 @@ mod tests {
         o.get(id).and_then(|v| v.get("enabled")).and_then(|v| v.as_bool())
     }
 
+    /// 该插件的 `enabled` 是否由宿主无条件裁决（descriptor 里 host_managed 含
+    /// "enabled"）。这类插件不归场景 allowlist 管 —— 声明写在插件自己身上，
+    /// 这里读它而不是维护一份例外名单，免得又对不上。
+    fn host_decides_enabled(id: &str) -> bool {
+        talksage_plugins::builtin_plugins()
+            .iter()
+            .find(|p| p.id() == id)
+            .is_some_and(|p| p.descriptor().host_managed.contains(&"enabled"))
+    }
+
     /// 每种内置场景必须严格按自己的 allowlist 裁决分析插件。
     #[test]
     fn scene_allowlist_controls_each_preset() {
@@ -1261,12 +1271,43 @@ mod tests {
             let params = talksage_config::scene_params(mode);
             let o = plugin_overrides_for(&plugins, &talksage_config::scene_params(mode));
             for id in talksage_plugins::analysis_plugin_ids() {
+                // enabled 归宿主的插件不受场景管辖，真实行为由下面那条测试锁。
+                if host_decides_enabled(id) {
+                    continue;
+                }
                 if params.plugin_allowlist.iter().any(|allowed| allowed == id) {
                     assert_ne!(enabled_in(&o, id), Some(false), "{mode:?} 应允许 {id}");
                 } else {
                     assert_eq!(enabled_in(&o, id), Some(false), "{mode:?} 应关掉 {id}");
                 }
             }
+        }
+    }
+
+    /// 简报检索在任何场景下都是关的。
+    ///
+    /// 实时知识查询已由会话级 `LiveKnowledgeRetriever` 接管（见
+    /// [`plugin_overrides_for`]），插件本体只为兼容旧配置保留，descriptor 里以
+    /// `host_managed = ["enabled"]` 声明了「场景与用户都改不动」。内置场景的
+    /// allowlist 仍列着它，但那已不决定任何事 —— 所以上面的 allowlist 不变量
+    /// 跳过这类插件，真实行为改由本测试锁住。
+    #[test]
+    fn brief_retriever_stays_off_in_every_scene() {
+        let plugins = talksage_config::PluginsConfig::default();
+        for mode in [
+            SceneMode::Dictation,
+            SceneMode::Conversation,
+            SceneMode::Bilingual,
+            SceneMode::Meeting,
+            SceneMode::Lecture,
+            SceneMode::Custom,
+        ] {
+            let o = plugin_overrides_for(&plugins, &talksage_config::scene_params(mode));
+            assert_eq!(
+                enabled_in(&o, "brief_retriever"),
+                Some(false),
+                "{mode:?}: brief_retriever 应由宿主关闭"
+            );
         }
     }
 

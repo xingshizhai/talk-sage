@@ -65,7 +65,11 @@ impl FilePacer {
     pub(super) fn consumed(&mut self, speed: f32) {
         // “极速”仍保留最小节拍，避免长录音瞬间灌满 ASR 命令队列。
         let effective_speed = if speed <= 0.0 { 8.0 } else { speed };
-        self.next_at += self.interval.div_f32(effective_speed);
+        // 用 f64 除：div_f32 精度不够，100ms / 2.0 会算出 50_000_001ns 而不是
+        // 50ms，节拍就永远差那 1ns。能不能被察觉取决于机器时钟粒度 —— 纳秒级
+        // Instant 的机器上按时到不了，粒度粗的机器上被四舍五入吞掉，
+        // 于是同一份代码在不同机器上表现不一样。
+        self.next_at += self.interval.div_f64(effective_speed as f64);
     }
 
     /// 暂停期间把 deadline 保持在未来，恢复后不会追赶暂停期间的旧时钟。
