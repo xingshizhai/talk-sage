@@ -60,6 +60,7 @@ pub fn transcribe_file(
         endpoint: talksage_config::EndpointConfig::default(),
         asr_threads: 2,
         input_gain_db: 0.0,
+        auto_gain: false,
         user: StreamConfig {
             engine_kind,
             model_dir: model_dir.to_path_buf(),

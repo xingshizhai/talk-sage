@@ -193,3 +193,83 @@ describe("punctuateAndSplit", () => {
     expect(parts.some((p) => p.endsWith("？"))).toBe(true);
   });
 });
+
+/**
+ * 服务端为避免"订阅与取快照之间"丢事件，改为先订阅后取快照，代价是该窗口的
+ * 事件会被补发一次。这些用例锁定客户端去重语义。
+ */
+describe("TranscriptAccumulator 快照 revision 去重", () => {
+  const committed = (text: string, revision: number) => ({
+    speaker_id: 0,
+    speaker_label: "我",
+    text,
+    is_partial: false,
+    ts_ms: 1,
+    revision,
+  });
+
+  it("丢弃快照已覆盖的补发事件，不产生重复行", () => {
+    const acc = new TranscriptAccumulator();
+    acc.applySnapshot([committed("第一句。", 5)], [], 5);
+    // 服务端在订阅与取快照之间提交过的事件会被补发
+    acc.push(committed("第一句。", 5));
+    acc.push(committed("第一句。", 3));
+    expect(acc.getLines()).toHaveLength(1);
+  });
+
+  it("放行快照之后的新事件", () => {
+    const acc = new TranscriptAccumulator();
+    acc.applySnapshot([committed("第一句。", 5)], [], 5);
+    acc.push(committed("第二句。", 6));
+    const lines = acc.getLines();
+    expect(lines).toHaveLength(2);
+    expect(lines[1].text).toBe("第二句。");
+  });
+
+  it("hypothesis（partial）同样受 revision 门槛约束", () => {
+    const acc = new TranscriptAccumulator();
+    acc.applySnapshot([], [{ speaker_id: 0, speaker_label: "我", text: "正在说", is_partial: true, ts_ms: 1, revision: 9 }], 9);
+    // 补发的旧 partial 文本不同；若门槛失效，它会覆盖当前 hypothesis
+    acc.push({ speaker_id: 0, speaker_label: "我", text: "补发的旧内容", is_partial: true, ts_ms: 1, revision: 9 });
+    expect(acc.getLines()).toHaveLength(1);
+    expect(acc.getLines()[0].text).toBe("正在说");
+  });
+
+  it("没有快照基线时不过滤（纯增量会话不受影响）", () => {
+    const acc = new TranscriptAccumulator();
+    acc.push(committed("第一句。", 1));
+    acc.push(committed("第二句。", 2));
+    expect(acc.getLines()).toHaveLength(2);
+  });
+
+  it("打字段豁免 revision 对齐（不进 TranscriptState，revision 恒 0）", () => {
+    const acc = new TranscriptAccumulator();
+    acc.applySnapshot([committed("第一句。", 5)], [], 5);
+    acc.push({
+      speaker_id: 2,
+      speaker_label: "文字",
+      speaker_attribution: { source: "typed_text", role: "other" },
+      text: "远程同事的提问",
+      is_partial: false,
+      ts_ms: 2,
+      revision: 0,
+    });
+    expect(acc.getLines()).toHaveLength(2);
+    expect(acc.getLines()[1].text).toBe("远程同事的提问");
+  });
+
+  it("缺 revision 字段的旧服务端事件不被误丢", () => {
+    const acc = new TranscriptAccumulator();
+    acc.applySnapshot([committed("第一句。", 5)], [], 5);
+    acc.push({ speaker_id: 0, speaker_label: "我", text: "无修订号", is_partial: false, ts_ms: 3 });
+    expect(acc.getLines()).toHaveLength(2);
+  });
+
+  it("reset 清掉快照基线，新会话不再按旧 revision 过滤", () => {
+    const acc = new TranscriptAccumulator();
+    acc.applySnapshot([committed("旧会话。", 50)], [], 50);
+    acc.reset();
+    acc.push(committed("新会话第一句。", 1));
+    expect(acc.getLines()).toHaveLength(1);
+  });
+});

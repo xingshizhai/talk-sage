@@ -45,6 +45,12 @@ pub struct StartListen {
     pub user_label: Option<String>,
     /// 会中材料包：vault 相对路径。
     pub pinned_note_paths: Vec<String>,
+    /// 本次监听使用的场景。`None` 时沿用已保存的场景配置。
+    pub scene_mode: Option<talksage_config::SceneMode>,
+    /// 本次要运行的分析插件。`None` 时沿用场景 allowlist；`Some` 则只开列表里的分析插件。
+    pub session_plugins: Option<Vec<String>>,
+    /// 本次要合并的词库 id。`None` 时用当前场景绑定的词库；空字符串表示这次不加载。
+    pub lexicon_id: Option<String>,
 }
 
 impl Default for StartListen {
@@ -59,6 +65,9 @@ impl Default for StartListen {
             kb_folder_override: None,
             user_label: None,
             pinned_note_paths: Vec::new(),
+            scene_mode: None,
+            session_plugins: None,
+            lexicon_id: None,
         }
     }
 }
@@ -81,6 +90,9 @@ impl StartListen {
             kb_folder_override: None,
             user_label: Some(speaker_label),
             pinned_note_paths: Vec::new(),
+            scene_mode: None,
+            session_plugins: None,
+            lexicon_id: None,
         }
     }
 }
@@ -496,8 +508,9 @@ impl TalkSageService {
         quality: Option<Arc<dyn QualityDeps>>,
         webhook: Option<Arc<dyn WebhookDeps>>,
     ) -> Result<LivePipelineConfig> {
-        let model_dir =Self::resolve_models_dir().ok_or_else(|| anyhow!("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）"))?;
-        let snapshot = self.config.snapshot();
+        let model_dir = Self::resolve_models_dir().ok_or_else(|| anyhow!("未找到 models/ 目录（可设 TALKSAGE_MODELS_DIR）"))?;
+        let mut snapshot = self.config.snapshot();
+        apply_session_launch(&mut snapshot, req);
         let gpu = talksage_asr::GpuBackend::detect();
         let cloud_configured = !snapshot.asr.aliyun_access_key_id.trim().is_empty()
             && !snapshot.asr.aliyun_access_key_secret.trim().is_empty()
@@ -671,6 +684,9 @@ impl TalkSageService {
 
         // 注册表在这里只建一次 —— 两条流共享同一批 filter 实例（跨流去重的前提）。
         let mut plugin_overrides = plugin_overrides_for(&snapshot.plugins, &scene);
+        if let Some(enabled) = &req.session_plugins {
+            apply_session_analysis_plugins(&mut plugin_overrides, enabled);
+        }
         // 段级 ASR 缩短后，聚合窗口也必须跟场景调整：翻译/对话优先
         // 低延迟，会议/课堂优先跨句上下文。自定义模式保留用户插件配置。
         let aggregation = key_point_aggregation_policy(snapshot.scene.mode);
@@ -733,6 +749,7 @@ impl TalkSageService {
             endpoint: snapshot.audio.endpoint.clone(),
             asr_threads: 4,
             input_gain_db: snapshot.audio.input_gain_db,
+            auto_gain: snapshot.audio.auto_gain,
             user: StreamConfig {
                 engine_kind: user_engine,
                 model_dir: user_model,
@@ -960,6 +977,66 @@ fn build_master_recording(sid: i64, stats: &[talksage_session::StreamMeta]) -> O
     }
 }
 
+/// 把本次监听的场景和词库叠到配置快照上。不写回磁盘。
+fn apply_session_launch(snapshot: &mut talksage_config::Config, req: &StartListen) {
+    if let Some(mode) = req.scene_mode {
+        snapshot.scene.mode = mode;
+    }
+    // 请求里点了名就用点名的；空字符串表示这次明确不加载。
+    // 没点名时用该场景在设置里绑定的词库。
+    let id = if let Some(raw) = req.lexicon_id.as_deref() {
+        let id = raw.trim();
+        if id.is_empty() {
+            return;
+        }
+        id.to_string()
+    } else {
+        let key = talksage_config::scene_mode_key(snapshot.scene.mode);
+        match snapshot
+            .scene
+            .lexicon_ids
+            .get(key)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            Some(id) => id.to_string(),
+            None => return,
+        }
+    };
+    let Some(pack) = snapshot.lexicons.get(&id).cloned() else {
+        log::warn!("本次监听要求词库 {id}，配置里没有这一项，本次不加载词库");
+        return;
+    };
+    log::info!(
+        "本次监听加载词库 {id}：terms={} people={}",
+        pack.terms.len(),
+        pack.people.len()
+    );
+    // 全局术语默认关闭。没打开时只使用本场词库，避免把另一场的全局词带进来。
+    if !snapshot.asr.terminology.enabled {
+        snapshot.asr.terminology.terms.clear();
+        snapshot.asr.terminology.corrections.clear();
+    }
+    snapshot.asr.terminology.enabled = true;
+    snapshot.asr.terminology.terms.extend(pack.terms);
+    snapshot.asr.terminology.terms.extend(pack.people.into_iter().flatten());
+    for (wrong, right) in pack.corrections {
+        snapshot.asr.terminology.corrections.insert(wrong, right);
+    }
+}
+
+/// 本次监听点名的分析插件强制开，其余分析插件强制关。
+/// 基础设施插件（短段抑制、去重、质量评估）不在此列。
+fn apply_session_analysis_plugins(
+    overrides: &mut std::collections::HashMap<String, serde_json::Value>,
+    enabled: &[String],
+) {
+    for id in talksage_plugins::analysis_plugin_ids() {
+        let on = enabled.iter().any(|item| item == id);
+        merge_override(overrides, id, serde_json::json!({ "enabled": on }));
+    }
+}
+
 /// 组装本次会话的插件配置覆盖表。
 ///
 /// **合并顺序**：`plugin.default_config()` → 用户 `[plugins.<id>]` →
@@ -1064,6 +1141,85 @@ pub(crate) fn unix_secs() -> i64 {
 mod tests {
     use super::*;
     use talksage_config::{Config, ConfigManager, SceneMode};
+
+    #[test]
+    fn session_launch_uses_scene_lexicon_without_global_terms() {
+        let mut snapshot = talksage_config::Config::default();
+        snapshot.asr.terminology.terms = vec!["全局词".into()];
+        snapshot.lexicons.insert(
+            "weekly".into(),
+            talksage_config::LexiconPack {
+                label: "周例会".into(),
+                description: String::new(),
+                terms: vec!["TalkSage".into()],
+                corrections: [("拓思者".into(), "TalkSage".into())].into_iter().collect(),
+                people: vec![vec!["张三".into(), "张总".into()]],
+            },
+        );
+        let req = StartListen {
+            scene_mode: Some(talksage_config::SceneMode::Meeting),
+            lexicon_id: Some("weekly".into()),
+            ..StartListen::default()
+        };
+        apply_session_launch(&mut snapshot, &req);
+        assert_eq!(snapshot.scene.mode, talksage_config::SceneMode::Meeting);
+        assert!(snapshot.asr.terminology.enabled);
+        let expected: Vec<String> = vec!["TalkSage".into(), "张三".into(), "张总".into()];
+        assert_eq!(snapshot.asr.terminology.terms, expected);
+        assert_eq!(snapshot.asr.terminology.correct("拓思者"), "TalkSage");
+        assert!(!snapshot.asr.terminology.terms.iter().any(|term| term == "全局词"));
+    }
+
+    #[test]
+    fn session_launch_loads_the_lexicon_bound_to_the_scene() {
+        let mut snapshot = talksage_config::Config::default();
+        snapshot.scene.mode = talksage_config::SceneMode::Meeting;
+        snapshot.scene.lexicon_ids.insert("meeting".into(), "weekly".into());
+        snapshot.lexicons.insert(
+            "weekly".into(),
+            talksage_config::LexiconPack {
+                label: "周例会".into(),
+                terms: vec!["TalkSage".into()],
+                ..talksage_config::LexiconPack::default()
+            },
+        );
+        apply_session_launch(&mut snapshot, &StartListen::default());
+        assert!(snapshot.asr.terminology.enabled);
+        assert_eq!(snapshot.asr.terminology.terms, vec!["TalkSage".to_string()]);
+    }
+
+    #[test]
+    fn empty_lexicon_request_does_not_use_the_scene_binding() {
+        let mut snapshot = talksage_config::Config::default();
+        snapshot.scene.lexicon_ids.insert("conversation".into(), "weekly".into());
+        snapshot.lexicons.insert("weekly".into(), talksage_config::LexiconPack {
+            terms: vec!["TalkSage".into()],
+            ..talksage_config::LexiconPack::default()
+        });
+        let req = StartListen { lexicon_id: Some(String::new()), ..StartListen::default() };
+        apply_session_launch(&mut snapshot, &req);
+        assert!(!snapshot.asr.terminology.enabled);
+    }
+
+    #[test]
+    fn session_plugin_list_turns_scene_plugins_off() {
+        let plugins = talksage_config::PluginsConfig::default();
+        let scene = talksage_config::scene_params(talksage_config::SceneMode::Meeting);
+        let mut overrides = plugin_overrides_for(&plugins, &scene);
+        apply_session_analysis_plugins(&mut overrides, &["key_point_llm".into()]);
+        let enabled = |id: &str| {
+            overrides.get(id).and_then(|v| v.get("enabled")).and_then(|v| v.as_bool())
+        };
+        assert_eq!(enabled("key_point_llm"), Some(true));
+        assert_eq!(enabled("translator"), Some(false));
+        assert_eq!(enabled("term_explainer"), Some(false));
+        assert_eq!(enabled("brief_retriever"), Some(false));
+        assert!(overrides.get("short_segment").is_some());
+        assert_ne!(
+            overrides.get("short_segment").and_then(|v| v.get("enabled")).and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
 
     #[test]
     fn file_import_uses_scene_engine_and_keeps_playback_recording() {

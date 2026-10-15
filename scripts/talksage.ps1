@@ -16,7 +16,8 @@ TalkSage v2 构建/运行工具（Windows PowerShell）
   .\scripts\talksage.ps1 record [-seconds N] [-dir D] [-input mic|loopback]  # 录制原始音频
   .\scripts\talksage.ps1 loop              # 录音测试闭环（裁剪 + 回放验证）
   .\scripts\talksage.ps1 doctor               # 环境诊断（talksage doctor）
-  .\scripts\talksage.ps1 test                 # 全量测试（Rust + Vitest）
+  .\scripts\talksage.ps1 diagnose [--title 名称 | --id N | --from-end N] [--json]  # 历史会话削波/电平/信噪比/切段
+  .\scripts\talksage.ps1 test                 # 全量测试（Rust + Vitest + Python）
   .\scripts\talksage.ps1 package              # 打包（release + NSIS/MSI 安装器 + 升级签名）
   .\scripts\talksage.ps1 vulkan [--test]      # 只编译 talksage-app（vulkan-gpu）；--test 跑真实 GPU 转写验证
   .\scripts\talksage.ps1 logs                 # 查看最近日志
@@ -609,6 +610,21 @@ function Cmd-Doctor {
     $null = Invoke-Native { & (Get-CliExe) doctor }
 }
 
+function Cmd-Diagnose {
+    $py = $null
+    foreach ($name in @("python", "py", "python3")) {
+        if (Get-Command $name -ErrorAction SilentlyContinue) { $py = $name; break }
+    }
+    if (-not $py) {
+        Write-Host "未找到 Python，无法运行 tools\session_diagnose.py" -ForegroundColor Red
+        return
+    }
+    $script = Join-Path $Root "tools\session_diagnose.py"
+    $diagArgs = @($script, "--data-dir", $env:TALKSAGE_DATA_DIR)
+    if ($Rest) { $diagArgs += $Rest }
+    & $py @diagArgs
+}
+
 function Cmd-Test {
     Write-Step "全量测试"
     $null = Invoke-Native { & (Join-Path $PSScriptRoot "run_tests.ps1") }
@@ -783,7 +799,7 @@ function Cmd-Help {
         Write-Host $Matches[1].Trim()
         return
     }
-    Write-Host "用法: .\scripts\talksage.ps1 <env|deps|build|dev|run|serve|listen|import|trim|record|loop|doctor|test|package|vulkan|logs|clean>"
+    Write-Host "用法: .\scripts\talksage.ps1 <env|deps|build|dev|run|serve|listen|import|trim|record|loop|doctor|diagnose|test|package|vulkan|logs|clean>"
 }
 
 # ── 分发 ─────────────────────────────────────────────
@@ -800,6 +816,7 @@ switch ($Command.ToLower()) {
     "record"  { Cmd-Record }
     "loop"    { Cmd-Loop }
     "doctor"  { Cmd-Doctor }
+    "diagnose" { Cmd-Diagnose }
     "test"    { Cmd-Test }
     "package" { Cmd-Package }
     "vulkan"  { Cmd-Vulkan }

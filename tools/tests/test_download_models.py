@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "download_models.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "download_models.py"
 SPEC = importlib.util.spec_from_file_location("talksage_download_models", SCRIPT)
 download_models = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(download_models)

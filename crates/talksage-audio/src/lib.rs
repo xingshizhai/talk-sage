@@ -246,8 +246,10 @@ pub struct AudioHub {
     chunk_samples: usize,
     /// 发给 pipeline 的块通道（有界，满载丢帧）。
     tx: CaptureTx,
-    /// 输入线性增益（声道选择后、重采样前）。
-    input_gain: f32,
+    /// 输入增益上限（dB，0..24）。自动增益把它当天花板；关闭时按它固定放大。
+    input_gain_db: f32,
+    /// 自动增益。开启时从 0 dB 起步，热信号留在限位之下，安静信号才往上限加。
+    auto_gain: bool,
     /// cpal 输入流。
     stream: Option<cpal::Stream>,
     /// 采集线程实时 RMS（f32 bits）；在音频回调中更新，与 tick() 无关。
@@ -255,22 +257,24 @@ pub struct AudioHub {
 }
 
 impl AudioHub {
-    /// 创建采集中枢，返回 (hub, 块接收端)。
+    /// 创建采集中枢，返回 (hub, 块接收端)。固定 0 dB，不自动调节。
     pub fn new(chunk_ms: u64) -> (Self, mpsc::Receiver<Vec<f32>>) {
-        Self::new_with_gain(chunk_ms, 0.0)
+        Self::new_with_gain(chunk_ms, 0.0, false)
     }
 
     /// 创建带输入增益的采集中枢。增益限制在 0..24dB，输出限幅到 ±0.98。
-    pub fn new_with_gain(chunk_ms: u64, input_gain_db: f32) -> (Self, mpsc::Receiver<Vec<f32>>) {
+    ///
+    /// `auto_gain` 开启时，`input_gain_db` 是上限，实际倍数从 0 dB 起步。
+    pub fn new_with_gain(chunk_ms: u64, input_gain_db: f32, auto_gain: bool) -> (Self, mpsc::Receiver<Vec<f32>>) {
         let (tx, rx) = capture_channel();
         let chunk_samples = (TARGET_SAMPLE_RATE as u64 * chunk_ms / 1000) as usize;
-        let gain_db = input_gain_db.clamp(0.0, 24.0);
         (
             Self {
                 sample_rate: TARGET_SAMPLE_RATE,
                 chunk_samples,
                 tx,
-                input_gain: 10.0f32.powf(gain_db / 20.0),
+                input_gain_db: input_gain_db.clamp(0.0, 24.0),
+                auto_gain,
                 stream: None,
                 level: Arc::new(AtomicU32::new(0.0f32.to_bits())),
             },
@@ -333,7 +337,17 @@ impl AudioHub {
         let tx = self.tx.clone();
         let level_atomic = self.level.clone();
         let chunk_samples = self.chunk_samples;
-        let input_gain = self.input_gain;
+        let input_gain_db = self.input_gain_db;
+        let auto_gain = self.auto_gain;
+        log::info!(
+            "输入增益: {} {}",
+            if auto_gain { "自动" } else { "固定" },
+            if auto_gain {
+                format!("上限 {input_gain_db:.0} dB，从 0 dB 起步")
+            } else {
+                format!("{input_gain_db:.0} dB")
+            }
+        );
         let mut resampler = LinearResampler::new(src_sr, TARGET_SAMPLE_RATE);
         let mut pending: Vec<f32> = Vec::with_capacity(chunk_samples);
 
@@ -341,32 +355,35 @@ impl AudioHub {
         let err_fn = |e| log::error!("音频流错误: {e}");
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
+                let mut gain = AutoGain::new(auto_gain, input_gain_db);
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _| {
-                        collect_and_send(data, channels, input_gain, &mut resampler, &mut pending, chunk_samples, &tx, &level_atomic);
+                        collect_and_send(data, channels, &mut gain, src_sr, &mut resampler, &mut pending, chunk_samples, &tx, &level_atomic);
                     },
                     err_fn,
                     None,
                 )?
             }
             cpal::SampleFormat::I16 => {
+                let mut gain = AutoGain::new(auto_gain, input_gain_db);
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[i16], _| {
                         let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
-                        collect_and_send(&f, channels, input_gain, &mut resampler, &mut pending, chunk_samples, &tx, &level_atomic);
+                        collect_and_send(&f, channels, &mut gain, src_sr, &mut resampler, &mut pending, chunk_samples, &tx, &level_atomic);
                     },
                     err_fn,
                     None,
                 )?
             }
             cpal::SampleFormat::U16 => {
+                let mut gain = AutoGain::new(auto_gain, input_gain_db);
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[u16], _| {
                         let f: Vec<f32> = data.iter().map(|&s| (s as f32 / 32767.0) * 2.0 - 1.0).collect();
-                        collect_and_send(&f, channels, input_gain, &mut resampler, &mut pending, chunk_samples, &tx, &level_atomic);
+                        collect_and_send(&f, channels, &mut gain, src_sr, &mut resampler, &mut pending, chunk_samples, &tx, &level_atomic);
                     },
                     err_fn,
                     None,
@@ -415,12 +432,83 @@ fn is_transient_audio_backend_error(err: &anyhow::Error) -> bool {
     msg.contains("backend-specific") || msg.contains("0x800706BE") || msg.contains("RPC_S_CALL_FAILED")
 }
 
-/// 采集回调公共逻辑：mono 化 → 重采样 → 按块发送。
+/// 麦克风自动增益。
+///
+/// 关闭时按上限固定放大。开启时从 0 dB 起步：放大后的峰值超过 0.50 就在几十毫秒内
+/// 降下来，并且本块不许超过 ±0.98；峰值低于 0.35 且不是静音时，用大约一秒的时间
+/// 往上限靠。静音保持当前倍数，避免一句喊声进来之前先把增益拉满。下限是 0 dB。
+#[derive(Debug, Clone)]
+pub struct AutoGain {
+    enabled: bool,
+    ceiling: f32,
+    gain: f32,
+}
+
+const GAIN_LIMIT: f32 = 0.98;
+const GAIN_TARGET_PEAK: f32 = 0.50;
+const GAIN_RELEASE_PEAK: f32 = 0.35;
+const GAIN_SILENCE_PEAK: f32 = 0.01;
+const GAIN_ATTACK_MS: f32 = 30.0;
+const GAIN_RELEASE_MS: f32 = 1000.0;
+
+impl AutoGain {
+    /// `ceiling_db` 限制在 0..24。自动模式的当前增益从 1.0（0 dB）开始。
+    pub fn new(enabled: bool, ceiling_db: f32) -> Self {
+        let ceiling = 10.0f32.powf(ceiling_db.clamp(0.0, 24.0) / 20.0);
+        Self {
+            enabled,
+            ceiling,
+            gain: if enabled { 1.0 } else { ceiling },
+        }
+    }
+
+    /// 固定线性倍数，供已有测试锁定「关自动增益」的旧行为。
+    pub fn fixed(linear: f32) -> Self {
+        Self { enabled: false, ceiling: linear, gain: linear }
+    }
+
+    pub fn linear(&self) -> f32 {
+        self.gain
+    }
+
+    /// 放大一块单声道采样，并更新内部增益。`sample_rate` 用来计算攻放时间。
+    pub fn process(&mut self, samples: &[f32], sample_rate: u32) -> Vec<f32> {
+        if samples.is_empty() {
+            return Vec::new();
+        }
+        if !self.enabled {
+            return samples.iter().map(|sample| (sample * self.ceiling).clamp(-GAIN_LIMIT, GAIN_LIMIT)).collect();
+        }
+        let peak = samples.iter().map(|sample| sample.abs()).fold(0.0f32, f32::max);
+        if peak >= GAIN_SILENCE_PEAK {
+            let amplified = peak * self.gain;
+            let block_ms = samples.len() as f32 * 1000.0 / sample_rate.max(1) as f32;
+            if amplified > GAIN_TARGET_PEAK {
+                let desired = (GAIN_TARGET_PEAK / peak).clamp(1.0, self.ceiling);
+                let alpha = (block_ms / GAIN_ATTACK_MS).clamp(0.0, 1.0);
+                self.gain += (desired - self.gain) * alpha;
+                let safe = (GAIN_LIMIT / peak).clamp(1.0, self.ceiling);
+                if self.gain > safe {
+                    self.gain = safe;
+                }
+            } else if amplified < GAIN_RELEASE_PEAK {
+                let desired = (GAIN_TARGET_PEAK / peak).clamp(1.0, self.ceiling);
+                let alpha = (block_ms / GAIN_RELEASE_MS).clamp(0.0, 1.0);
+                self.gain += (desired - self.gain) * alpha;
+            }
+        }
+        let gain = self.gain;
+        samples.iter().map(|sample| (sample * gain).clamp(-GAIN_LIMIT, GAIN_LIMIT)).collect()
+    }
+}
+
+/// 采集回调公共逻辑：mono 化 → 增益 → 重采样 → 按块发送。
 #[allow(clippy::too_many_arguments)]
 fn collect_and_send(
     data: &[f32],
     channels: usize,
-    input_gain: f32,
+    gain: &mut AutoGain,
+    sample_rate: u32,
     resampler: &mut LinearResampler,
     pending: &mut Vec<f32>,
     chunk_samples: usize,
@@ -443,7 +531,7 @@ fn collect_and_send(
     } else {
         data.to_vec()
     };
-    let amplified: Vec<f32> = mono.into_iter().map(|sample| (sample * input_gain).clamp(-0.98, 0.98)).collect();
+    let amplified = gain.process(&mono, sample_rate);
     let resampled = resampler.process(&amplified);
     pending.extend_from_slice(&resampled);
     // 按块切分发送，并在音频回调线程更新 RMS 电平（不受 ASR 推理阻塞影响）
@@ -541,7 +629,7 @@ mod tests {
         let mut pending = Vec::new();
         let mut resampler = LinearResampler::new(16000, 16000);
         let data: Vec<f32> = (0..3200).map(|i| i as f32 / 10_000.0).collect(); // 200ms @16k = 3200
-        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx, &level_sink());
+        collect_and_send(&data, 1, &mut AutoGain::fixed(1.0), 16000, &mut resampler, &mut pending, 1600, &tx, &level_sink());
         assert!(pending.is_empty());
         let c1 = rx.recv().unwrap();
         let c2 = rx.recv().unwrap();
@@ -559,7 +647,7 @@ mod tests {
         let mut resampler = LinearResampler::new(16000, 16000);
         // 右声道能量更高，应选择右声道而不是与左声道平均。
         let data: Vec<f32> = (0..320).flat_map(|_| [0.1, 0.2]).collect();
-        collect_and_send(&data, 2, 1.0, &mut resampler, &mut pending, 320, &tx, &level_sink());
+        collect_and_send(&data, 2, &mut AutoGain::fixed(1.0), 16000, &mut resampler, &mut pending, 320, &tx, &level_sink());
         assert!(pending.is_empty());
         let c = rx.recv().unwrap();
         assert_eq!(c.len(), 320);
@@ -574,7 +662,7 @@ mod tests {
         let mut resampler = LinearResampler::new(16000, 16000);
         let mut data = vec![0.1; 1600];
         data[0] = 0.8;
-        collect_and_send(&data, 1, 4.0, &mut resampler, &mut pending, 1600, &tx, &level_sink());
+        collect_and_send(&data, 1, &mut AutoGain::fixed(4.0), 16000, &mut resampler, &mut pending, 1600, &tx, &level_sink());
         let chunk = rx.recv().unwrap();
         assert!((chunk[1] - 0.4).abs() < 1e-5, "+12dB 应把普通样本放大约四倍");
         assert!((chunk[0] - 0.98).abs() < 1e-5, "峰值必须限幅，避免 WAV 爆音");
@@ -586,7 +674,7 @@ mod tests {
         let mut pending = Vec::new();
         let mut resampler = LinearResampler::new(16000, 16000);
         let data: Vec<f32> = (0..320).flat_map(|_| [0.2, 0.0]).collect();
-        collect_and_send(&data, 2, 1.0, &mut resampler, &mut pending, 320, &tx, &level_sink());
+        collect_and_send(&data, 2, &mut AutoGain::fixed(1.0), 16000, &mut resampler, &mut pending, 320, &tx, &level_sink());
         let chunk = rx.recv().unwrap();
         assert!(chunk.iter().all(|sample| (*sample - 0.2).abs() < 1e-5));
     }
@@ -597,7 +685,7 @@ mod tests {
         let mut pending = Vec::new();
         let mut resampler = LinearResampler::new(16000, 16000);
         let data: Vec<f32> = (0..1000).map(|i| i as f32).collect(); // 不足一块
-        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx, &level_sink());
+        collect_and_send(&data, 1, &mut AutoGain::fixed(1.0), 16000, &mut resampler, &mut pending, 1600, &tx, &level_sink());
         assert!(rx.try_recv().is_err());
         assert_eq!(pending.len(), 1000);
     }
@@ -684,7 +772,7 @@ mod tests {
         let n = (CAPTURE_QUEUE_CAP + 2) * 1600;
         let data: Vec<f32> = vec![0.1; n];
         let t0 = Instant::now();
-        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx, &level_sink());
+        collect_and_send(&data, 1, &mut AutoGain::fixed(1.0), 16000, &mut resampler, &mut pending, 1600, &tx, &level_sink());
         assert!(t0.elapsed() < Duration::from_millis(200), "不得阻塞: {:?}", t0.elapsed());
         assert!(tx.overruns() >= 2);
         let mut got = 0usize;
@@ -703,8 +791,51 @@ mod tests {
         let level = AtomicU32::new(0);
         // 恒定 0.1 的 mono 数据，整块 RMS 就是 0.1。
         let data: Vec<f32> = vec![0.1; 1600];
-        collect_and_send(&data, 1, 1.0, &mut resampler, &mut pending, 1600, &tx, &level);
+        collect_and_send(&data, 1, &mut AutoGain::fixed(1.0), 16000, &mut resampler, &mut pending, 1600, &tx, &level);
         let rms = f32::from_bits(level.load(Ordering::Relaxed));
         assert!((rms - 0.1).abs() < 1e-6, "电平表未更新: {rms}");
+    }
+
+    #[test]
+    fn auto_gain_holds_a_hot_signal_at_unity_instead_of_the_ceiling() {
+        let mut gain = AutoGain::new(true, 12.0);
+        let hot = vec![0.4f32; 1600];
+        let out = gain.process(&hot, 16000);
+        assert!((gain.linear() - 1.0).abs() < 1e-4, "热信号不应从 0 dB 往上加");
+        assert!(out.iter().all(|sample| sample.abs() <= 0.4 + 1e-4));
+        assert!(out[0].abs() < 0.98, "不应再被 12 dB 顶进限位");
+    }
+
+    #[test]
+    fn auto_gain_raises_a_quiet_signal_toward_the_ceiling() {
+        let mut gain = AutoGain::new(true, 12.0);
+        let quiet = vec![0.02f32; 16000];
+        let out = gain.process(&quiet, 16000);
+        let ceiling = 10.0f32.powf(12.0 / 20.0);
+        assert!((gain.linear() - ceiling).abs() < 1e-3, "安静信号在一秒后应顶到 12 dB 上限");
+        assert!((out[0] - 0.02 * ceiling).abs() < 1e-3);
+    }
+
+    #[test]
+    fn auto_gain_ignores_silence_then_snaps_a_shout_under_the_limiter() {
+        let mut gain = AutoGain::new(true, 12.0);
+        let _ = gain.process(&vec![0.0; 16000], 16000);
+        assert!((gain.linear() - 1.0).abs() < 1e-4, "静音不应把增益拉高");
+        let _ = gain.process(&vec![0.02; 16000], 16000);
+        assert!(gain.linear() > 3.0);
+        let shout = vec![0.5f32; 480];
+        let out = gain.process(&shout, 48000);
+        let peak = out.iter().map(|sample| sample.abs()).fold(0.0f32, f32::max);
+        assert!(peak <= 0.98 + 1e-4, "突发峰值必须留在限位内: {peak}");
+        assert!(gain.linear() < 2.1, "增益应立刻退到不会削波的倍数");
+    }
+
+    #[test]
+    fn auto_gain_cannot_attenuate_below_unity() {
+        let mut gain = AutoGain::new(true, 12.0);
+        let clipped = vec![0.99f32; 160];
+        let out = gain.process(&clipped, 16000);
+        assert!((gain.linear() - 1.0).abs() < 1e-4);
+        assert!((out[0].abs() - 0.98).abs() < 1e-4);
     }
 }

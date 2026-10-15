@@ -6,7 +6,7 @@ import unittest
 import wave
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "evaluate.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "evaluate.py"
 SPEC = importlib.util.spec_from_file_location("talksage_evaluate", SCRIPT)
 evaluate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(evaluate)

@@ -37,6 +37,7 @@ macOS 首次构建、运行和依赖检查统一使用 `./scripts/talksage.sh do
 | 服务测试 | `talksage-server` | REST、WebSocket、OpenAI 兼容接口和会话 API |
 | 前端测试 | `web/src/**/*.test.ts` | partial/final 聚合、智能断句、设置持久化、插件元数据、重点标记 |
 | 评估基准 | `scripts/evaluate.py`、`talksage bench` | CER/WER、RTF、首字延迟、设备/场景元数据和模型横向比较 |
+| 会话诊断 | `tools/session_diagnose.py` | 历史会话的增益削波、电平表过载、信噪比、强制切段和转写碎片。`talksage.ps1 diagnose --title 名称` |
 
 当前测试规模会随代码变化；不要在 CI 中依赖固定总数。2026-08-21 的基线为：pipeline 53、plugins 63、session 17、frontend 60。新增架构能力应至少有对应的确定性测试。
 

@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -51,6 +51,42 @@ pub const STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 插件 `run`（含 LLM）结果超过此时长则丢弃，避免停止后迟到事件。
 pub const PLUGIN_RUN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 每条流 worker → ASR 线程的音频队列容量（块数，1 块 = `chunk_ms`）。
+///
+/// 这个队列**必须有界**：段级推理（whisper 一次 2~3s）期间音频仍在产生，
+/// 无界通道会让「推理慢于实时」直接变成无上限的内存增长。128 块 @100ms
+/// ≈ 12.8s，足够覆盖一次正常段级推理加抖动，又把每条流的内存钉在
+/// 128 × 6.4KB ≈ 820KB；真的持续慢于实时就丢块（记 overrun）并告警，
+/// 而不是把内存吃光 —— 与采集队列（[`talksage_audio::CAPTURE_QUEUE_CAP`]）
+/// 同一套「宁可丢帧也不阻塞、也不无限涨」的策略。
+pub const ASR_AUDIO_QUEUE_CAP: usize = 128;
+
+/// 把音频块送入有界 ASR 队列：满时丢弃新块并计数，**绝不阻塞事件循环**。
+///
+/// 只有音频（`Accept`）走这里。`Reset` / `Finish` / `Stop` 是低频且必须保序的
+/// 控制命令，走阻塞 `send` —— ASR 线程在持续消费，等待只是短暂背压，不会死锁。
+pub(crate) fn push_audio_bounded<T>(
+    tx: &mpsc::SyncSender<T>,
+    item: T,
+    overruns: &AtomicU64,
+) -> bool {
+    match tx.try_send(item) {
+        Ok(()) => true,
+        Err(mpsc::TrySendError::Full(_)) => {
+            let n = overruns.fetch_add(1, Ordering::Relaxed) + 1;
+            // 与采集队列同样节流：第 1 次与每 32 次打一条，过载时不刷屏
+            if n == 1 || n % 32 == 0 {
+                log::warn!(
+                    "ASR 音频队列满（容量 {ASR_AUDIO_QUEUE_CAP}，推理慢于实时），丢弃音频块 overrun={n}"
+                );
+            }
+            false
+        }
+        // 对端已退出：不算 overrun（那是收尾竞态，不是过载）
+        Err(mpsc::TrySendError::Disconnected(_)) => false,
+    }
+}
 
 /// 旁路 `join`：`std::thread::JoinHandle` 无超时，用轮询 `is_finished` 实现。
 /// 可重入：超时返回 `false` 后句柄仍在，可再次调用继续等待（收尾数据完整性
@@ -179,8 +215,10 @@ pub struct LivePipelineConfig {
     pub endpoint: EndpointConfig,
     /// ASR 推理线程数。
     pub asr_threads: usize,
-    /// 麦克风输入增益；只作用于 AudioInput::Mic。
+    /// 麦克风输入增益；只作用于 AudioInput::Mic。自动增益开启时这是上限。
     pub input_gain_db: f32,
+    /// 麦克风自动增益。关闭时按 `input_gain_db` 固定放大。
+    pub auto_gain: bool,
     /// 用户流（中文）。
     pub user: StreamConfig,
     /// 客户流（英文，可选）。
@@ -448,11 +486,13 @@ enum AsrOut {
 /// 引擎与标点模型都住在那条线程上：段级推理（whisper 一次 2~3s）和标点恢复
 /// 因此不再占用采集/VAD 那条线程，界面不会再"卡一下、再一批吐出来"。
 struct AsrChannel {
-    tx: mpsc::Sender<AsrCmd>,
+    tx: mpsc::SyncSender<AsrCmd>,
     rx: mpsc::Receiver<AsrOut>,
     handle: Option<std::thread::JoinHandle<Option<Box<dyn talksage_asr::SegmentEngine>>>>,
     /// 已请求但结果尚未回收的段数（收尾时要等它们回来）。
     pending: usize,
+    /// 有界音频队列的丢弃计数（推理慢于实时时会增长；收尾时告警）。
+    overruns: Arc<AtomicU64>,
 }
 
 impl AsrChannel {
@@ -468,7 +508,7 @@ impl AsrChannel {
         speaker_label: String,
         recognize_owner: bool,
     ) -> Option<Self> {
-        let (tx_cmd, rx_cmd) = mpsc::channel::<AsrCmd>();
+        let (tx_cmd, rx_cmd) = mpsc::sync_channel::<AsrCmd>(ASR_AUDIO_QUEUE_CAP);
         let (tx_out, rx_out) = mpsc::channel::<AsrOut>();
         let handle = std::thread::Builder::new()
             .name(format!("talksage-asr-{label}"))
@@ -513,22 +553,32 @@ impl AsrChannel {
             })
             .map_err(|e| log::error!("ASR 线程创建失败: {e}"))
             .ok()?;
-        Some(Self { tx: tx_cmd, rx: rx_out, handle: Some(handle), pending: 0 })
+        Some(Self { tx: tx_cmd, rx: rx_out, handle: Some(handle), pending: 0, overruns: Arc::new(AtomicU64::new(0)) })
     }
 
+    /// 送入一块音频；队列满则丢弃并计数（不阻塞事件循环）。
     fn accept(&self, chunk: Vec<f32>, generation: u64) {
-        let _ = self.tx.send(AsrCmd::Accept(chunk, generation));
+        push_audio_bounded(&self.tx, AsrCmd::Accept(chunk, generation), &self.overruns);
     }
 
+    /// 控制命令必须送达：ASR 线程持续消费，阻塞 send 只造成短暂背压。
     fn reset(&self) {
         let _ = self.tx.send(AsrCmd::Reset);
     }
 
     /// 请求收尾当前段；结果稍后从 [`Self::try_recv`] 取回。
+    ///
+    /// 用阻塞 send：`Finish` 必须排在它之前的音频块之后被处理，否则段尾会
+    /// 落到下一段里。队列满时这里会等 ASR 线程腾出槽位（它是保序消费的）。
     fn request_finish(&mut self, meta: FinishMeta) {
         if self.tx.send(AsrCmd::Finish(Box::new(meta))).is_ok() {
             self.pending += 1;
         }
+    }
+
+    /// 本流被丢弃的音频块数（有界队列溢出）。
+    fn overruns(&self) -> u64 {
+        self.overruns.load(Ordering::Relaxed)
     }
 
     fn try_recv(&mut self) -> Option<AsrOut> {
@@ -578,6 +628,7 @@ struct StreamWorker {
     mic_device: Option<String>,
     input_kind: InputKind,
     input_gain_db: f32,
+    auto_gain: bool,
     hub: Option<AudioHub>,
     rx_audio: Option<mpsc::Receiver<Vec<f32>>>,
     file_chunks: Option<std::vec::IntoIter<Vec<f32>>>,
@@ -644,6 +695,7 @@ impl StreamWorker {
         endpoint: &EndpointConfig,
         asr_threads: usize,
         input_gain_db: f32,
+        auto_gain: bool,
         vad_model: &PathBuf,
         chunk_ms: u64,
         recording_path: Option<PathBuf>,
@@ -770,6 +822,7 @@ impl StreamWorker {
             mic_device,
             input_kind,
             input_gain_db,
+            auto_gain,
             hub: None,
             rx_audio: None,
             file_chunks,
@@ -841,7 +894,7 @@ impl StreamWorker {
         match &self.input_kind {
             // 麦克风模式
             InputKind::Mic => {
-                let (mut hub, rx) = AudioHub::new_with_gain(chunk_ms, self.input_gain_db);
+                let (mut hub, rx) = AudioHub::new_with_gain(chunk_ms, self.input_gain_db, self.auto_gain);
                 // 让采集回调在音频线程直接更新 level，不经过 tick()，避免 ASR 推理阻塞时电平冻结
                 hub.set_level(self.level.clone());
                 hub.start(self.mic_device.as_deref())?;
@@ -1319,6 +1372,19 @@ impl StreamWorker {
                 talksage_audio::CAPTURE_QUEUE_CAP
             );
         }
+        // 有界 ASR 音频队列的丢弃必须可观测：它是"推理慢于实时"的唯一直接证据，
+        // 也解释了为什么这一段转写可能缺字。
+        if let Some(asr) = &self.asr {
+            let dropped = asr.overruns();
+            if dropped > 0 {
+                log::warn!(
+                    "流[{}] ASR 音频队列丢弃 {} 块（容量 {}，ASR 推理慢于实时，本段转写可能缺字）",
+                    self.speaker_label,
+                    dropped,
+                    ASR_AUDIO_QUEUE_CAP
+                );
+            }
+        }
         // 先把最后一段做完（含等待推理），否则收尾时会丢掉最后一句
         self.finish_and_wait(emit);
         self.stop();
@@ -1422,7 +1488,12 @@ fn run_loop(
     });
 
     // 所有流共享一个有界慢任务执行器，避免每个 segment/plugin 创建线程。
-    let mut plugin_executor = plugin_executor::PluginExecutor::new(2, 32, cancel.clone());
+    //
+    // 4 个 worker：一个会话里可能同时注册 term_explainer（术语）、translator
+    // （翻译，每个 final 段一次 LLM、双向时每条流一次）、key_point_llm（要点批次）
+    // 三个会走网络的 observer。LLM 调用不可中断，worker 数少于并发插件数时，
+    // 一两个慢调用就会让其余插件全部排在队列里，队列满即丢任务。
+    let mut plugin_executor = plugin_executor::PluginExecutor::new(4, 64, cancel.clone());
     let plugin_handle = plugin_executor.handle();
 
     // 双流共享 Token 缓存，避免同一会话重复请求阿里云 Token。
@@ -1480,6 +1551,7 @@ fn run_loop(
             &cfg.endpoint,
             cfg.asr_threads,
             cfg.input_gain_db,
+            cfg.auto_gain,
             &cfg.vad_model,
             cfg.chunk_ms,
             rec_path,
@@ -1805,7 +1877,14 @@ fn make_on_final(
             for skel in plugin.skeleton(seg) {
                 emit(skel);
             }
-            executor.submit(plugin.clone(), cfg.plugin_ctx.clone(), emit.clone(), seg.clone());
+            let submitted = executor.submit(plugin.clone(), cfg.plugin_ctx.clone(), emit.clone(), seg.clone());
+            if !submitted {
+                // 慢任务被丢弃（队列满/已停止）。`run` 不会被调用，插件得在这里
+                // 自己撤销骨架，否则界面永远停在"识别中…"这类中间态。
+                for ev in plugin.submit_rejected(seg) {
+                    emit(ev);
+                }
+            }
         }
     })
 }
@@ -1826,6 +1905,60 @@ mod pipeline_config_tests {
                 backend: talksage_asr::GpuBackend::None,
             });
         };
+    }
+}
+
+#[cfg(test)]
+mod asr_queue_tests {
+    use super::*;
+
+    /// 队列满时必须丢弃并计数，而不是阻塞事件循环 —— 这正是无界通道
+    /// （旧实现）在推理慢于实时时会无限涨内存的根因。
+    #[test]
+    fn audio_push_drops_and_counts_when_full() {
+        let (tx, _rx) = mpsc::sync_channel::<u32>(2);
+        let overruns = AtomicU64::new(0);
+        assert!(push_audio_bounded(&tx, 1, &overruns));
+        assert!(push_audio_bounded(&tx, 2, &overruns));
+        assert!(!push_audio_bounded(&tx, 3, &overruns), "队列满应丢弃而不是阻塞");
+        assert!(!push_audio_bounded(&tx, 4, &overruns));
+        assert_eq!(overruns.load(Ordering::Relaxed), 2);
+    }
+
+    /// 对端退出是收尾竞态，不是过载，不应污染 overrun 计数（否则收尾日志会误导）。
+    #[test]
+    fn audio_push_reports_disconnect_without_counting() {
+        let (tx, rx) = mpsc::sync_channel::<u32>(1);
+        drop(rx);
+        let overruns = AtomicU64::new(0);
+        assert!(!push_audio_bounded(&tx, 1, &overruns));
+        assert_eq!(overruns.load(Ordering::Relaxed), 0);
+    }
+
+    /// 容量要同时满足两个约束：覆盖一次正常段级推理（whisper 2~3s）而不丢音频，
+    /// 又小到仍有背压意义。
+    #[test]
+    fn audio_queue_capacity_covers_a_segment_inference() {
+        let seconds = ASR_AUDIO_QUEUE_CAP as u64 * 100 / 1000;
+        assert!(seconds >= 10, "容量应至少覆盖 10s 段级推理，实际 {seconds}s");
+        assert!(seconds <= 30, "容量过大将失去有界意义，实际 {seconds}s");
+    }
+
+    /// 控制命令与音频共用一条有界通道：队列被音频占满时 `Reset` 仍必须
+    /// 送达（阻塞等待消费），否则切段状态会与引擎内部状态错位。
+    #[test]
+    fn control_command_still_reaches_a_full_queue() {
+        let (tx, rx) = mpsc::sync_channel::<AsrCmd>(2);
+        let overruns = AtomicU64::new(0);
+        assert!(push_audio_bounded(&tx, AsrCmd::Reset, &overruns));
+        assert!(push_audio_bounded(&tx, AsrCmd::Reset, &overruns));
+        assert!(!push_audio_bounded(&tx, AsrCmd::Reset, &overruns), "音频路径满即丢弃");
+
+        // 消费者腾出一个槽位后，控制命令的阻塞 send 必须成功。
+        assert!(matches!(rx.recv(), Ok(AsrCmd::Reset)));
+        tx.send(AsrCmd::Stop).expect("控制命令必须能送达");
+        assert!(matches!(rx.recv(), Ok(AsrCmd::Reset)));
+        assert!(matches!(rx.recv(), Ok(AsrCmd::Stop)));
     }
 }
 

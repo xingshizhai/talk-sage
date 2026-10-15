@@ -111,6 +111,7 @@ fn zh_pipeline(root: &Path, wav: &Path, min_commit_ms: u64) -> LivePipelineConfi
         endpoint: talksage_config::EndpointConfig::default(),
         asr_threads: 2,
         input_gain_db: 0.0,
+        auto_gain: false,
         user: StreamConfig {
             engine_kind: EngineKind::ParaformerZh,
             model_dir: root.join("sherpa-onnx-streaming-paraformer-zh"),

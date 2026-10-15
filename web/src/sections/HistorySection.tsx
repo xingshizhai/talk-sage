@@ -515,6 +515,7 @@ export default function HistorySection({
                       VAD {ri.vad_preset}
                       {ri.vad_min_silence_ms ? `（段尾静音 ${ri.vad_min_silence_ms}ms）` : ""} · 降噪{" "}
                       {ri.denoise_enabled ? "开" : "关"} · 最短提交 {ri.min_segment_ms}ms · 增益 {ri.input_gain_db}dB
+                      {ri.auto_gain === undefined ? "" : ` · 自动增益 ${ri.auto_gain ? "开" : "关"}`}
                     </div>
                     <div>说话人 {speakerLabel(ri.speaker_mode)} · {ri.sample_rate}Hz</div>
                   </div>

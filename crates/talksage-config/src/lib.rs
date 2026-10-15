@@ -100,6 +100,25 @@ impl Default for SceneMode {
     }
 }
 
+/// 解析开始监听时前端传来的场景名（snake_case，与配置文件一致）。
+pub fn parse_scene_mode(name: &str) -> Result<SceneMode, String> {
+    serde_json::from_value(serde_json::Value::String(name.trim().to_string()))
+        .map_err(|_| format!("未知场景: {name}"))
+}
+
+/// 场景名，与配置文件和 `scene.lexicon_ids` 的键一致。
+pub fn scene_mode_key(mode: SceneMode) -> &'static str {
+    match mode {
+        SceneMode::Dictation => "dictation",
+        SceneMode::Conversation => "conversation",
+        SceneMode::Bilingual => "bilingual",
+        SceneMode::LiveTranslation => "live_translation",
+        SceneMode::Meeting => "meeting",
+        SceneMode::Lecture => "lecture",
+        SceneMode::Custom => "custom",
+    }
+}
+
 /// 角色归属策略。Channel 只使用输入通道，Voiceprint 才加载 WeSpeaker。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -354,6 +373,9 @@ pub struct SceneConfig {
     /// 当前 custom 由哪个模板套用而来（仅展示用；改了模式即清除）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_preset: Option<String>,
+    /// 每个场景要加载的词库 id。键是场景名。没有条目表示该场景不加载词库。
+    #[serde(default)]
+    pub lexicon_ids: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for SceneConfig {
@@ -363,6 +385,7 @@ impl Default for SceneConfig {
             custom: scene_params(SceneMode::Custom),
             presets: default_scene_presets(),
             active_preset: None,
+            lexicon_ids: Default::default(),
         }
     }
 }
@@ -613,6 +636,36 @@ pub struct Config {
     pub webhooks: WebhooksConfig,
     pub scene: SceneConfig,
     pub network: NetworkConfig,
+    /// 场景可以绑定的词库。键是词库 id，只在该场景开始监听时合并进识别。
+    pub lexicons: std::collections::BTreeMap<String, LexiconPack>,
+}
+
+/// 一场会话可以带上的术语、纠错和人名。不写入全局 `[asr.terminology]`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LexiconPack {
+    pub label: String,
+    /// 这份词库用在什么场合。
+    #[serde(default)]
+    pub description: String,
+    /// 项目名、模块名、缩写。
+    pub terms: Vec<String>,
+    /// 常见误识别 → 正确写法。
+    pub corrections: std::collections::BTreeMap<String, String>,
+    /// 每人一组称呼，第一项是任务汇总时显示的名字。
+    pub people: Vec<Vec<String>>,
+}
+
+impl Default for LexiconPack {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            description: String::new(),
+            terms: Vec::new(),
+            corrections: Default::default(),
+            people: Vec::new(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -630,6 +683,7 @@ impl Default for Config {
             webhooks: WebhooksConfig::default(),
             scene: SceneConfig::default(),
             network: NetworkConfig::default(),
+            lexicons: Default::default(),
         }
     }
 }
@@ -793,8 +847,11 @@ pub struct AudioConfig {
     /// 采集源："mic"（麦克风，默认）| "loopback"（系统音频，用于视频会议识别对方）。
     #[serde(default = "AudioConfig::default_audio_source")]
     pub audio_source: String,
-    /// 麦克风输入增益（dB，0..24）；声道选择后、录音和 ASR 前应用。
+    /// 麦克风输入增益（dB，0..24）。自动增益开启时这是上限；关闭时按它固定放大。
     pub input_gain_db: f32,
+    /// 自动增益。开启时从 0 dB 起步，热麦留在限位之下，安静麦才加到 `input_gain_db`。
+    #[serde(default = "AudioConfig::default_auto_gain")]
+    pub auto_gain: bool,
     pub ducking: DuckingConfig,
     pub vad: VadConfig,
     pub denoise: DenoiseConfig,
@@ -807,6 +864,7 @@ pub struct AudioConfig {
 
 impl AudioConfig {
     fn default_audio_source() -> String { "mic".into() }
+    fn default_auto_gain() -> bool { true }
 }
 
 impl Default for AudioConfig {
@@ -816,6 +874,7 @@ impl Default for AudioConfig {
             loopback_device: None,
             audio_source: Self::default_audio_source(),
             input_gain_db: 12.0,
+            auto_gain: true,
             ducking: DuckingConfig::default(),
             vad: VadConfig::default(),
             denoise: DenoiseConfig::default(),
@@ -1332,6 +1391,7 @@ fn merge_config(default: Config, user: Config) -> Config {
             loopback_device: user.audio.loopback_device.or(default.audio.loopback_device),
             audio_source: take_or(user.audio.audio_source, default.audio.audio_source),
             input_gain_db: user.audio.input_gain_db.clamp(0.0, 24.0),
+            auto_gain: user.audio.auto_gain,
             ducking: DuckingConfig {
                 enabled: user.audio.ducking.enabled,
                 threshold: user.audio.ducking.threshold,
@@ -1417,7 +1477,9 @@ fn merge_config(default: Config, user: Config) -> Config {
                 user.scene.presets
             },
             active_preset: user.scene.active_preset,
+            lexicon_ids: user.scene.lexicon_ids,
         },
+        lexicons: user.lexicons,
     };
     sync_knowledge_source(&mut config);
     config
@@ -1681,6 +1743,24 @@ pub fn apply_updates(c: &mut Config, updates: &serde_json::Value) {
             }
         }
     }
+    if let Some(lexicons) = updates.get("lexicons").and_then(|v| v.as_object()) {
+        for (id, pack) in lexicons {
+            let id = id.trim();
+            if id.is_empty() {
+                continue;
+            }
+            if pack.is_null() {
+                c.lexicons.remove(id);
+                continue;
+            }
+            match serde_json::from_value::<LexiconPack>(pack.clone()) {
+                Ok(parsed) => {
+                    c.lexicons.insert(id.to_string(), parsed);
+                }
+                Err(error) => log::warn!("忽略无法解析的词库 {id}: {error}"),
+            }
+        }
+    }
     if let Some(audio) = updates.get("audio") {
         // 采集来源：麦克风 / 系统音频回环。SideNav 的就地切换也走这里
         // （App.tsx 直接 saveConfig({audio:{audio_source}})），两条路同一个键。
@@ -1689,6 +1769,9 @@ pub fn apply_updates(c: &mut Config, updates: &serde_json::Value) {
         }
         if let Some(v) = audio.get("input_gain_db").and_then(|v| v.as_f64()) {
             c.audio.input_gain_db = (v as f32).clamp(0.0, 24.0);
+        }
+        if let Some(v) = audio.get("auto_gain").and_then(|v| v.as_bool()) {
+            c.audio.auto_gain = v;
         }
         if let Some(vad) = audio.get("vad") {
             if let Some(p) = vad.get("preset").and_then(|v| v.as_str()) {
@@ -1809,6 +1892,20 @@ pub fn apply_updates(c: &mut Config, updates: &serde_json::Value) {
         }
         // 数据化场景模板：一键套用 = 解析出完整 SceneParams 写入 custom 并切到
         // Custom。未知 id 静默忽略（UI 只发模板列表里存在的 id）。
+        if let Some(map) = scene.get("lexicon_ids").and_then(|v| v.as_object()) {
+            let mut next = std::collections::BTreeMap::new();
+            for (mode, id) in map {
+                let Some(id) = id.as_str().map(str::trim).filter(|id| !id.is_empty()) else {
+                    continue;
+                };
+                if parse_scene_mode(mode).is_err() {
+                    log::warn!("忽略未知场景的词库绑定: {mode}");
+                    continue;
+                }
+                next.insert(mode.clone(), id.to_string());
+            }
+            c.scene.lexicon_ids = next;
+        }
         if let Some(pid) = scene.get("apply_preset").and_then(|v| v.as_str()) {
             if let Some(preset) = c.scene.presets.iter().find(|p| p.id == pid) {
                 c.scene.mode = SceneMode::Custom;
@@ -1864,6 +1961,24 @@ record_audio = true
 "#;
         let cfg: Config = toml::from_str(raw).expect("含已下线段的老配置仍应能加载");
         assert_eq!(cfg.asr.engine_zh, "qwen3-asr", "其余字段照常解析");
+        assert!(cfg.audio.auto_gain, "没写 auto_gain 的旧配置默认开启");
+    }
+
+    #[test]
+    fn auto_gain_switch_round_trips_and_can_be_turned_off() {
+        let raw = r#"
+[audio]
+input_gain_db = 12.0
+auto_gain = false
+"#;
+        let cfg: Config = toml::from_str(raw).expect("应能解析自动增益开关");
+        assert!(!cfg.audio.auto_gain);
+        let mut cfg = Config::default();
+        apply_updates(&mut cfg, &serde_json::json!({ "audio": { "auto_gain": false } }));
+        assert!(!cfg.audio.auto_gain);
+        apply_updates(&mut cfg, &serde_json::json!({ "audio": { "auto_gain": true, "input_gain_db": 6 } }));
+        assert!(cfg.audio.auto_gain);
+        assert!((cfg.audio.input_gain_db - 6.0).abs() < 1e-4);
     }
 
     #[test]
@@ -2135,10 +2250,10 @@ folder = "D:\\Obsidian"
 
         assert_eq!(lecture.vad_max_speech_ms, Some(60_000));
 
-        let cfg = SceneConfig { mode: SceneMode::Meeting, custom: scene_params(SceneMode::Custom), presets: default_scene_presets(), active_preset: None };
+        let cfg = SceneConfig { mode: SceneMode::Meeting, custom: scene_params(SceneMode::Custom), presets: default_scene_presets(), active_preset: None, lexicon_ids: Default::default() };
         assert_eq!(cfg.effective().vad_preset, meeting.vad_preset);
 
-        let cfg_custom = SceneConfig { mode: SceneMode::Custom, custom: dictation.clone(), presets: default_scene_presets(), active_preset: None };
+        let cfg_custom = SceneConfig { mode: SceneMode::Custom, custom: dictation.clone(), presets: default_scene_presets(), active_preset: None, lexicon_ids: Default::default() };
         assert_eq!(cfg_custom.effective().vad_preset, VadPreset::Sensitive);
     }
 

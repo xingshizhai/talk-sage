@@ -76,6 +76,7 @@ fn zh_file_pipeline(root: &Path, wav: &Path) -> LivePipelineConfig {
         endpoint: talksage_config::EndpointConfig::default(),
         asr_threads: 2,
         input_gain_db: 0.0,
+        auto_gain: false,
         user: StreamConfig {
             engine_kind: EngineKind::ParaformerZh,
             model_dir: zh_model_dir(root),
@@ -587,6 +588,7 @@ fn plugins_emit_term_and_translation_events() {
         endpoint: talksage_config::EndpointConfig::default(),
         asr_threads: 2,
         input_gain_db: 0.0,
+        auto_gain: false,
         user: StreamConfig {
             engine_kind: EngineKind::ZipformerEn,
             model_dir: en_model,

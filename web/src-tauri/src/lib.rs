@@ -378,6 +378,9 @@ fn ping(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn start_listen(
     pinned_note_paths: Option<Vec<String>>,
+    scene_mode: Option<String>,
+    session_plugins: Option<Vec<String>>,
+    lexicon_id: Option<String>,
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
@@ -398,10 +401,17 @@ async fn start_listen(
         if guard.is_some() {
             return Err("已在监听中".into());
         }
+        let scene_mode = match scene_mode.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(name) => Some(talksage_config::parse_scene_mode(name)?),
+            None => None,
+        };
         let req = StartListen {
             user_input,
             client,
             pinned_note_paths: pinned_note_paths.unwrap_or_default(),
+            scene_mode,
+            session_plugins,
+            lexicon_id,
             ..StartListen::desktop()
         };
         let started = service
@@ -599,6 +609,7 @@ async fn enroll_voice(seconds: u32, state: tauri::State<'_, AppState>) -> Result
         return Err(format!("缺少声纹模型: {}", model.display()));
     }
     let gain_db = state.config.snapshot().audio.input_gain_db;
+    let auto_gain = state.config.snapshot().audio.auto_gain;
     let data_dir = state.config.data_dir().to_path_buf();
     let seconds = seconds.max(3);
     tauri::async_runtime::spawn_blocking(move || {
@@ -609,7 +620,7 @@ async fn enroll_voice(seconds: u32, state: tauri::State<'_, AppState>) -> Result
         )
         .ok_or("声纹模型加载失败")?;
 
-        let (mut hub, rx) = AudioHub::new_with_gain(100, gain_db);
+        let (mut hub, rx) = AudioHub::new_with_gain(100, gain_db, auto_gain);
         hub.start(None).map_err(|e| format!("启动麦克风失败: {e}"))?;
         log::info!("声纹注册：录制 {seconds} 秒…");
         let mut audio: Vec<f32> = Vec::new();

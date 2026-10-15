@@ -18,6 +18,7 @@
 #   ./scripts/talksage.sh record [-seconds N] [-dir D] [-input mic]
 #   ./scripts/talksage.sh loop                   # 录音测试闭环（裁剪 + 回放）
 #   ./scripts/talksage.sh doctor                 # 环境诊断
+#   ./scripts/talksage.sh diagnose [--title 名称 | --id N | --from-end N] [--json]
 #   ./scripts/talksage.sh test                   # 全量测试
 #   ./scripts/talksage.sh evaluate               # 固定语料横评已安装 ASR 模型
 #   ./scripts/talksage.sh audio-test [秒]        # 真实麦克风采集质量测试
@@ -593,10 +594,13 @@ case "$CMD" in
     record)  cmd_record ;;
     loop)    cmd_loop ;;
     doctor)  require_cli; exec "$(cli_debug)" doctor ;;
+    diagnose)
+        python3 "$ROOT/tools/session_diagnose.py" --data-dir "$TALKSAGE_DATA_DIR" ${ARGS[@]+"${ARGS[@]}"}
+        ;;
     test)
         RUST_LOG=debug TALKSAGE_LOG=debug cargo test --workspace
         (cd web && npm test)
-        python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+        python3 -m unittest discover -s tools/tests -p 'test_*.py'
         ;;
     evaluate)
         require_cli

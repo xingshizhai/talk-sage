@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AppApi, AppConfig, AsrModelInfo, AsrRuntimeStatus, BenchSummary, ChatMessageRecord, ChatSendResult, ChatThread, DomainEvent, NotesTemplate, OfflineUpgradeResult, PluginMeta, PluginStatusInfo, SegmentHit, SessionDetail, SessionRecord, TrioSummary, TypedInjectResult, UpdateCheckResult } from "./api";
+import type { AppApi, AppConfig, AsrModelInfo, AsrRuntimeStatus, BenchSummary, ChatMessageRecord, ChatSendResult, ChatThread, DomainEvent, ListenStart, NotesTemplate, OfflineUpgradeResult, PluginMeta, PluginStatusInfo, SegmentHit, SessionDetail, SessionRecord, TrioSummary, TypedInjectResult, UpdateCheckResult } from "./api";
 
 /** 统一 fetch 辅助（同源 /api）。 */
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -82,8 +82,13 @@ export const ipcApi: AppApi = {
     await invoke("ping");
   },
 
-  async startListen(pinnedNotePaths?: string[]): Promise<void> {
-    await invoke("start_listen", { pinnedNotePaths: pinnedNotePaths ?? [] });
+  async startListen(launch: ListenStart): Promise<void> {
+    await invoke("start_listen", {
+      pinnedNotePaths: launch.pinnedNotePaths ?? [],
+      sceneMode: launch.sceneMode ?? null,
+      sessionPlugins: launch.plugins,
+      lexiconId: launch.lexiconId ?? null,
+    });
   },
 
   async listKnowledgeDocuments(): Promise<{ path: string; title: string; text: string }[]> {
@@ -349,11 +354,16 @@ export const httpApi: AppApi = {
     await req("/health");
   },
 
-  async startListen(pinnedNotePaths?: string[]): Promise<void> {
+  async startListen(launch: ListenStart): Promise<void> {
     await req("/listen/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pinned_note_paths: pinnedNotePaths ?? [] }),
+      body: JSON.stringify({
+        pinned_note_paths: launch.pinnedNotePaths ?? [],
+        scene_mode: launch.sceneMode ?? null,
+        session_plugins: launch.plugins,
+        lexicon_id: launch.lexiconId,
+      }),
     });
   },
 
@@ -611,18 +621,56 @@ export const httpApi: AppApi = {
     return r.logs;
   },
 
+  /**
+   * WS 订阅：断线自动重连（指数退避，上限 10s）。
+   *
+   * 服务端在**每次**连接建立时先发一份 `snapshot`，所以重连本身就完成了状态
+   * 重建，前端不需要另写补拉逻辑；重连期间补发的历史事件由聚合器按 `revision`
+   * 去重（见 lib/transcript.ts）。
+   *
+   * 没有重连时，休眠 / 切网 / 服务重启之后界面会静默停更且永不恢复 ——
+   * 这是 headless 载体最致命的失效模式：用户以为会议没人在说话。
+   */
   onEvent(handler: (ev: DomainEvent) => void): () => void {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/ws`);
-    ws.onmessage = (e) => {
-      try {
-        handler(JSON.parse(e.data) as DomainEvent);
-      } catch {
-        /* 忽略坏消息 */
-      }
+    const url = `${proto}://${location.host}/ws`;
+    let socket: WebSocket | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let disposed = false;
+    let attempt = 0;
+
+    const connect = () => {
+      if (disposed) return;
+      const sock = new WebSocket(url);
+      socket = sock;
+      sock.onmessage = (e) => {
+        try {
+          handler(JSON.parse(e.data) as DomainEvent);
+        } catch {
+          /* 忽略坏消息 */
+        }
+      };
+      sock.onopen = () => {
+        // 连上即重置退避；紧接着会收到 snapshot（服务端在订阅时先发）。
+        attempt = 0;
+      };
+      sock.onerror = () => console.error("ws error");
+      sock.onclose = () => {
+        if (disposed || socket !== sock) return;
+        socket = null;
+        attempt += 1;
+        const delay = Math.min(10_000, 500 * 2 ** Math.min(attempt - 1, 5));
+        console.warn(`实时转写 WS 已断开，${delay}ms 后重连（第 ${attempt} 次）`);
+        retryTimer = setTimeout(connect, delay);
+      };
     };
-    ws.onerror = () => console.error("ws error");
-    return () => ws.close();
+    connect();
+
+    return () => {
+      disposed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      socket?.close();
+    };
   },
 
   async pickAudioFile(): Promise<string | null> {

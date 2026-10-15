@@ -25,7 +25,7 @@
 
 ## 功能特性
 
-- **实时 ASR**：VAD 分段、partial 即时上屏与智能句读；降噪默认关闭以保留远端弱语音（嘈杂环境可在设置页开启）
+- **实时 ASR**：VAD 分段、智能句读，并在**流式引擎**（Paraformer / Zipformer / 阿里云）上有 partial 即时上屏；默认 GPU 路径（whisper.cpp Vulkan/Metal）是*段级*引擎，文本按 VAD 段（3–6s，随场景可调）产出而不是逐字产出。采集与 ASR 链路均为有界队列；降噪默认关闭以保留远端弱语音（嘈杂环境可在设置页开启）
 - **本地 GPU ASR**：Windows x64 使用 **whisper.cpp + Vulkan**（AMD / Intel / NVIDIA），macOS Apple Silicon 使用 **whisper.cpp + Metal**，均运行 Whisper large-v3-turbo Q5_0（约 547 MiB）。检测到受支持 GPU 时自动路由，否则回退阿里云或 CPU。
 - **场景模式**：六套完整预设——**单人听写 / 一对一会话 / 双语对话 / 多人会议 / 演讲课堂 / 自定义**。一对一会话是默认模式，采用低开销的通道归属；仅多人会议默认启用 WeSpeaker 声纹聚类。
 - **说话人归属**：明确的 `off / channel / voiceprint` 策略。`channel` 直接按麦克风/系统音频标记角色，不加载模型；`voiceprint` 匹配已登记主人并将其他说话人聚类为「客户1」「客户2」…
@@ -212,7 +212,7 @@ Rust workspace 单二进制（无 Python 运行时），由单一应用服务和
 ```bash
 ./scripts/talksage.sh test      # macOS/Linux：Rust + 前端 + 脚本测试
 cargo test --workspace         # Rust 单元 + 真实模型测试（缺模型时明确跳过）
-cd web && npm test             # 前端 68 项测试（当前套件）
+cd web && npm test             # 前端 84 项测试（当前套件）
 ```
 
 Windows 使用 `.\scripts\run_tests.ps1` 或 `.\scripts\talksage.ps1 test`。真实模型集成测试覆盖中/英文 ASR、双流公平性与事件、录音落盘、结构化说话人归属、静音裁剪、服务端 API 与噪音会话质量；模型缺失时会显式提示跳过。

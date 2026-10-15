@@ -25,7 +25,7 @@
 
 ## Features
 
-- **Real-time ASR** — VAD segmentation, responsive partial updates, and smart punctuation/sentence display; **denoise is off by default** so faint or distant speech remains recognizable (enable it in Settings for noisy rooms)
+- **Real-time ASR** — VAD segmentation, smart punctuation/sentence display, and **streaming partials on streaming engines** (Paraformer / Zipformer / Aliyun); the default GPU path (whisper.cpp on Vulkan/Metal) is a *segment-level* engine, so its text appears per VAD segment (3–6 s, tunable per scene) rather than word by word. Bounded queues on capture and ASR paths, and **denoise is off by default** so faint or distant speech remains recognizable (enable it in Settings for noisy rooms)
 - **Local GPU ASR** — Windows x64: **whisper.cpp + Vulkan** (AMD / Intel / NVIDIA, driver-level loader, no extra runtime needed); macOS Apple Silicon: **whisper.cpp + Metal**. Both use Whisper large-v3-turbo Q5_0 (~547 MiB). When a supported GPU is detected, the pipeline routes through it automatically; falls back to Aliyun cloud or CPU.
 - **Scene modes** — six complete runtime presets: **Dictation / Conversation / Bilingual / Meeting / Lecture / Custom**. Conversation is the default and uses low-cost channel attribution; only Meeting enables WeSpeaker voiceprint clustering by default. Bilingual explicitly binds Chinese/English models and translation direction to the two input streams.
 - **Speaker attribution** — explicit `off / channel / voiceprint` policy instead of a boolean. Channel attribution labels microphone/system-audio roles without loading a model; voiceprint mode identifies the enrolled owner and clusters other speakers as 「客户1」「客户2」…
@@ -218,7 +218,7 @@ Meeting mode enables online speaker clustering when the WeSpeaker model is insta
 ```bash
 ./scripts/talksage.sh test      # macOS/Linux: Rust + frontend + script tests
 cargo test --workspace         # Rust: unit + live model tests (auto-skip if models missing)
-cd web && npm test             # frontend: 68 tests (current suite)
+cd web && npm test             # frontend: 84 tests (current suite)
 ```
 
 Windows 使用 `.\scripts\run_tests.ps1` 或 `.\scripts\talksage.ps1 test`。

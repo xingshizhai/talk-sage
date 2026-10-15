@@ -167,7 +167,7 @@ fn cmd_show(id: i64, dup_only: bool, json: bool) -> ExitCode {
     }
     if let Some(ri) = detail.meta.as_ref().and_then(|m| m.runtime_info.as_ref()) {
         println!(
-            "运行环境: v{} 场景={} 引擎={}{} VAD={} 降噪={} 最短提交={}ms 增益={}dB 说话人={} 采样率={}Hz",
+            "运行环境: v{} 场景={} 引擎={}{} VAD={} 降噪={} 最短提交={}ms 增益={}dB 自动增益={} 说话人={} 采样率={}Hz",
             ri.app_version,
             ri.scene_mode,
             ri.user_engine,
@@ -180,6 +180,7 @@ fn cmd_show(id: i64, dup_only: bool, json: bool) -> ExitCode {
             if ri.denoise_enabled { "开" } else { "关" },
             ri.min_segment_ms,
             ri.input_gain_db,
+            if ri.auto_gain { "开" } else { "关" },
             ri.speaker_mode,
             ri.sample_rate,
         );
@@ -672,6 +673,7 @@ mod tests {
             denoise_enabled: false,
             min_segment_ms: 0,
             input_gain_db: 0.0,
+            auto_gain: false,
             speaker_mode: "off".into(),
             sample_rate: 16_000,
         }

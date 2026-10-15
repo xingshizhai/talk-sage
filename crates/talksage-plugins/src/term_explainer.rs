@@ -290,6 +290,12 @@ impl SegmentObserver for TermExplainerPlugin {
         }]
     }
 
+    /// 执行器队列满时慢任务被丢弃：骨架卡片已经发出去了，必须在这里撤销。
+    /// 否则"专业术语识别中…"会永远留在右侧栏 —— 没有 run 会来收它。
+    fn submit_rejected(&self, _seg: &TranscriptSegment) -> Vec<DomainEvent> {
+        self.dismiss_skeleton().into_iter().collect()
+    }
+
     fn run(&self, seg: &TranscriptSegment, ctx: &PluginContext) -> anyhow::Result<Option<DomainEvent>> {
         let Some(llm) = ctx.llm.as_ref() else {
             return Ok(self.dismiss_skeleton());
@@ -491,6 +497,26 @@ mod tests {
         let p = TermExplainerPlugin::new(0.0, true, 20, "", "medium");
         assert!(!p.should_trigger(&seg("短段落"))); // < 20 chars
         assert!(p.should_trigger(&seg("这是一段较长的关于系统架构设计的讨论内容")));
+    }
+
+    /// 队列满导致慢任务被丢弃时，`run` 不会被调用 —— 骨架只能由
+    /// `submit_rejected` 撤销，否则卡片永远停在"专业术语识别中…"。
+    #[test]
+    fn submit_rejected_dismisses_the_pending_skeleton() {
+        let p = TermExplainerPlugin::new(0.0, false, 5, "NPI", "medium");
+        assert_eq!(p.skeleton(&seg("We need NPI samples")).len(), 1, "骨架应先发出占位卡片");
+
+        let dismissed = p.submit_rejected(&seg("We need NPI samples"));
+        assert_eq!(dismissed.len(), 1, "被丢弃的慢任务必须撤销卡片");
+        match &dismissed[0] {
+            DomainEvent::Term { status, content, .. } => {
+                assert_eq!(*status, ResultStatus::Final);
+                assert!(content.is_empty(), "撤销用空内容 Final 表示");
+            }
+            other => panic!("应为 Term 撤销事件: {other:?}"),
+        }
+        assert!(p.pending_result_id.lock().unwrap().is_none(), "撤销后不应残留待定骨架");
+        assert!(p.submit_rejected(&seg("We need NPI samples")).is_empty(), "重复撤销应为空");
     }
 
     #[test]

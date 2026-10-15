@@ -1,5 +1,6 @@
 // 左侧导航栏：品牌 logo + 导航项 + 运行状态 + 监听/调试按钮。
 
+import type { ReactNode } from "react";
 import type { Theme } from "../lib/theme";
 import talksageMark from "../assets/talksage-mark.svg";
 
@@ -29,6 +30,7 @@ export default function SideNav({
   onToggleAudioSource,
   onToggleListen,
   onTogglePause,
+  launchSlot,
   onNavigate,
   noiseLevel,
   onNoiseLevel,
@@ -47,6 +49,7 @@ export default function SideNav({
   onToggleAudioSource?: () => void;
   onToggleListen: () => void;
   onTogglePause: () => void;
+  launchSlot?: ReactNode;
   onNavigate: (key: string) => void;
   noiseLevel: number;
   onNoiseLevel: (level: number) => void;
@@ -194,6 +197,7 @@ export default function SideNav({
         </div>
       )}
 
+      {launchSlot}
       {/* 监听 / 调试 */}
       <div style={{ margin: "0 10px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
         <div style={{ display: "flex", gap: 6 }}>

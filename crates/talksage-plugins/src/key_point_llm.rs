@@ -366,7 +366,11 @@ impl SegmentObserver for KeyPointLlmObserver {
                 && !g.buffer.is_empty()
                 && g.last_flush.elapsed().as_millis() as u64 >= self.tail_timeout_ms
         };
-        due && self.idle_scheduled.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok()
+        // 已有任务在跑时不要预留：`run` 会在抢 busy 失败后立刻返回，
+        // 而事件循环每 250ms 就轮询一次 —— 不在这里拦住，就会持续投递
+        // 空转任务，把有界队列挤满、把真正的插件任务挤掉（掉任务 + 刷警告）。
+        due && !self.llm_busy.load(Ordering::Acquire)
+            && self.idle_scheduled.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok()
     }
 
     fn idle_trigger_rejected(&self) {

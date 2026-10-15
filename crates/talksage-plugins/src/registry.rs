@@ -186,6 +186,13 @@ pub trait SegmentObserver: Send + Sync {
     fn idle_trigger_due(&self) -> bool { false }
     /// 执行器队列满时释放 `idle_trigger_due` 的预留。
     fn idle_trigger_rejected(&self) {}
+    /// 慢任务被执行器丢弃时的回调（队列满 / 会话已停止）。
+    ///
+    /// `skeleton` 是同步发的，所以此时界面上可能已经有一张"识别中…"之类的
+    /// 占位卡片；如果不在**产生点**把状态收干净并撤销卡片，它会永远停在中间态
+    /// （执行器不会为被丢弃的任务调用 `run`）。返回的事件由调用方直接 emit，
+    /// 不经过执行器。
+    fn submit_rejected(&self, _seg: &TranscriptSegment) -> Vec<DomainEvent> { Vec::new() }
     /// 可选：外部请求在下次 run() 时立即处理 buffer（手动触发）。
     /// 默认空实现，不支持手动 flush 的 observer 无需实现。
     fn request_flush(&self) {}

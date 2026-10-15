@@ -21,11 +21,27 @@ export interface SegmentEvent {
   text: string;
   is_partial: boolean;
   ts_ms?: number;
+  /**
+   * 会话内单调递增的转写修订号（Rust `TranscriptState::apply` 盖的章）。
+   * 只在快照重建后用于丢弃"快照已经包含、但服务端又补发了一遍"的事件。
+   */
+  revision?: number;
   speaker_attribution?: {
+    source?: string;
     role: "owner" | "client" | "other" | "unknown";
     voice?: { id: string; confidence?: number };
   };
 }
+
+/**
+ * 会议文字通道的来源标记（`AudioSource::TypedText`）。
+ *
+ * 打字段不经过 Rust 的 `TranscriptState`（它只包装 Segment 事件，见
+ * `talk_sage` 的 `service.rs::inject_text`），因此 `revision` 恒为 0，
+ * 也永远不会出现在快照里 —— 所以它必须豁免 revision 对齐，否则快照一到，
+ * 后续所有打字段都会被当成"已过期"丢掉。
+ */
+const TYPED_TEXT_SOURCE = "typed_text";
 
 /** 转写行聚合器：增量处理 segment 事件，输出稳定的行列表。 */
 export class TranscriptAccumulator {
@@ -33,32 +49,64 @@ export class TranscriptAccumulator {
   /** 每个说话人当前未完成（partial）行的 key——双流时"我"与"客户"的增量互不覆盖。 */
   private partialKeyBySpeaker = new Map<string, number>();
   private nextKey = 0;
+  /**
+   * 最近一次快照的 revision；-1 = 没有快照基线，不做任何过滤。
+   *
+   * 服务端为避免"订阅与取快照之间"丢事件，改为**先订阅、后取快照**，代价是
+   * 那一段窗口里的事件会被补发一次。这里的 revision 门槛就是用来挡掉这些
+   * 已经被快照包含的事件，否则重连后会出现重复的转写行。
+   */
+  private snapshotRevision = -1;
 
   /** 当前行列表（只读视图）。 */
   getLines(): readonly TranscriptLine[] {
     return this.lines;
   }
 
-  /** 清空（订阅快照重建前）。 */
+  /** 清空（订阅快照重建前 / 新会话开始）。会一并清掉快照基线。 */
   reset(): void {
     this.lines = [];
     this.partialKeyBySpeaker.clear();
     this.nextKey = 0;
+    this.snapshotRevision = -1;
   }
 
-  /** 用服务端快照重建 committed + 各说话人 hypothesis。 */
-  applySnapshot(committed: SegmentEvent[], hypothesis: SegmentEvent[]): void {
+  /**
+   * 用服务端快照重建 committed + 各说话人 hypothesis。
+   *
+   * `revision` 是快照对应的转写修订号；传入后，后续 `revision` 不大于它的
+   * segment 事件会被丢弃（它们已经在 committed 里了）。
+   */
+  applySnapshot(committed: SegmentEvent[], hypothesis: SegmentEvent[], revision?: number): void {
     this.reset();
+    // 先以"无基线"写入快照内容本身，再启用 revision 门槛 —— 快照里的段
+    // 携带的 revision 恰好 <= 门槛，先设门槛会把它们自己判成"已覆盖"而丢光。
     for (const s of committed) {
       this.push({ ...s, is_partial: false });
     }
     for (const h of hypothesis) {
       this.push({ ...h, is_partial: true });
     }
+    this.snapshotRevision =
+      typeof revision === "number" && Number.isFinite(revision) && revision >= 0 ? revision : -1;
+  }
+
+  /**
+   * 该事件是否已被当前快照覆盖（服务端补发的历史事件）。
+   *
+   * 打字段豁免：它不进 `TranscriptState`、`revision` 恒 0、也永不出现在快照里。
+   * 缺 `revision` 的事件同样放行（兼容旧服务端），宁可重复也不静默丢内容。
+   */
+  private coveredBySnapshot(seg: SegmentEvent): boolean {
+    if (this.snapshotRevision < 0) return false;
+    if (seg.speaker_attribution?.source === TYPED_TEXT_SOURCE) return false;
+    if (seg.revision === undefined) return false;
+    return seg.revision <= this.snapshotRevision;
   }
 
   /** 处理一条 segment 事件。 */
   push(seg: SegmentEvent): void {
+    if (this.coveredBySnapshot(seg)) return;
     const tsMs = seg.ts_ms ?? Date.now();
     const voiceId = seg.speaker_attribution?.voice?.id;
     const speakerRole = seg.speaker_attribution?.role;

@@ -1135,6 +1135,12 @@ async fn list_knowledge_documents_api(
 struct StartListenBody {
     #[serde(default)]
     pinned_note_paths: Vec<String>,
+    #[serde(default)]
+    scene_mode: Option<String>,
+    #[serde(default)]
+    session_plugins: Option<Vec<String>>,
+    #[serde(default)]
+    lexicon_id: Option<String>,
 }
 
 async fn start_listen_api(
@@ -1145,9 +1151,11 @@ async fn start_listen_api(
     if !token_ok(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
     }
-    let pinned_note_paths = serde_json::from_slice::<StartListenBody>(&body)
-        .map(|b| b.pinned_note_paths)
-        .unwrap_or_default();
+    let launch = serde_json::from_slice::<StartListenBody>(&body).unwrap_or_default();
+    let pinned_note_paths = launch.pinned_note_paths;
+    let scene_mode = launch.scene_mode;
+    let session_plugins = launch.session_plugins;
+    let lexicon_id = launch.lexicon_id;
     // start 要加载模型/装配管道（可能数秒），放进阻塞线程池，别占 tokio worker。
     let events = state.events.clone();
     let service = state.service.clone();
@@ -1157,8 +1165,15 @@ async fn start_listen_api(
         if guard.is_some() {
             return Err(anyhow::anyhow!("已在监听中"));
         }
+        let scene_mode = match scene_mode.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(name) => Some(talksage_config::parse_scene_mode(name).map_err(anyhow::Error::msg)?),
+            None => None,
+        };
         let mut req = StartListen::desktop();
         req.pinned_note_paths = pinned_note_paths;
+        req.scene_mode = scene_mode;
+        req.session_plugins = session_plugins;
+        req.lexicon_id = lexicon_id;
         let started = service.start(
             req,
             Arc::new(move |ev| {
@@ -1366,6 +1381,7 @@ async fn voiceprint_enroll_api(
     };
     let data_dir = state.config.data_dir().to_path_buf();
     let gain_db = state.config.snapshot().audio.input_gain_db;
+    let auto_gain = state.config.snapshot().audio.auto_gain;
     let result = tokio::task::spawn_blocking(move || {
         let identifier = talksage_pipeline::speaker::SpeakerIdentifier::new(
             &model,
@@ -1373,7 +1389,7 @@ async fn voiceprint_enroll_api(
             talksage_pipeline::speaker::DEFAULT_THRESHOLD,
         )
         .ok_or_else(|| "声纹模型加载失败".to_string())?;
-        let (mut hub, rx) = talksage_audio::AudioHub::new_with_gain(100, gain_db);
+        let (mut hub, rx) = talksage_audio::AudioHub::new_with_gain(100, gain_db, auto_gain);
         hub.start(None).map_err(|e| format!("启动麦克风失败: {e}"))?;
         let mut audio: Vec<f32> = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds as u64);
@@ -1501,6 +1517,11 @@ fn find_in_session_recordings(data_dir: &std::path::Path, filename: &str) -> Opt
 }
 
 async fn handle_ws(mut socket: WebSocket, state: ServerState) {
+    // **先订阅、后取快照。** 反过来（先取快照再订阅）时，"取快照"与"订阅广播"
+    // 之间提交的段既不在快照里、也不会被广播给这个客户端，于是静默永久丢失
+    // —— 而前端没有任何补拉手段。先订阅的代价是那段窗口的事件会被补发一次，
+    // 由客户端的 revision 门槛去重（见 web/src/lib/transcript.ts）。
+    let mut rx = state.events.subscribe();
     let snap = state.running.lock().ok().and_then(|g| g.as_ref().map(|r| r.snapshot()));
     if let Some(s) = snap {
         let ev = talksage_core::DomainEvent::Snapshot {
@@ -1517,7 +1538,6 @@ async fn handle_ws(mut socket: WebSocket, state: ServerState) {
             }
         }
     }
-    let mut rx = state.events.subscribe();
     loop {
         tokio::select! {
             recv = rx.recv() => {
@@ -1529,6 +1549,9 @@ async fn handle_ws(mut socket: WebSocket, state: ServerState) {
                             }
                         }
                     }
+                    // Lagged（客户端消费太慢、广播环形缓冲被覆盖）或通道关闭：
+                    // 断开连接。前端会自动重连并在新连接上重新拿到完整快照，
+                    // 比继续推一份已经缺口的流要好。
                     Err(_) => break,
                 }
             }

@@ -7,6 +7,8 @@ import type { PluginValues } from "../lib/plugins";
 import { analysisPluginIds, buildPluginUpdates, fieldLabel, fieldOptions, initialPluginValues, pluginFields, pluginStatusLabel } from "../lib/plugins";
 import { knowledgeBaseSettings } from "../lib/knowledge";
 import { llmProviderApiKey } from "../lib/llm";
+import { lexiconDraftsFromConfig, lexiconDraftToPack, newLexiconId, type LexiconDraft } from "../lib/lexicon";
+import LexiconManager from "../components/LexiconManager";
 import { getApi } from "../lib/transport";
 
 const api = getApi();
@@ -15,7 +17,7 @@ const VOICE_ENROLL_SECONDS = 16;
 const VOICE_ENROLL_TEXT =
   "你好，我正在为拓思者录制声音标识。今天阳光明亮，我会清楚、自然、连续地读完这段文字。会议结束后，请帮我整理重点、时间和下一步行动。";
 
-type SettingsTab = "scene" | "asr" | "audio" | "terminology" | "plugins" | "voice" | "llm" | "webhooks" | "network" | "upgrade";
+type SettingsTab = "scene" | "asr" | "audio" | "terminology" | "lexicon" | "plugins" | "voice" | "llm" | "webhooks" | "network" | "upgrade";
 
 /** 场景清单：chip 渲染与「当前生效场景」文案共用同一份数据。 */
 const SCENE_MODES: { key: SceneMode; label: string; desc: string }[] = [
@@ -31,6 +33,7 @@ const SCENE_MODES: { key: SceneMode; label: string; desc: string }[] = [
 /** 配置补丁里的字段路径 → 它属于哪个 tab。按前缀匹配，先列更具体的。 */
 const TAB_OF_PATH: { prefix: string; tab: SettingsTab }[] = [
   { prefix: "scene.", tab: "scene" },
+  { prefix: "lexicons.", tab: "lexicon" },
   { prefix: "asr.terminology.", tab: "terminology" },
   { prefix: "asr.", tab: "asr" },
   { prefix: "audio.", tab: "audio" },
@@ -76,7 +79,8 @@ const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "scene", label: "场景模式", desc: "听写 / 会话 / 双语 / 会议 / 课堂 / 自定义" },
   { key: "asr", label: "ASR 转写", desc: "引擎 / 输入增益" },
   { key: "audio", label: "音频与录音", desc: "采集 / 灵敏度 / 断句 / 降噪 / 质量阈值 / 录音" },
-  { key: "terminology", label: "术语纠错", desc: "热词与误识别替换" },
+  { key: "terminology", label: "术语纠错", desc: "全局热词与误识别替换" },
+  { key: "lexicon", label: "词库", desc: "项目术语、纠错和参会人" },
   { key: "plugins", label: "插件", desc: "专业术语 / 翻译 / 知识源 / 要点聚合" },
   { key: "voice", label: "声音标识", desc: "注册主人声音，识别说话人" },
   { key: "llm", label: "LLM", desc: "默认模型与密钥" },
@@ -184,12 +188,44 @@ export default function SettingsSection({
   const [terminologyCorrections, setTerminologyCorrections] = useState(
     Object.entries(config?.asr?.terminology?.corrections ?? {}).map(([wrong, right]) => `${wrong} => ${right}`).join("\n")
   );
+  const [lexiconDrafts, setLexiconDrafts] = useState<LexiconDraft[]>(() => lexiconDraftsFromConfig(config?.lexicons));
+  const [removedLexiconIds, setRemovedLexiconIds] = useState<string[]>([]);
+  const [sceneLexicons, setSceneLexicons] = useState<Partial<Record<SceneMode, string>>>(() => config?.scene?.lexicon_ids ?? {});
+  function updateLexiconDraft(id: string, patch: Partial<LexiconDraft>) {
+    setLexiconDrafts((drafts) => drafts.map((draft) => draft.id === id ? { ...draft, ...patch } : draft));
+  }
+  function removeLexiconDraft(id: string) {
+    setLexiconDrafts((drafts) => drafts.filter((draft) => draft.id !== id));
+    setRemovedLexiconIds((ids) => ids.includes(id) ? ids : [...ids, id]);
+    setSceneLexicons((bindings) => {
+      const next = { ...bindings };
+      for (const mode of Object.keys(next) as SceneMode[]) {
+        if (next[mode] === id) delete next[mode];
+      }
+      return next;
+    });
+  }
+  function addLexiconDraft() {
+    setLexiconDrafts((drafts) => [
+      ...drafts,
+      { id: newLexiconId(drafts.map((draft) => draft.id)), label: "", description: "", terms: "", corrections: "", people: [] },
+    ]);
+  }
+  function setSceneLexicon(mode: SceneMode, id: string | null) {
+    setSceneLexicons((bindings) => {
+      const next = { ...bindings };
+      if (!id) delete next[mode];
+      else next[mode] = id;
+      return next;
+    });
+  }
   const [audioSource, setAudioSource] = useState<"mic" | "loopback">(config?.audio?.audio_source ?? "mic");
   const [vadPreset, setVadPreset] = useState<string>(config?.audio?.vad?.preset ?? "standard");
   const [denoiseEnabled, setDenoiseEnabled] = useState(config?.audio?.denoise?.enabled ?? false);
   const [highpass, setHighpass] = useState(config?.audio?.denoise?.highpass ?? true);
   const [minSegmentMs, setMinSegmentMs] = useState<number>(config?.audio?.min_segment_ms ?? 0);
   const [inputGainDb, setInputGainDb] = useState<number>(config?.audio?.input_gain_db ?? 12);
+  const [autoGain, setAutoGain] = useState(config?.audio?.auto_gain ?? true);
   const [endpointEnabled, setEndpointEnabled] = useState(config?.audio?.endpoint?.enabled ?? true);
   const [endpointStableMs, setEndpointStableMs] = useState(config?.audio?.endpoint?.stable_ms ?? 350);
   const [endpointQuietMs, setEndpointQuietMs] = useState(config?.audio?.endpoint?.quiet_ms ?? 450);
@@ -541,9 +577,16 @@ export default function SettingsSection({
           corrections,
         },
       },
+      lexicons: {
+        ...Object.fromEntries(removedLexiconIds
+          .filter((id) => !lexiconDrafts.some((draft) => draft.id === id))
+          .map((id) => [id, null])),
+        ...Object.fromEntries(lexiconDrafts.map((draft) => [draft.id, lexiconDraftToPack(draft)])),
+      },
       audio: {
         audio_source: audioSource,
         input_gain_db: inputGainDb,
+        auto_gain: autoGain,
         vad: { preset: vadPreset },
         denoise: {
           enabled: denoiseEnabled,
@@ -579,6 +622,7 @@ export default function SettingsSection({
       },
       scene: {
         mode: sceneMode,
+        lexicon_ids: sceneLexicons,
         custom: {
           ...sceneCustom,
           language: sceneMode === "custom" ? sceneCustom.language : sceneLanguage,
@@ -897,6 +941,43 @@ export default function SettingsSection({
             </div>
           )}
 
+          <div style={{ margin: "10px 0", padding: 8, border: "1px solid var(--border)", borderRadius: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 650, marginBottom: 6 }}>词库</div>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12 }}>
+              <input
+                type="checkbox"
+                checked={lexiconDrafts.some((draft) => draft.id === sceneLexicons[sceneMode])}
+                onChange={(event) => {
+                  if (!event.target.checked) {
+                    setSceneLexicon(sceneMode, null);
+                    return;
+                  }
+                  const current = sceneLexicons[sceneMode];
+                  const known = current && lexiconDrafts.some((draft) => draft.id === current);
+                  setSceneLexicon(sceneMode, known ? current : lexiconDrafts[0]?.id ?? null);
+                }}
+              />
+              这个场景加载词库
+              <select
+                aria-label="场景词库"
+                disabled={!lexiconDrafts.some((draft) => draft.id === sceneLexicons[sceneMode])}
+                value={sceneLexicons[sceneMode] && lexiconDrafts.some((draft) => draft.id === sceneLexicons[sceneMode]) ? sceneLexicons[sceneMode] : ""}
+                onChange={(event) => setSceneLexicon(sceneMode, event.target.value || null)}
+                style={{ ...inputStyle, marginLeft: 4 }}
+              >
+                <option value="">选择词库</option>
+                {lexiconDrafts.map((draft) => (
+                  <option key={draft.id} value={draft.id}>{draft.label.trim() || "未命名词库"}</option>
+                ))}
+              </select>
+            </label>
+            <div style={hint}>
+              {lexiconDrafts.length === 0
+                ? "还没有词库。到「词库」页新建后，再回到这里选择。"
+                : "保存后，下次用这个场景开始监听时会加载所选词库。词库内容在「词库」页维护。"}
+            </div>
+          </div>
+
           {sceneMode !== "custom" ? (
             <div style={{ background: "var(--surface-2)", borderRadius: 6, padding: 8, fontSize: 11, color: "var(--text-2)", lineHeight: 1.9 }}>
               {sceneMode === "dictation" && (
@@ -1137,11 +1218,19 @@ export default function SettingsSection({
           <div style={hint}>中文引擎用于所有中文场景（听写、会话、会议、课堂等）；英文引擎用于英文场景及双语对话的英文通道。未安装的引擎请到「模型管理」下载。非自定义场景用此全局设置，自定义场景用「场景模式 → 自定义」。</div>
 
           <h3 style={{ ...groupTitle, marginTop: 10 }}>麦克风输入电平</h3>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+            <input type="checkbox" checked={autoGain} onChange={(e) => setAutoGain(e.target.checked)} />
+            <span>自动增益</span>
+          </label>
           <label style={labelBlock}>
-            输入增益：
+            {autoGain ? "最大增益" : "输入增益"}：
             <input type="number" min={0} max={24} step={1} value={inputGainDb} onChange={(e) => setInputGainDb(Math.min(24, Math.max(0, Number(e.target.value) || 0)))} style={numStyle} /> dB
           </label>
-          <div style={hint}>默认 +12dB；无线麦双声道自动选择电平较高的通道，并在放大后限幅，避免与静音通道平均导致声音变小。</div>
+          <div style={hint}>
+            {autoGain
+              ? "从 0 dB 起步。会议室这种已经很响的麦会停在低增益，避免顶进 ±0.98 削波；安静麦才慢慢加到这个上限。静音时不抬增益。"
+              : "按这个值固定放大，放大后仍限幅到 ±0.98。无线麦双声道自动选择电平较高的通道。"}
+          </div>
 
           <h3 style={{ ...groupTitle, marginTop: 10 }}>语义分句</h3>
           <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
@@ -1425,8 +1514,21 @@ export default function SettingsSection({
             rows={4}
             style={{ ...inputStyle, width: "100%", resize: "vertical", opacity: terminologyEnabled ? 1 : 0.5 }}
           />
-          <div style={hint}>Zipformer 与 Qwen3-ASR 会使用模型热词；Paraformer 使用纠错表。纠错同步作用于 partial/final，不增加模型推理延迟。修改后下次监听生效。</div>
+          <div style={hint}>全局术语默认关闭。打开后，每次监听都会带上上面的词，不区分场景。Zipformer 与 Qwen3-ASR 会使用模型热词；当前 GPU 上的 whisper 把热词当作提示，纠错表则会直接替换听错的写法。按项目准备的词库在「词库」页维护，并在「场景模式」里选择是否加载。</div>
         </div>
+      )}
+
+      {tab === "lexicon" && (
+        <LexiconManager
+          drafts={lexiconDrafts}
+          usedBy={Object.fromEntries(lexiconDrafts.map((draft) => [
+            draft.id,
+            SCENE_MODES.filter((mode) => sceneLexicons[mode.key] === draft.id).map((mode) => mode.label),
+          ]))}
+          onChange={updateLexiconDraft}
+          onRemove={removeLexiconDraft}
+          onAdd={addLexiconDraft}
+        />
       )}
 
       {/* ── 插件 ── */}

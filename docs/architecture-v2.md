@@ -336,7 +336,7 @@ enum DomainEvent {
 - **分区**：上下文 / 实时转写（说话人着色、增量渲染） / 术语卡片 / 翻译区 / 要点区 / 知识库材料包；虚拟化长转写（参考 Meetily `VirtualizedTranscriptView`）
 - **统一 API 抽象**：`lib/api.ts` 定义 `AudioCapture` / `SessionApi` / `HistoryApi` / `SettingsApi` 接口，IPC 与 HTTP 两套实现
 - **音频**：Tauri 模式音频全在壳内（前端只收事件 + 控制命令）；headless 模式当前同样由服务端采集（浏览器 `getUserMedia` 上行仍为预留）
-- **转写累加器**：`lib/transcript.ts` 按 `speaker_label` 持有 hypothesis；收到 `snapshot` 时 `reset` + `applySnapshot` 重建行
+- **转写累加器**：`lib/transcript.ts` 按稳定的 `speaker_id` 持有 hypothesis（缺 id 时回退到 `speaker_label`），使声纹改写显示标签不影响 partial↔final 对齐；收到 `snapshot` 时 `reset` + `applySnapshot` 重建行，并以快照的 `revision` 为基线丢弃服务端补发的重复事件
 - **状态管理**：轻量 context + reducer（参考 Meetily `SidebarProvider` 模式，无需重型框架）
 - **录音回放**：Web Audio 播放（音频文件经宿主提供）
 
@@ -598,7 +598,18 @@ revision / processed_until_sample / committed_until_sample
 
 ### 19.5 有界采集与公平调度
 
-`CaptureTx`：`sync_channel(32)` + `try_send`。满载 overrun（第 1 次及每 32 次打日志）并丢帧，**不阻塞** cpal / WASAPI 回调。Pipeline 用非阻塞轮询与 round-robin 改变首选流，避免固定偏向 user；文件输入由 deadline pacer 驱动，暂停恢复后不会追赶积压时钟。
+`CaptureTx`：`sync_channel(CAPTURE_QUEUE_CAP)`（当前为 512 帧 ≈ 51s）+ `try_send`。满载 overrun（第 1 次及每 32 次打日志）并丢帧，**不阻塞** cpal / WASAPI 回调。Pipeline 用非阻塞轮询与 round-robin 改变首选流，避免固定偏向 user；文件输入由 deadline pacer 驱动，暂停恢复后不会追赶积压时钟。
+
+实时链路上的全部有界点（背压边界）：
+
+| 边界 | 容量 | 满时行为 |
+|---|---|---|
+| 采集 → StreamWorker（`CaptureTx`） | 512 帧 ≈ 51s | 丢帧 + 记 overrun + warn |
+| StreamWorker → ASR 线程（音频） | 128 块 ≈ 12.8s | 丢块 + 记 overrun + warn（控制命令仍阻塞送达） |
+| ASR 线程 → StreamWorker（结果） | 无界（小结构，段级一条） | — |
+| `SessionWriter`（durable 事件） | 256 | **阻塞**（宁可减速也不静默丢会话数据） |
+| `PluginExecutor`（慢任务） | 4 worker × 64 队列 | 丢任务 + warn + 回调插件撤销骨架 |
+| 声纹换人检测队列 | 1 | 跳过本窗口（不追赶） |
 
 ### 19.6 停止、慢插件与持久化
 

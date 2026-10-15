@@ -181,11 +181,12 @@ pub fn export_markdown(detail: &SessionDetail) -> String {
                 ri.app_version,
             ));
             md.push_str(&format!(
-                "- VAD {} · 降噪 {} · 最短提交 {}ms · 增益 {}dB · 说话人 {}\n",
+                "- VAD {} · 降噪 {} · 最短提交 {}ms · 增益 {}dB · 自动增益 {} · 说话人 {}\n",
                 ri.vad_preset,
                 if ri.denoise_enabled { "开" } else { "关" },
                 ri.min_segment_ms,
                 ri.input_gain_db,
+                if ri.auto_gain { "开" } else { "关" },
                 ri.speaker_mode,
             ));
         }
@@ -522,8 +523,11 @@ pub struct SessionRuntimeInfo {
     pub denoise_enabled: bool,
     /// 最短提交时长（ms）。
     pub min_segment_ms: u64,
-    /// 输入增益（dB）。
+    /// 输入增益（dB）。自动增益开启时这是上限。
     pub input_gain_db: f32,
+    /// 是否开启自动增益。旧会话缺省为关闭（当时是固定增益）。
+    #[serde(default)]
+    pub auto_gain: bool,
     /// 说话人识别模式（off / channel / voiceprint）。
     pub speaker_mode: String,
     /// 采样率（一般 16000）。

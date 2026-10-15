@@ -26,13 +26,38 @@ const FRAME_SAMPLES: usize = 320; // 20ms
 const MIN_VOICED_SAMPLES: usize = SAMPLE_RATE; // 至少 1s 有效人声
 const MAX_CLIENT_SPEAKERS: u32 = 8;
 
-fn session_speaker_label(recognize_owner: bool, id: u32) -> String {
-    let prefix = if recognize_owner {
-        "讲话者"
-    } else {
-        "客户"
-    };
-    format!("{prefix}{id}")
+/// 说话人的**角色域**。麦克风流（可识别主人）与系统回环流是两个独立域：
+/// 各自编号、各自聚类、互不匹配（避免扬声器回声把本地参会者归成"客户"）。
+///
+/// 编号必须**按域独立**，不能共用一条序列：双流交错查询时，共用计数器会产生
+/// 「讲话者1 / 客户2 / 讲话者3」这类跳号，用户看到"客户2"却没有"客户1"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoleDomain {
+    /// 麦克风流：可匹配主人声纹，其余说话人编号为「讲话者N」。
+    Local,
+    /// 回环/客户流：不识别主人，编号为「客户N」。
+    Client,
+}
+
+impl RoleDomain {
+    fn of(recognize_owner: bool) -> Self {
+        if recognize_owner {
+            Self::Local
+        } else {
+            Self::Client
+        }
+    }
+
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Local => "讲话者",
+            Self::Client => "客户",
+        }
+    }
+
+    fn label(self, id: u32) -> String {
+        format!("{}{id}", self.prefix())
+    }
 }
 
 /// 裁掉声纹音频两端静音，并拒绝有效人声不足、过弱或静音占比过高的片段。
@@ -100,7 +125,10 @@ pub struct SpeakerIdentifier {
     inner: Mutex<Inner>,
     threshold: f32,
     /// 查询发生在两条独立 ASR 线程上，编号必须无锁且原子地预留。
-    next_voice_id: AtomicU32,
+    ///
+    /// 两个角色域各一条序列（见 [`RoleDomain`]），互不影响对方的编号起点。
+    next_local_id: AtomicU32,
+    next_client_id: AtomicU32,
 }
 
 struct Inner {
@@ -109,7 +137,10 @@ struct Inner {
     prototypes: HashMap<String, (Vec<f32>, u32)>,
     /// 尚未被第二个相似片段确认的新说话人。必须允许多个候选并存，否则
     /// A/B 交替发言会互相覆盖唯一候选，两个身份都永远无法确认。
-    candidates: HashMap<u32, CandidateSpeaker>,
+    ///
+    /// 键是标签（「讲话者N」/「客户N」）：标签在两个角色域内唯一，因此不必
+    /// 再依赖全局编号做键 —— 这也让两个域可以各自从 1 开始编号。
+    candidates: HashMap<String, CandidateSpeaker>,
 }
 
 struct CandidateSpeaker {
@@ -119,12 +150,10 @@ struct CandidateSpeaker {
 
 enum PendingSpeaker {
     StartCandidate {
-        id: u32,
         label: String,
         embedding: Vec<f32>,
     },
     ConfirmCandidate {
-        id: u32,
         label: String,
         embedding: Vec<f32>,
     },
@@ -215,12 +244,22 @@ impl SpeakerIdentifier {
             extractor: Mutex::new(extractor),
             inner: Mutex::new(inner),
             threshold,
-            next_voice_id: AtomicU32::new(1),
+            next_local_id: AtomicU32::new(1),
+            next_client_id: AtomicU32::new(1),
         };
         if let Some(emb) = owner_embedding {
             si.add_owner(&emb);
         }
         Some(si)
+    }
+
+    /// 在指定角色域内原子预留一个说话人编号（各域从 1 开始）。
+    fn reserve_id(&self, domain: RoleDomain) -> u32 {
+        let counter = match domain {
+            RoleDomain::Local => &self.next_local_id,
+            RoleDomain::Client => &self.next_client_id,
+        };
+        counter.fetch_add(1, Ordering::Relaxed)
     }
 
     /// 是否已注册主人声纹。
@@ -334,11 +373,8 @@ impl SpeakerIdentifier {
             }
         }
 
-        let local_prefix = if recognize_owner {
-            "讲话者"
-        } else {
-            "客户"
-        };
+        let domain = RoleDomain::of(recognize_owner);
+        let local_prefix = domain.prefix();
         let nearest = inner
             .prototypes
             .iter()
@@ -370,24 +406,22 @@ impl SpeakerIdentifier {
         let candidate_threshold = (self.threshold - 0.08).max(0.0);
         let candidate = inner
             .candidates
-            .iter()
-            .filter(|(_, candidate)| candidate.label.starts_with(local_prefix))
-            .map(|(id, candidate)| {
+            .values()
+            .filter(|candidate| candidate.label.starts_with(local_prefix))
+            .map(|candidate| {
                 (
-                    *id,
                     candidate.label.clone(),
                     cosine_similarity(&candidate.embedding, &emb),
                 )
             })
-            .max_by(|a, b| a.2.total_cmp(&b.2));
-        if let Some((id, label, similarity)) = candidate {
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((label, similarity)) = candidate {
             if similarity >= candidate_threshold {
                 return SpeakerQuery {
                     label: label.clone(),
                     decision: SpeakerDecision::CandidateConfirmed,
                     similarity: Some(similarity),
                     pending: Some(PendingSpeaker::ConfirmCandidate {
-                        id,
                         label,
                         embedding: emb,
                     }),
@@ -409,16 +443,17 @@ impl SpeakerIdentifier {
                 pending: None,
             };
         }
-        let id = self.next_voice_id.fetch_add(1, Ordering::Relaxed);
-        // ID 在查询时即预留。注册仍延迟到 filter 放行后的 commit，但编号分配
-        // 不能延迟：双流 ASR 线程可能同时查询，否则两位讲话人会拿到同一个 ID。
-        let label = session_speaker_label(recognize_owner, id);
+        // 编号在查询时即预留。注册仍延迟到 filter 放行后的 commit，但编号分配
+        // 不能延迟：双流 ASR 线程可能同时查询，否则两位讲话人会拿到同一个编号。
+        // 代价是「查了但没 commit」的段（被 filter 吞掉）会消耗掉本域的一个编号，
+        // 表现为编号出现跳号 —— 这是刻意的取舍：编号必须无锁预留，无法回收。
+        let id = self.reserve_id(domain);
+        let label = domain.label(id);
         SpeakerQuery {
             label: label.clone(),
             decision: SpeakerDecision::CandidateStarted,
             similarity: nearest.as_ref().map(|(_, similarity)| *similarity),
             pending: Some(PendingSpeaker::StartCandidate {
-                id,
                 label,
                 embedding: emb,
             }),
@@ -433,13 +468,9 @@ impl SpeakerIdentifier {
         };
         let mut inner = self.inner.lock().unwrap();
         match pending {
-            PendingSpeaker::StartCandidate {
-                id,
-                label,
-                embedding,
-            } => {
+            PendingSpeaker::StartCandidate { label, embedding } => {
                 inner.candidates.insert(
-                    *id,
+                    label.clone(),
                     CandidateSpeaker {
                         label: label.clone(),
                         embedding: embedding.clone(),
@@ -447,11 +478,7 @@ impl SpeakerIdentifier {
                 );
                 false
             }
-            PendingSpeaker::ConfirmCandidate {
-                id,
-                label,
-                embedding,
-            } => {
+            PendingSpeaker::ConfirmCandidate { label, embedding } => {
                 if inner.prototypes.contains_key(label.as_str())
                     || !inner.manager.add(label.as_str(), embedding)
                 {
@@ -460,7 +487,7 @@ impl SpeakerIdentifier {
                 inner
                     .prototypes
                     .insert(label.clone(), (embedding.clone(), 1));
-                inner.candidates.remove(id);
+                inner.candidates.remove(label);
                 true
             }
             PendingSpeaker::Update { label, embedding } => {
@@ -592,8 +619,12 @@ mod tests {
 
     #[test]
     fn session_identity_keeps_microphone_and_loopback_roles_distinct() {
-        assert_eq!(session_speaker_label(true, 1), "讲话者1");
-        assert_eq!(session_speaker_label(false, 2), "客户2");
+        assert_eq!(RoleDomain::of(true).label(1), "讲话者1");
+        // 两个域各自从 1 开始：回环域的 1 号就是「客户1」，不会因为麦克风域
+        // 已经用掉编号而变成「客户2」。
+        assert_eq!(RoleDomain::of(false).label(1), "客户1");
+        assert_eq!(RoleDomain::Local.prefix(), "讲话者");
+        assert_eq!(RoleDomain::Client.prefix(), "客户");
     }
 
     #[test]

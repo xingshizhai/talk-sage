@@ -55,7 +55,7 @@ copied sherpa-en-reading-001: evaluation/corpus/en/sherpa-en-reading-001.wav
 只验证评估编排器：
 
 ```bash
-python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+python3 -m unittest discover -s tools/tests -p 'test_*.py'
 ```
 
 只验证音频设备无关逻辑：

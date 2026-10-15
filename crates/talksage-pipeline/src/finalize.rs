@@ -95,6 +95,7 @@ fn runtime_info_from_config(cfg: &talksage_config::Config) -> talksage_session::
         denoise_enabled: scene.denoise_enabled,
         min_segment_ms: scene.min_segment_ms,
         input_gain_db: audio.input_gain_db,
+        auto_gain: audio.auto_gain,
         speaker_mode: format!("{:?}", scene.speaker_mode).to_ascii_lowercase(),
         sample_rate: talksage_audio::TARGET_SAMPLE_RATE,
     }

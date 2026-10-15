@@ -38,13 +38,26 @@ terms         = []        # 热词列表，例：["NPI", "MOQ", "TalkSage"]
 # 常见误识别 → 正确术语（ASR 输出后同步替换，不增加推理延迟）
 # "脱丝者" = "TalkSage"
 
+# 词库在设置的「词库」页维护。某个场景要不要加载、加载哪一份，写在 [scene.lexicon_ids]。
+# people 每组第一个名字是按人汇总的显示名。
+[lexicons.weekly]
+label = "周例会"
+description = ""
+terms = []
+people = []
+
+[lexicons.weekly.corrections]
+# "拓思者" = "TalkSage"
+
 # ── 音频采集 ────────────────────────────────────────────────────────────────
 
 [audio]
 # 采集源：mic（麦克风）| loopback（系统音频，视频会议识别对方时使用）
 audio_source  = "mic"
-# 麦克风输入增益（dB，范围 0~24）
+# 麦克风输入增益（dB，范围 0~24）。auto_gain 开启时这是上限，从 0 dB 起步。
 input_gain_db = 12.0
+# 自动增益：热麦留在限位之下，安静麦才加到 input_gain_db。关掉则按上面的值固定放大。
+auto_gain = true
 # 麦克风设备索引（null = 系统默认）
 # mic_device = 0
 # 回环设备索引（null = 系统默认渲染设备）
@@ -149,6 +162,10 @@ mode = "conversation"
 # min_segment_ms    = 300
 # noise_auto_detect = true
 # plugin_allowlist  = ["term_explainer", "brief_retriever", "key_point_llm"]
+
+# 各场景加载哪一份词库。键是场景名，值是 [lexicons.<id>] 的 id。不写表示不加载。
+# [scene.lexicon_ids]
+# meeting = "weekly"
 
 # ── 会话记录 ─────────────────────────────────────────────────────────────────
 

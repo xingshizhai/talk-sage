@@ -53,6 +53,8 @@ export interface AppConfig {
   audio: {
     audio_source: "mic" | "loopback";
     input_gain_db: number;
+    /** 开启时 input_gain_db 是上限，从 0 dB 起步；关闭时按该值固定放大。 */
+    auto_gain: boolean;
     vad: { preset: "standard" | "sensitive" | "strict"; threshold: number | null };
     denoise: { enabled: boolean; gate_threshold: number; highpass: boolean };
     endpoint: { enabled: boolean; stable_ms: number; quiet_ms: number; force_quiet_ms: number; quiet_rms: number; min_segment_ms: number };
@@ -82,6 +84,8 @@ export interface AppConfig {
   network: {
     proxy: string;
   };
+  /** 开始监听时按场景绑定加载的词库。键是词库 id。 */
+  lexicons?: Record<string, LexiconPack>;
   /** 场景模式是一组完整运行预设。 */
   scene: {
     mode: SceneMode;
@@ -90,6 +94,8 @@ export interface AppConfig {
     presets?: ScenePresetMeta[];
     /** custom 由哪个模板套用而来（仅展示；切回非自定义模式即清除）。 */
     active_preset?: string | null;
+    /** 各场景要加载的词库 id。没有条目表示该场景不加载。 */
+    lexicon_ids?: Partial<Record<SceneMode, string>>;
   };
   /** 本地知识库（Obsidian 仓库或普通 .md/.txt 文件夹）。 */
   knowledge_base: {
@@ -97,6 +103,22 @@ export interface AppConfig {
     folder: string;
   };
   [key: string]: unknown;
+}
+
+export interface LexiconPack {
+  label: string;
+  description?: string;
+  terms: string[];
+  corrections: Record<string, string>;
+  people: string[][];
+}
+
+export interface ListenStart {
+  pinnedNotePaths?: string[];
+  /** 省略时沿用已保存的场景，开始监听不改场景。 */
+  sceneMode?: SceneMode | null;
+  plugins: string[];
+  lexiconId?: string | null;
 }
 
 export type SceneMode =
@@ -213,6 +235,8 @@ export type DomainEvent =
       ts_ms: number;
       duration_ms?: number;
       rms?: number;
+      /** 会话内单调递增的转写修订号（Rust `TranscriptState`）；与快照对齐去重用。 */
+      revision?: number;
     }
   | { type: "term"; result_id: string; status: "skeleton" | "final"; content: string }
   | { type: "translation"; result_id: string; status: "skeleton" | "final"; direction: "zh_en" | "en_zh"; content: string }
@@ -381,6 +405,8 @@ export interface SessionRuntimeInfo {
   denoise_enabled: boolean;
   min_segment_ms: number;
   input_gain_db: number;
+  /** 旧会话缺省。开启时 input_gain_db 是上限。 */
+  auto_gain?: boolean;
   speaker_mode: string;
   sample_rate: number;
 }
@@ -565,8 +591,8 @@ export interface AppApi {
   /** 保存配置（写入 talksage.toml / 服务端配置）。 */
   saveConfig(updates: Record<string, unknown>): Promise<void>;
   ping(): Promise<void>;
-  /** 开始实时监听（麦克风 → VAD → 本地 ASR → 事件推送）。 */
-  startListen(pinnedNotePaths?: string[]): Promise<void>;
+  /** 开始实时监听。场景、插件和词库只作用于这一次。 */
+  startListen(launch: ListenStart): Promise<void>;
   /** 知识库文档列表（材料包挑选）。 */
   listKnowledgeDocuments(): Promise<{ path: string; title: string; text: string }[]>;
   /** 停止实时监听。 */

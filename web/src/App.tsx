@@ -12,6 +12,10 @@ import SideNav, { type HealthRow, type NavItem } from "./components/SideNav";
 import TranscriptCard, { fmtElapsed, type TimelineLine, type TranscriptMode } from "./components/TranscriptCard";
 import TypedInput from "./components/TypedInput";
 import KeyPointsCard from "./components/KeyPointsCard";
+import ListenLaunch from "./components/ListenLaunch";
+import TaskBoard from "./components/TaskBoard";
+import { launchSummary, loadSceneChoice, offeredPlugins, rememberSceneChoice, sessionPlugins, tasksEnabled, type LaunchChoice } from "./lib/launch";
+import { lexiconIdForScene } from "./lib/lexicon";
 import AsidePanel from "./components/AsidePanel";
 import HistorySection from "./sections/HistorySection";
 import SettingsSection from "./sections/SettingsSection";
@@ -104,6 +108,20 @@ export default function App() {
   const [briefs, setBriefs] = useState<BriefItem[]>([]);
   const [kbDocs, setKbDocs] = useState<KnowledgeDoc[]>([]);
   const [pinnedNotePaths, setPinnedNotePaths] = useState<string[]>([]);
+  const [launch, setLaunch] = useState<LaunchChoice | null>(null);
+  const [activeLaunch, setActiveLaunch] = useState<{ tasks: boolean; keyPoints: boolean; people: string[][]; summary: string } | null>(null);
+  useEffect(() => {
+    if (!config?.scene?.mode) return;
+    const plugins = config.plugins;
+    setLaunch(loadSceneChoice(config.scene.mode, {
+      custom: config.scene.custom,
+      pluginEnabled: {
+        key_point_llm: plugins?.key_point_llm?.enabled !== false,
+        term_explainer: plugins?.term_explainer?.enabled !== false,
+        translator: plugins?.translator?.enabled !== false,
+      },
+    }));
+  }, [config?.scene?.mode, config?.scene?.custom, config?.plugins]);
   const [rawEvents, setRawEvents] = useState<DomainEvent[]>([]);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [searchResults, setSearchResults] = useState<SegmentHit[] | null>(null);
@@ -247,6 +265,7 @@ export default function App() {
             is_partial: true,
             ts_ms: h.ts_ms,
           })),
+          ev.revision,
         );
         setLines(
           acc.getLines().map((l) => {
@@ -265,7 +284,26 @@ export default function App() {
             };
           }),
         );
-        if (ev.stage === "recording") setListening(true);
+        // 快照是刷新/重连后唯一的状态来源，必须把**后端真实阶段**整体恢复，
+        // 而不只是"是否在监听"。特别是暂停：只恢复 listening 会让前端
+        // paused=false 与后端 paused=true 相反，用户点暂停会发出反向动作。
+        // 墙钟时长在刷新后已不可知，因此计时统一从 0 重新计（暂停态则冻结）。
+        if (ev.stage === "recording") {
+          setListening(true);
+          setPaused(false);
+          timerRef.current = { start: Date.now(), accumMs: 0 };
+          setListenElapsed(0);
+        } else if (ev.stage === "paused") {
+          setListening(true);
+          setPaused(true);
+          timerRef.current = { start: 0, accumMs: 0 };
+          setListenElapsed(0);
+        } else if (ev.stage === "idle" || ev.stage === "asr_ready") {
+          setListening(false);
+          setPaused(false);
+          timerRef.current = { start: 0, accumMs: 0 };
+          setListenElapsed(0);
+        }
       }
       if (ev.type === "level") {
         setMicRms(ev.mic_rms);
@@ -703,23 +741,44 @@ export default function App() {
         setListenElapsed(0);
         setStatus("已停止");
       } else {
+        const sceneMode = config?.scene?.mode;
+        if (!launch || !sceneMode) {
+          setStatus("配置尚未加载");
+          return;
+        }
         setStatus("启动中…");
         // 开始监听 → 自动跳转到实时转写页
         setNavPage("transcript");
         // 后端会创建全新的 SessionRuntime；前端也必须同步丢弃上一会话的聚合状态。
         // 必须在 startListen 前清空，避免启动后立即到达的新事件被误删。
         resetLiveSession();
-        await api.startListen(pinnedNotePaths);
+        const offered = offeredPlugins(sceneMode, config?.scene?.custom);
+        const lexiconId = lexiconIdForScene(config?.scene?.lexicon_ids, sceneMode, config?.lexicons);
+        const lexicon = lexiconId ? config?.lexicons?.[lexiconId] : undefined;
+        rememberSceneChoice(sceneMode, launch);
+        const features = launchSummary(launch, offered);
+        setActiveLaunch({
+          tasks: tasksEnabled(launch, offered),
+          keyPoints: offered.includes("key_point_llm") && !launch.disabled.includes("key_point_llm"),
+          people: lexicon?.people ?? [],
+          summary: lexicon?.label?.trim() ? `${features} · 词库：${lexicon.label.trim()}` : features,
+        });
+        await api.startListen({
+          pinnedNotePaths,
+          plugins: sessionPlugins(launch, offered),
+          lexiconId: null,
+        });
       }
     } catch (e) {
       const msg = String(e).replace(/^Error: /, "");
       setStatus(`错误: ${msg}`);
+      if (!listening) setActiveLaunch(null);
       if (!listening) {
         // 启动失败：原因可能很关键（麦克风被占/模型缺失），弹窗让用户看到处理建议
         window.alert(`启动失败：${msg}`);
       }
     }
-  }, [confirmLeaveSettings, listening, pinnedNotePaths, resetLiveSession]);
+  }, [confirmLeaveSettings, config?.lexicons, config?.scene?.custom, config?.scene?.lexicon_ids, config?.scene?.mode, launch, listening, pinnedNotePaths, resetLiveSession]);
 
   const handlePause = useCallback(async () => {
     if (!listening) return;
@@ -863,6 +922,21 @@ export default function App() {
         onToggleAudioSource={handleToggleAudioSource}
         onToggleListen={handleListen}
         onTogglePause={handlePause}
+        launchSlot={!listening && !importing && launch && config?.scene?.mode ? (
+          <ListenLaunch
+            sceneMode={config.scene.mode}
+            custom={config.scene.custom}
+            choice={launch}
+            onChange={(next) => {
+              setLaunch(next);
+              if (config.scene?.mode) rememberSceneChoice(config.scene.mode, next);
+            }}
+          />
+        ) : activeLaunch ? (
+          <div style={{ margin: "0 10px 8px", fontSize: 11, color: "var(--muted)", lineHeight: 1.4 }}>
+            {activeLaunch.summary}
+          </div>
+        ) : null}
 
         onNavigate={handleNavigate}
         noiseLevel={noiseLevel}
@@ -1078,6 +1152,12 @@ export default function App() {
               lines={lines}
               timer={{ listening, paused, seconds: listenElapsed }}
             />
+            {activeLaunch?.tasks && (
+              <TaskBoard
+                points={points}
+                people={activeLaunch.people}
+              />
+            )}
             <KeyPointsCard
                 points={points}
                 flushRecords={flushRecords}
@@ -1105,6 +1185,7 @@ export default function App() {
                   }
                 }}
                 pluginLabel={(() => {
+                  if (activeLaunch && !activeLaunch.keyPoints) return "本次未开启";
                   const llmEnabled = config?.plugins?.["key_point_llm"]?.enabled !== false;
                   if (llmEnabled) return config?.llm?.default ?? "deepseek";
                   return "已禁用";
