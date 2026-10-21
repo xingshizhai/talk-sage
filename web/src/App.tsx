@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getApi } from "./lib/transport";
 import type { AppConfig, AsrRuntimeStatus, ConversationMetrics, DomainEvent, NotesTemplate, NudgeEvent, SceneMode, SegmentHit, SessionDetail, SessionRecord, TrioSummary } from "./lib/api";
 import { TranscriptAccumulator } from "./lib/transcript";
+import { timerFromSnapshot } from "./lib/listenState";
 import { keyPointKey, toKeyPoint, type KeyPoint } from "./lib/highlights";
 import { applyIncomingNudge } from "./lib/nudge";
 import { termKey } from "./lib/terms";
@@ -284,25 +285,16 @@ export default function App() {
             };
           }),
         );
-        // 快照是刷新/重连后唯一的状态来源，必须把**后端真实阶段**整体恢复，
-        // 而不只是"是否在监听"。特别是暂停：只恢复 listening 会让前端
-        // paused=false 与后端 paused=true 相反，用户点暂停会发出反向动作。
-        // 墙钟时长在刷新后已不可知，因此计时统一从 0 重新计（暂停态则冻结）。
-        if (ev.stage === "recording") {
-          setListening(true);
-          setPaused(false);
-          timerRef.current = { start: Date.now(), accumMs: 0 };
-          setListenElapsed(0);
-        } else if (ev.stage === "paused") {
-          setListening(true);
-          setPaused(true);
-          timerRef.current = { start: 0, accumMs: 0 };
-          setListenElapsed(0);
-        } else if (ev.stage === "idle" || ev.stage === "asr_ready") {
-          setListening(false);
-          setPaused(false);
-          timerRef.current = { start: 0, accumMs: 0 };
-          setListenElapsed(0);
+        // 快照是刷新/重连后唯一的状态来源，必须把后端真实阶段整体恢复。
+        // 特别是暂停：只恢复 listening 会让前端 paused=false 与后端 paused=true 相反。
+        // elapsed_ms 是这场监听已经走了的有效时长。续上它，锁屏后界面重建才不会
+        // 从 0 开始，看起来像结束了旧的一场又开了新的一场。
+        const restored = timerFromSnapshot(ev.stage, ev.elapsed_ms, Date.now());
+        if (restored) {
+          setListening(restored.listening);
+          setPaused(restored.paused);
+          timerRef.current = restored.timer;
+          setListenElapsed(restored.elapsedSec);
         }
       }
       if (ev.type === "level") {

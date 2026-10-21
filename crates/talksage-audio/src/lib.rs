@@ -254,6 +254,8 @@ pub struct AudioHub {
     stream: Option<cpal::Stream>,
     /// 采集线程实时 RMS（f32 bits）；在音频回调中更新，与 tick() 无关。
     pub level: Arc<AtomicU32>,
+    /// cpal 报过错（设备被锁屏拆掉等）。管道据此重新打开麦克风，而不是结束会话。
+    stream_error: Arc<AtomicBool>,
 }
 
 impl AudioHub {
@@ -277,6 +279,7 @@ impl AudioHub {
                 auto_gain,
                 stream: None,
                 level: Arc::new(AtomicU32::new(0.0f32.to_bits())),
+                stream_error: Arc::new(AtomicBool::new(false)),
             },
             rx,
         )
@@ -352,7 +355,11 @@ impl AudioHub {
         let mut pending: Vec<f32> = Vec::with_capacity(chunk_samples);
 
         // 输入回调（cpal 音频线程；只做轻量处理）
-        let err_fn = |e| log::error!("音频流错误: {e}");
+        let stream_error = self.stream_error.clone();
+        let err_fn = move |e| {
+            log::error!("音频流错误: {e}");
+            stream_error.store(true, Ordering::SeqCst);
+        };
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
                 let mut gain = AutoGain::new(auto_gain, input_gain_db);
@@ -394,7 +401,18 @@ impl AudioHub {
 
         stream.play()?;
         self.stream = Some(stream);
+        self.stream_error.store(false, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// 音频回调报过错（设备失效、流被系统拆掉）。不清除，直到重新打开成功。
+    pub fn stream_failed(&self) -> bool {
+        self.stream_error.load(Ordering::SeqCst)
+    }
+
+    /// 重新打开成功后清掉错误标记，避免立刻再拆一次流。
+    pub fn clear_stream_error(&self) {
+        self.stream_error.store(false, Ordering::SeqCst);
     }
 
     /// 替换电平 atomic（在 start 前调用）；让 pipeline 的电平 Arc 与采集回调共享。

@@ -252,12 +252,20 @@ export const ipcApi: AppApi = {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     listen<DomainEvent>("talksage://event", (e) => handler(e.payload))
-      .then((fn) => {
+      .then(async (fn) => {
         if (cancelled) {
           // 卸载发生在 listen 注册完成之前：立即取消，避免监听器残留（双收事件）
           fn();
-        } else {
-          unlisten = fn;
+          return;
+        }
+        unlisten = fn;
+        // 先订阅、后取快照。反过来会丢掉订阅前那一瞬间的新段。
+        // WebView 被锁屏重建后，这里把还在进行的那场监听补回界面。
+        try {
+          const snap = await invoke<DomainEvent | null>("listen_snapshot");
+          if (!cancelled && snap) handler(snap);
+        } catch (err) {
+          console.error("恢复监听状态失败:", err);
         }
       })
       .catch((err) => console.error("failed to listen events:", err));

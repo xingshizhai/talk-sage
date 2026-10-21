@@ -135,6 +135,25 @@ impl RunningListen {
         self.runtime.is_paused()
     }
 
+    /// 管道线程已经自己退出。会话槽还占着，但循环已经结束。
+    pub fn has_exited(&self) -> bool {
+        self.runtime.has_exited()
+    }
+
+    /// 给重连后的界面：当前转写，外加这场监听已经走了多久。
+    pub fn snapshot_event(&self) -> DomainEvent {
+        let snap = self.snapshot();
+        DomainEvent::Snapshot {
+            revision: snap.revision,
+            committed: snap.committed,
+            hypothesis: snap.hypothesis,
+            processed_until_sample: snap.processed_until_sample,
+            committed_until_sample: snap.committed_until_sample,
+            stage: snap.stage,
+            elapsed_ms: self.runtime.elapsed_ms(),
+        }
+    }
+
     /// 手动触发要点聚合：在后台线程直接调用 LLM 处理当前 buffer 并发射事件。
     /// 返回诊断消息供日志记录。
     pub fn flush_key_points(&self) -> String {

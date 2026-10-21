@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 
@@ -199,6 +199,41 @@ pub struct StreamConfig {
 const LOOP_BLOCK_WARN_MS: u64 = 2000;
 /// 采集侧超过这个时长没有新帧就告警 —— 那是设备断流，不是消费端卡住。
 const CAPTURE_STALL_WARN_MS: u64 = 1500;
+/// 麦克风超过这个时长没有新帧，就关掉旧流再打开。锁屏会使 WASAPI 设备失效，
+/// 回调停了但通道还在，会话不该因此结束。
+const CAPTURE_RECOVER_AFTER_MS: u64 = 2_000;
+/// 设备还没回来时，不要每一秒都去打开一次麦克风。
+const CAPTURE_RECOVER_INTERVAL: Duration = Duration::from_secs(2);
+
+enum CaptureRecover {
+    /// 这条流没有要处理的断流。调用方仍可按原逻辑记断流警告。
+    Idle,
+    /// 已经在重试，还没到下一次。不要再刷断流警告。
+    Backoff,
+    /// 麦克风重新打开了，会话没换。
+    Restored,
+    /// 设备还没回来。失败原因已经记过日志。
+    Failed,
+}
+
+/// 麦克风是否到了该重新打开的时候。
+///
+/// 流回调报错时立刻可以试（仍受间隔限制）。没报错但已经断流，也试一次：
+/// 有的驱动拆掉设备时不调用错误回调。系统回环不走这里，安静时它本来就可能没有数据包。
+fn capture_recover_due(idle_ms: Option<u64>, since_attempt: Option<Duration>, stream_error: bool) -> bool {
+    if !stream_error {
+        let Some(idle) = idle_ms else {
+            return false;
+        };
+        if idle < CAPTURE_RECOVER_AFTER_MS {
+            return false;
+        }
+    }
+    match since_attempt {
+        Some(elapsed) => elapsed >= CAPTURE_RECOVER_INTERVAL,
+        None => true,
+    }
+}
 
 /// 实时管道配置。
 #[derive(Clone)]
@@ -300,6 +335,11 @@ impl LivePipeline {
 
     pub fn is_paused(&self) -> bool {
         self.runtime.paused.load(Ordering::Acquire)
+    }
+
+    /// 管道线程已经退出，但 `stop()` 还没把句柄收走。
+    pub fn has_exited(&self) -> bool {
+        self.handle.as_ref().is_some_and(|handle| handle.is_finished())
     }
 
     pub fn set_playback_speed(&self, speed: f32) {
@@ -630,6 +670,10 @@ struct StreamWorker {
     input_gain_db: f32,
     auto_gain: bool,
     hub: Option<AudioHub>,
+    /// 上次尝试重新打开麦克风的时刻。用来把锁屏期间的重试压到每 2 秒一次。
+    last_capture_recover: Option<Instant>,
+    /// 连续重新打开失败的次数。第一次记警告，后面改成调试，避免锁屏几分钟刷满日志。
+    recover_failures: u32,
     rx_audio: Option<mpsc::Receiver<Vec<f32>>>,
     file_chunks: Option<std::vec::IntoIter<Vec<f32>>>,
     in_speech: bool,
@@ -824,6 +868,8 @@ impl StreamWorker {
             input_gain_db,
             auto_gain,
             hub: None,
+            last_capture_recover: None,
+            recover_failures: 0,
             rx_audio: None,
             file_chunks,
             in_speech: false,
@@ -1341,6 +1387,45 @@ impl StreamWorker {
         0
     }
 
+    /// 麦克风断流后重新打开同一条采集通道。成功或失败都不结束这条流。
+    fn recover_capture(&mut self) -> CaptureRecover {
+        if self.input_kind != InputKind::Mic {
+            return CaptureRecover::Idle;
+        }
+        let stream_error = self.hub.as_ref().is_some_and(|hub| hub.stream_failed());
+        let idle = self.since_last_capture_ms();
+        let since_attempt = self.last_capture_recover.map(|at| at.elapsed());
+        if !capture_recover_due(idle, since_attempt, stream_error) {
+            let stalled = stream_error || idle.is_some_and(|ms| ms >= CAPTURE_RECOVER_AFTER_MS);
+            return if stalled { CaptureRecover::Backoff } else { CaptureRecover::Idle };
+        }
+        self.last_capture_recover = Some(Instant::now());
+        let Some(hub) = self.hub.as_mut() else {
+            return CaptureRecover::Idle;
+        };
+        hub.stop();
+        match hub.start(self.mic_device.as_deref()) {
+            Ok(()) => {
+                hub.clear_stream_error();
+                self.recover_failures = 0;
+                CaptureRecover::Restored
+            }
+            Err(error) => {
+                self.recover_failures = self.recover_failures.saturating_add(1);
+                if self.recover_failures == 1 {
+                    log::warn!("流[{}] 麦克风断流，重新打开失败: {error}", self.speaker_label);
+                } else {
+                    log::debug!(
+                        "流[{}] 麦克风仍不可用（第 {} 次）: {error}",
+                        self.speaker_label,
+                        self.recover_failures
+                    );
+                }
+                CaptureRecover::Failed
+            }
+        }
+    }
+
     /// 距上次采集入队的毫秒数。用来区分两种同样表现为"界面冻住"的故障：
     /// 采集还在推数据 → 是消费端（ASR 推理）卡了；采集也停了 → 是设备断流。
     fn since_last_capture_ms(&self) -> Option<u64> {
@@ -1729,14 +1814,27 @@ fn run_loop(
         // 采集断流巡检：每秒看一次。采集停了 → 设备侧问题；采集在推而这里迟迟
         // 没轮到 → 是消费端（ASR 推理）卡住。两者界面表现一样，日志必须分得开。
         if last_stall_check.elapsed() >= Duration::from_secs(1) {
-            for worker in workers.iter() {
-                if let Some(idle_ms) = worker.since_last_capture_ms() {
-                    if idle_ms >= CAPTURE_STALL_WARN_MS {
-                        log::warn!(
-                            "流[{}] 采集断流 {}ms（设备侧无数据，非 ASR 阻塞）",
+            for worker in workers.iter_mut() {
+                let idle_ms = worker.since_last_capture_ms();
+                match worker.recover_capture() {
+                    CaptureRecover::Restored => {
+                        log::info!(
+                            "流[{}] 麦克风已重新打开（断流 {}ms），仍是这一场监听",
                             worker.speaker_label,
-                            idle_ms
+                            idle_ms.unwrap_or(0)
                         );
+                    }
+                    CaptureRecover::Failed | CaptureRecover::Backoff => {}
+                    CaptureRecover::Idle => {
+                        if let Some(idle_ms) = idle_ms {
+                            if idle_ms >= CAPTURE_STALL_WARN_MS {
+                                log::warn!(
+                                    "流[{}] 采集断流 {}ms（设备侧无数据，非 ASR 阻塞）",
+                                    worker.speaker_label,
+                                    idle_ms
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -1892,6 +1990,25 @@ fn make_on_final(
 #[cfg(test)]
 mod pipeline_config_tests {
     use super::*;
+
+    #[test]
+    fn capture_recover_waits_for_a_real_mic_stall_and_then_backs_off() {
+        assert!(!capture_recover_due(None, None, false));
+        assert!(!capture_recover_due(Some(CAPTURE_STALL_WARN_MS), None, false));
+        assert!(capture_recover_due(Some(CAPTURE_RECOVER_AFTER_MS), None, false));
+        assert!(!capture_recover_due(
+            Some(CAPTURE_RECOVER_AFTER_MS),
+            Some(Duration::from_secs(1)),
+            false
+        ));
+        assert!(capture_recover_due(
+            Some(CAPTURE_RECOVER_AFTER_MS),
+            Some(CAPTURE_RECOVER_INTERVAL),
+            false
+        ));
+        assert!(capture_recover_due(None, None, true));
+        assert!(!capture_recover_due(None, Some(Duration::from_millis(500)), true));
+    }
 
     #[test]
     fn pipeline_config_has_aliyun_fields() {

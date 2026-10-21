@@ -300,6 +300,8 @@ export type DomainEvent =
       processed_until_sample?: number;
       committed_until_sample?: number;
       stage: string;
+      /** 这场监听已累计的有效时长（毫秒，暂停不计入）。重连后续上，避免从 0 看起来像新的一场。 */
+      elapsed_ms?: number;
     };
 
 /** 会话指标（会中实时；借鉴 Call.md conversation-metrics）。 */

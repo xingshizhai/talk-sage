@@ -371,6 +371,16 @@ fn ping(app: tauri::AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// 当前这场监听的快照。没有监听时返回 null。
+///
+/// 桌面 WebView 在锁屏、休眠或显卡进程退出后会被重建，React 状态回到
+/// 「开始监听」。订阅事件之后立刻拉这份快照，把同一场的阶段、转写和已计时长补回来。
+#[tauri::command]
+fn listen_snapshot(state: tauri::State<'_, AppState>) -> Result<Option<DomainEvent>, String> {
+    let guard = state.running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+    Ok(guard.as_ref().map(RunningListen::snapshot_event))
+}
+
 /// 开始实时监听（麦克风 → VAD → ASR → 事件推送）。
 ///
 /// async + spawn_blocking：`service.start` 要加载模型/装配管道，可能耗时数秒；
@@ -395,8 +405,19 @@ async fn start_listen(
         _ => (AudioInput::Mic(None), ClientCapture::Auto),
     };
     tauri::async_runtime::spawn_blocking(move || {
-        // 检查 + start + 写入整体持锁，语义与同步版本一致；但这是在阻塞线程池
-        // 里，不占主线程，窗口照常响应。
+        // 管道已经自己退出时，槽里还留着那场会话。先收尾，用户这次点击才能真正开始。
+        // 管道还活着就拒绝，避免锁屏后界面误点「开始」又开一场。
+        let stale = {
+            let mut guard = running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
+            if guard.as_ref().is_some_and(|existing| !existing.has_exited()) {
+                return Err("已在监听中".into());
+            }
+            guard.take()
+        };
+        if let Some(stale) = stale {
+            log::warn!("上次监听的管道已经退出，先结束那场会话");
+            service.finish(stale).map_err(|e| e.to_string())?;
+        }
         let mut guard = running.lock().map_err(|_| "pipeline 锁失败".to_string())?;
         if guard.is_some() {
             return Err("已在监听中".into());
@@ -1256,6 +1277,7 @@ pub fn run() {
             test_proxy,
             save_config,
             ping,
+            listen_snapshot,
             start_listen,
             list_knowledge_documents,
             stop_listen,

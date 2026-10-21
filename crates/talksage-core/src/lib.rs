@@ -151,6 +151,10 @@ pub enum DomainEvent {
         #[serde(default)]
         committed_until_sample: u64,
         stage: StatusStage,
+        /// 本次监听已累计的有效时长（毫秒，暂停不计入）。
+        /// 界面被重建后续上这个数，避免看起来像新开了一场。旧客户端可忽略。
+        #[serde(default)]
+        elapsed_ms: u64,
     },
     /// 术语解释结果（骨架 → 最终，按 result_id 原地更新）。
     Term {

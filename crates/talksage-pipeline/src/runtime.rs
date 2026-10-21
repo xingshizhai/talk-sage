@@ -3,7 +3,7 @@
 //! 适配器不得直接 `LivePipeline::new`；import / bench / listen 经此边界。
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 
@@ -11,11 +11,66 @@ use talksage_core::{DomainEvent, SessionSnapshot, StatusStage, TranscriptState};
 
 use crate::{EventSink, LivePipeline, LivePipelineConfig};
 
+/// 监听计时：从第一次进入录音/导入起算，暂停的那段不计入。
+///
+/// 锁屏或 WebView 重建后，界面用这个时长续上，而不是从 0 再计一场。
+struct ListenClock {
+    stage: StatusStage,
+    started_at_ms: u64,
+    pause_accum_ms: u64,
+    paused_since_ms: Option<u64>,
+}
+
+impl ListenClock {
+    fn new() -> Self {
+        Self {
+            stage: StatusStage::Starting,
+            started_at_ms: 0,
+            pause_accum_ms: 0,
+            paused_since_ms: None,
+        }
+    }
+
+    fn observe(&mut self, stage: StatusStage, now_ms: u64) {
+        match stage {
+            StatusStage::Recording | StatusStage::Importing => {
+                if self.started_at_ms == 0 {
+                    self.started_at_ms = now_ms;
+                }
+                if let Some(since) = self.paused_since_ms.take() {
+                    self.pause_accum_ms = self.pause_accum_ms.saturating_add(now_ms.saturating_sub(since));
+                }
+            }
+            StatusStage::Paused => {
+                if self.started_at_ms == 0 {
+                    self.started_at_ms = now_ms;
+                }
+                if self.paused_since_ms.is_none() {
+                    self.paused_since_ms = Some(now_ms);
+                }
+            }
+            StatusStage::Starting | StatusStage::AsrLoading | StatusStage::AsrReady | StatusStage::Idle => {}
+        }
+        self.stage = stage;
+    }
+
+    fn elapsed_ms(&self, now_ms: u64) -> u64 {
+        if self.started_at_ms == 0 {
+            return 0;
+        }
+        let open_pause = self.paused_since_ms.map(|since| now_ms.saturating_sub(since)).unwrap_or(0);
+        now_ms
+            .saturating_sub(self.started_at_ms)
+            .saturating_sub(self.pause_accum_ms)
+            .saturating_sub(open_pause)
+    }
+}
+
 /// 统一运行边界：内部仍是现有 `LivePipeline` 线程模型。
 pub struct SessionRuntime {
     pipeline: LivePipeline,
     transcript: Arc<Mutex<TranscriptState>>,
-    stage: Arc<Mutex<StatusStage>>,
+    clock: Arc<Mutex<ListenClock>>,
 }
 
 impl SessionRuntime {
@@ -23,16 +78,16 @@ impl SessionRuntime {
         Self {
             pipeline: LivePipeline::new(cfg),
             transcript: Arc::new(Mutex::new(TranscriptState::default())),
-            stage: Arc::new(Mutex::new(StatusStage::Starting)),
+            clock: Arc::new(Mutex::new(ListenClock::new())),
         }
     }
 
     pub fn start(&mut self, emit: EventSink) -> Result<()> {
         let transcript = self.transcript.clone();
-        let stage = self.stage.clone();
+        let clock = self.clock.clone();
         let wrap: EventSink = Arc::new(move |ev: DomainEvent| {
             if let DomainEvent::Status { stage: s, .. } = &ev {
-                *stage.lock().unwrap() = *s;
+                clock.lock().unwrap().observe(*s, wall_ms());
             }
             let stamped = if matches!(&ev, DomainEvent::Segment { .. }) {
                 let mut t = transcript.lock().unwrap();
@@ -80,10 +135,28 @@ impl SessionRuntime {
         self.pipeline.is_paused()
     }
 
+    /// 管道线程已经自己退出（例如采集通道断开）。句柄还在，但循环已经结束。
+    pub fn has_exited(&self) -> bool {
+        self.pipeline.has_exited()
+    }
+
     pub fn snapshot(&self) -> SessionSnapshot {
-        let stage = *self.stage.lock().unwrap();
+        let stage = self.clock.lock().unwrap().stage;
         self.transcript.lock().unwrap().snapshot(stage)
     }
+
+    /// 本次监听的有效时长。暂停中的时间不计入。
+    pub fn elapsed_ms(&self) -> u64 {
+        let clock = self.clock.lock().unwrap();
+        clock.elapsed_ms(wall_ms())
+    }
+}
+
+fn wall_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn stamp_revision(ev: DomainEvent, revision: u64) -> DomainEvent {
@@ -119,10 +192,10 @@ fn stamp_revision(ev: DomainEvent, revision: u64) -> DomainEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::stamp_revision;
+    use super::{stamp_revision, ListenClock};
     use crate::RuntimeParams;
     use std::sync::atomic::Ordering;
-    use talksage_core::DomainEvent;
+    use talksage_core::{DomainEvent, StatusStage};
 
     #[test]
     fn stamps_revision_on_segment() {
@@ -144,6 +217,17 @@ mod tests {
             DomainEvent::Segment { revision, .. } => assert_eq!(revision, 7),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn listen_clock_skips_paused_time() {
+        let mut clock = ListenClock::new();
+        clock.observe(StatusStage::Recording, 1_000);
+        assert_eq!(clock.elapsed_ms(6_000), 5_000);
+        clock.observe(StatusStage::Paused, 6_000);
+        assert_eq!(clock.elapsed_ms(9_000), 5_000);
+        clock.observe(StatusStage::Recording, 9_000);
+        assert_eq!(clock.elapsed_ms(11_000), 7_000);
     }
 
     #[test]

@@ -1522,16 +1522,8 @@ async fn handle_ws(mut socket: WebSocket, state: ServerState) {
     // —— 而前端没有任何补拉手段。先订阅的代价是那段窗口的事件会被补发一次，
     // 由客户端的 revision 门槛去重（见 web/src/lib/transcript.ts）。
     let mut rx = state.events.subscribe();
-    let snap = state.running.lock().ok().and_then(|g| g.as_ref().map(|r| r.snapshot()));
-    if let Some(s) = snap {
-        let ev = talksage_core::DomainEvent::Snapshot {
-            revision: s.revision,
-            committed: s.committed,
-            hypothesis: s.hypothesis,
-            processed_until_sample: s.processed_until_sample,
-            committed_until_sample: s.committed_until_sample,
-            stage: s.stage,
-        };
+    let snap = state.running.lock().ok().and_then(|g| g.as_ref().map(|r| r.snapshot_event()));
+    if let Some(ev) = snap {
         if let Ok(text) = serde_json::to_string(&ev) {
             if socket.send(Message::Text(text.into())).await.is_err() {
                 return;
