@@ -1,4 +1,4 @@
-// 右栏：术语卡片（可展开）+ 知识库材料包（钉住笔记，可选自动命中）。支持整体折叠（偏好持久化）。
+// 右栏：专业知识卡片 + 知识库材料包（钉住笔记，可选自动命中）。支持整体折叠（偏好持久化）。
 
 import { useEffect, useRef, useState } from "react";
 import type { BriefItem } from "../sections/BriefSection";
@@ -18,8 +18,6 @@ export default function AsidePanel({
   knowledgeEnabled,
   knowledgeDocs,
   pinnedPaths,
-  expandedTerms,
-  onToggleTerm,
   dismissedTermKeys,
   onDeleteTerm,
   onAskTerm,
@@ -32,11 +30,9 @@ export default function AsidePanel({
   knowledgeEnabled: boolean;
   knowledgeDocs: KnowledgeDoc[];
   pinnedPaths: string[];
-  expandedTerms: Record<string, boolean>;
-  onToggleTerm: (resultId: string) => void;
   dismissedTermKeys: ReadonlySet<string>;
   onDeleteTerm: (term: string) => void;
-  /** 手动查词：交给 App 调后端，结果通过 Term 事件回到列表。 */
+  /** 当场讲解一个知识点：交给 App 调后端，结果通过 Term 事件回到列表。 */
   onAskTerm: (term: string) => Promise<void>;
 }) {
   const pinnedNotes = pinnedDocuments(knowledgeDocs, pinnedPaths);
@@ -102,7 +98,7 @@ export default function AsidePanel({
             writingMode: "vertical-rl",
           }}
         >
-          « 专业术语 / 知识库
+          « 专业知识 / 知识库
         </button>
       </aside>
     );
@@ -145,50 +141,38 @@ export default function AsidePanel({
       <section style={{ background: "var(--card-bg)", border: "var(--card-border)", borderRadius: "var(--card-radius)", boxShadow: "var(--card-shadow)", overflow: "hidden", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px var(--pad)", borderBottom: "1px solid var(--border)" }}>
           <span style={{ width: 6, height: 6, borderRadius: 2, background: "var(--term)" }} />
-          <b style={{ fontSize: 13 }}>专业术语</b>
+          <b style={{ fontSize: 13 }}>专业知识</b>
           <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)", fontFamily: "monospace" }}>{termRows.length}</span>
         </div>
         <div ref={termListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
           {termRows.length === 0 && (
             <div style={{ color: "var(--muted)", fontSize: 13 }}>
-              出现行业术语或缩写时会在这里解释；常识词不收录
+              会话里出现没听懂的术语或知识点时，会整理在这里；也可以自己输入一个来查
             </div>
           )}
           {termRows.map((t) => {
-            const expanded = !!expandedTerms[t.resultId];
             const { term, gloss } = t;
             return (
               <div
                 key={t.resultId}
-                onClick={() => onToggleTerm(t.resultId)}
-                style={{ padding: "9px 11px", borderRadius: 10, cursor: "pointer", background: "var(--surface-2)", border: "1px solid var(--border)" }}
+                style={{ padding: "9px 11px", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)" }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                  <b style={{ fontSize: 13, fontFamily: "monospace", color: "var(--term)", whiteSpace: "nowrap" }}>{term}</b>
-                  {/* 展开后解释在下面完整显示，这里再截一遍就是同一句话读两遍 */}
-                  {!expanded && (
-                    <span style={{ fontSize: 11, color: "var(--text-2)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {gloss}
-                    </span>
-                  )}
-                  <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)" }}>{expanded ? "▾" : "▸"}</span>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 8, minWidth: 0 }}>
+                  <b style={{ fontSize: 13, color: "var(--term)", lineHeight: 1.45 }}>{term}</b>
                   {t.isFinal && (
                     <button
                       type="button"
-                      title={`在本次会话中删除并屏蔽“${term}”`}
-                      aria-label={`删除术语 ${term}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteTerm(term);
-                      }}
-                      style={{ border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", padding: "1px 3px", lineHeight: 1 }}
+                      title={`在本次会话中不再显示“${term}”`}
+                      aria-label={`删除知识点 ${term}`}
+                      onClick={() => onDeleteTerm(term)}
+                      style={{ marginLeft: "auto", border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", padding: "1px 3px", lineHeight: 1 }}
                     >
                       ×
                     </button>
                   )}
                 </div>
-                {expanded && (
-                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)", fontSize: 13, lineHeight: 1.6, color: "var(--text)", wordBreak: "break-word" }}>
+                {(gloss || !t.isFinal) && (
+                  <div style={{ marginTop: 6, fontSize: 13, lineHeight: 1.6, color: t.isFinal ? "var(--text)" : "var(--text-2)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                     {gloss || t.raw}
                   </div>
                 )}
@@ -208,7 +192,7 @@ export default function AsidePanel({
               <input
                 autoFocus
                 value={askDraft}
-                maxLength={40}
+                maxLength={80}
                 disabled={askBusy}
                 onChange={(e) => setAskDraft(e.target.value)}
                 onKeyDown={(e) => {
@@ -217,7 +201,7 @@ export default function AsidePanel({
                     setAskError("");
                   }
                 }}
-                placeholder="输入要查的词，回车提交"
+                placeholder="例如：弱网络数据传输"
                 style={{
                   flex: 1,
                   minWidth: 0,
@@ -230,7 +214,7 @@ export default function AsidePanel({
                 }}
               />
               <button type="submit" disabled={askBusy || !askDraft.trim()} style={{ fontSize: 11, flexShrink: 0 }}>
-                {askBusy ? "查询中…" : "查询"}
+                {askBusy ? "讲解中…" : "讲解"}
               </button>
             </form>
           ) : (
@@ -240,7 +224,7 @@ export default function AsidePanel({
                 setAskDraft("");
                 setAskError("");
               }}
-              title="手动查询一个术语"
+              title="讲解一个没听懂的知识点"
               style={{
                 padding: "9px 11px",
                 borderRadius: 10,
@@ -251,7 +235,7 @@ export default function AsidePanel({
                 fontSize: 12,
               }}
             >
-              ＋ 点这里手动查一个词…
+              ＋ 输入一个没听懂的知识点…
             </div>
           )}
           {askError && <div style={{ fontSize: 11, color: "var(--danger)", wordBreak: "break-word" }}>{askError}</div>}
@@ -268,13 +252,13 @@ export default function AsidePanel({
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 9 }}>
           {!knowledgeEnabled && <div style={{ color: "var(--muted)", fontSize: 13 }}>请先在“知识管理”中启用知识库</div>}
           {knowledgeEnabled && !listening && briefs.length === 0 && (
-            <div style={{ color: "var(--muted)", fontSize: 13 }}>开始实时转写后，将根据要点、专业术语和明确问题查询知识库。{pinnedNotes.length > 0 ? ` 本场材料包 ${pinnedNotes.length} 篇。` : ""}</div>
+            <div style={{ color: "var(--muted)", fontSize: 13 }}>开始实时转写后，将根据要点、专业知识和明确问题查询知识库。{pinnedNotes.length > 0 ? ` 本场材料包 ${pinnedNotes.length} 篇。` : ""}</div>
           )}
           {knowledgeEnabled && listening && briefs.length === 0 && (
-            <div style={{ color: "var(--muted)", fontSize: 13 }}>等待要点、专业术语或明确问题…</div>
+            <div style={{ color: "var(--muted)", fontSize: 13 }}>等待要点、专业知识或明确问题…</div>
           )}
           {briefs.map((item) => {
-            const triggerLabel = { key_point: "要点", term: "术语", question: "问题", manual: "手动" }[item.trigger];
+            const triggerLabel = { key_point: "要点", term: "专业知识", question: "问题", manual: "手动" }[item.trigger];
             const scopeLabel = item.scope === "pinned" ? "材料包" : item.scope === "pinned_then_all" ? "材料包 → 全库" : "全库";
             return (
               <div key={item.queryId} style={{ padding: "9px 10px", borderRadius: 9, background: "var(--surface-2)", border: "1px solid var(--border)" }}>

@@ -103,8 +103,7 @@ export default function App() {
   // done = 已收到后端回执（msg 才是最终结论，此前只是"整理中…"）
   const [flushRecords, setFlushRecords] = useState<readonly { time: string; pointsBefore: number; msg: string; done?: boolean }[]>([]);
   const [terms, setTerms] = useState<TermItem[]>([]);
-  const [expandedTerms, setExpandedTerms] = useState<Record<string, boolean>>({});
-  // 用户在当前会话主动删除的术语；后续其他插件再返回同一词也不显示。
+  // 用户在当前会话主动删掉的知识点；后续再返回同一条也不显示。
   const [dismissedTermKeys, setDismissedTermKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [briefs, setBriefs] = useState<BriefItem[]>([]);
   const [kbDocs, setKbDocs] = useState<KnowledgeDoc[]>([]);
@@ -705,7 +704,6 @@ export default function App() {
     setDismissedPointKeys(new Set());
     setFlushRecords([]);
     setTerms([]);
-    setExpandedTerms({});
     setDismissedTermKeys(new Set());
     setBriefs([]);
     setRawEvents([]);
@@ -1275,8 +1273,6 @@ export default function App() {
           knowledgeEnabled={knowledgeSourceReady(config)}
           knowledgeDocs={kbDocs}
           pinnedPaths={pinnedNotePaths}
-          expandedTerms={expandedTerms}
-          onToggleTerm={(id) => setExpandedTerms((prev) => ({ ...prev, [id]: !prev[id] }))}
           dismissedTermKeys={dismissedTermKeys}
           onDeleteTerm={(term) => {
             const key = termKey(term);

@@ -623,7 +623,7 @@ export interface AppApi {
   searchSessions(query: string): Promise<SegmentHit[]>;
   /** 历史：会话详情。 */
   getSession(id: number): Promise<SessionDetail>;
-  /** 专业术语：手动查询一个词（用户点名要问的，不做专业度筛选）。 */
+  /** 专业知识：当场讲解一个知识点（用户点名要问的，不做专业度筛选）。 */
   explainTerm(term: string): Promise<string>;
   /** AI 助手：话题列表（最近活跃在前）。 */
   listChatThreads(): Promise<ChatThread[]>;

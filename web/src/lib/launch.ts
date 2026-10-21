@@ -21,7 +21,7 @@ export interface SceneLaunchOptions {
 
 export const FEATURE_LABELS: Record<FeatureId, string> = {
   key_point_llm: "要点",
-  term_explainer: "术语解释",
+  term_explainer: "专业知识",
   translator: "翻译",
   tasks: "按人汇总",
 };

@@ -136,10 +136,10 @@ export function fieldLabel(key: string): string {
     min_ms: "最短时长（ms）",
     min_score: "最低匹配分",
     include_user: "无客户流时检索主讲人",
-    llm_extract: "LLM 自动识别术语",
+    llm_extract: "自动整理会话里的专业知识",
     min_chars: "触发最短字数",
-    user_terms: "自定义关注词（逗号分隔）",
-    threshold: "术语专业门限（低=也收常见词，高=只收高级术语）",
+    user_terms: "关注的知识点（逗号分隔，出现就讲解）",
+    threshold: "专业门限（低=也收常见概念，高=只收很专业的）",
     batch_size: "批量积累段数",
     tail_timeout_ms: "末段超时（ms）",
   };

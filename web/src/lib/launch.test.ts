@@ -11,7 +11,7 @@ import {
 } from "./launch";
 
 describe("listen launch", () => {
-  it("多人会议默认可开要点和术语解释，并按人汇总，不带翻译", () => {
+  it("多人会议默认可开要点和专业知识，并按人汇总，不带翻译", () => {
     const choice = defaultSceneChoice("meeting");
     const offered = offeredPlugins("meeting");
     expect(offered).toEqual(["key_point_llm", "term_explainer"]);
@@ -61,7 +61,7 @@ describe("listen launch", () => {
   });
 
   it("摘要只写本次功能", () => {
-    expect(launchSummary(defaultSceneChoice("meeting"), offeredPlugins("meeting"))).toBe("要点、术语解释、按人汇总");
+    expect(launchSummary(defaultSceneChoice("meeting"), offeredPlugins("meeting"))).toBe("要点、专业知识、按人汇总");
     expect(launchSummary(defaultSceneChoice("dictation"), offeredPlugins("dictation"))).toBe("要点");
   });
 });

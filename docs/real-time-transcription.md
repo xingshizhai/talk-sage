@@ -46,7 +46,7 @@ ref 读最新状态，避免闭包过期）。`DomainEvent` 在 `crates/talksage
 | `segment` | 两条流的 worker（partial + final） | `TranscriptAccumulator` |
 | `level` | 独立电平线程（100ms 节流） | 左侧电平表 |
 | `key_point` / `key_point_flush` | `key_point_llm` 插件 | 要点卡片 / 整理回执 |
-| `term` | `term_explainer` 插件 | 右侧术语卡片 |
+| `term` | `term_explainer` 插件 | 右侧专业知识卡片 |
 | `translation` | `translator` 插件 | 转写行下方译文 |
 | `knowledge_query` | `LiveKnowledgeRetriever` | 右侧知识查询记录 |
 | `metrics` / `nudge` | `conversation_metrics` 插件 | 指标条 / 会中提示 |
@@ -263,7 +263,7 @@ Windows 锁屏会使 WASAPI 设备失效。麦克风回调停止后，管道大�
 4. **骨架同步、慢路径异步**：`skeleton()` 是本地即时（无 HTTP），`run()` 交给会话级
    `PluginExecutor`。
 5. **队列满时回调插件**：`submit_rejected()` 让插件撤销已经发出的骨架
-   （例如 `term_explainer` 收掉"专业术语识别中…"卡片），否则界面会永远停在中间态。
+   （例如 `term_explainer` 收掉「正在整理专业知识…」卡片），否则界面会永远停在中间态。
 
 ### 3.8 说话人归属
 
@@ -422,7 +422,7 @@ Windows 锁屏会使 WASAPI 设备失效。麦克风回调停止后，管道大�
 | 能力 | 插件 | 触发 | LLM 成本 |
 |---|---|---|---|
 | 要点聚合 | `key_point_llm` | 缓冲区满 `batch_size`（场景决定）或尾部超时或手动「立即整理」 | 每批次 1 次 |
-| 术语解释 | `term_explainer` | 用户词命中（不受冷却）或 LLM 主动提取（受冷却 + 最短字数 + 专业度门限） | 每次触发 1 次 |
+| 专业知识 | `term_explainer` | 用户关注的知识点命中（不受冷却），或 LLM 从会话里整理术语和知识点（受冷却 + 最短字数 + 专业度门限）；也可以在右栏输入一个没听懂的知识点当场讲解 | 自动整理每次触发 1 次；手动讲解另计 |
 | 实时翻译 | `translator` | 每个 final 段（方向由场景 translation_mode + 通道决定） | 每段 1 次（双向每流 1 次） |
 | 会话指标 | `conversation_metrics` | 每个 final 段（纯本地统计） | 无 |
 | 会中提示 | 同上（`nudge_enabled`，默认关） | 规则 + 2 分钟冷却 | 无 |

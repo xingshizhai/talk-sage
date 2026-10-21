@@ -23,6 +23,20 @@ describe("toTermRows", () => {
     expect(rows[0].gloss).toBe("New Product Introduction，新产品导入");
   });
 
+  it("把知识点后面的关键和接话并进同一张卡", () => {
+    const rows = toTermRows([
+      {
+        resultId: "manual",
+        content: "弱网络数据传输：在不稳定链路上仍把数据送达。\n关键：重传、断点续传\n接话：可以问现在的丢包率",
+        isFinal: true,
+      },
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].term).toBe("弱网络数据传输");
+    expect(rows[0].gloss).toContain("关键：重传、断点续传");
+    expect(rows[0].gloss).toContain("接话：可以问现在的丢包率");
+  });
+
   it("拆不出分隔符时整行当作术语，不丢内容", () => {
     const rows = toTermRows([{ resultId: "t", content: "专业术语识别中…", isFinal: false }]);
     expect(rows).toHaveLength(1);

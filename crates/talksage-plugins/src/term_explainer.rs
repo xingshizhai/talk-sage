@@ -1,4 +1,4 @@
-//! 术语解释插件：从转写文本中识别专业术语并用 LLM 解释。
+//! 专业知识插件：从转写里整理术语和知识点，并按用户点名讲解一个知识点。
 //!
 //! 两种触发模式（可同时生效）：
 //! 1. `llm_extract`（默认开）：LLM 自动识别段落中的专业术语/行业词汇
@@ -66,7 +66,7 @@ pub fn threshold_label(threshold: &str) -> &'static str {
 }
 
 /// 单段最多保留几条，避免一次刷屏。
-const MAX_TERMS: usize = 2;
+const MAX_TERMS: usize = 3;
 
 /// 模型经常一边解释一边自己承认"这不是专业术语"。这些词出现在解释里，
 /// 说明它自己也知道不该收 —— 直接丢掉，比再问一次便宜。
@@ -129,13 +129,14 @@ pub fn parse_terms(raw: &str, pinned: &[String], min_level: u8) -> Vec<Extracted
     out
 }
 
-/// 手动查询单个术语：用户在界面上点名要问的词，不做专业度筛选。
+/// 手动讲解一个知识点：用户在界面上点名要问的，不做专业度筛选。
 ///
-/// 与自动提取相反 —— 那边宁缺毋滥，这边用户既然问了就必须给答案。
+/// 与自动整理相反 —— 那边宁缺毋滥，这边用户既然问了就必须讲清楚，方便接着和客户谈。
+/// 保留模型给出的后续行（关键点、接话），不要只留第一句定义。
 pub fn lookup_term(llm: &dyn talksage_llm::LLMProvider, term: &str, context: &str) -> anyhow::Result<String> {
     let term = term.trim();
     if term.is_empty() {
-        anyhow::bail!("术语不能为空");
+        anyhow::bail!("知识点不能为空");
     }
     let context_section = if context.trim().is_empty() {
         String::new()
@@ -151,12 +152,11 @@ pub fn lookup_term(llm: &dyn talksage_llm::LLMProvider, term: &str, context: &st
     if answer.is_empty() {
         anyhow::bail!("LLM 无输出");
     }
-    // 模型有时只回解释、不带词头；补上词头，界面才能拆成「术语 + 解释」两栏
     let first_line = answer.lines().find(|l| !l.trim().is_empty()).unwrap_or(answer).trim();
-    if first_line.contains('：') || first_line.contains(':') {
-        Ok(first_line.to_string())
+    if first_line.contains('：') || first_line.contains(':') || first_line.contains(term) {
+        Ok(answer.to_string())
     } else {
-        Ok(format!("{term}：{first_line}"))
+        Ok(format!("{term}：{answer}"))
     }
 }
 
@@ -281,7 +281,7 @@ impl SegmentObserver for TermExplainerPlugin {
         let content = if !pinned.is_empty() {
             format!("{} = …", pinned.join("、"))
         } else {
-            "专业术语识别中…".to_string()
+            "正在整理专业知识…".to_string()
         };
         vec![DomainEvent::Term {
             result_id,
@@ -358,8 +358,8 @@ impl crate::registry::Plugin for TermExplainerPluginDef {
     fn descriptor(&self) -> &'static crate::PluginDescriptor {
         static D: crate::PluginDescriptor = crate::PluginDescriptor {
             id: "term_explainer",
-            label: "专业术语",
-            description: "识别行业术语/缩写并解释，专业门限可调（低/中/高，高只收高级术语）；常识词不收。支持用户自定义关注词",
+            label: "专业知识",
+            description: "从会话里整理术语和知识点，并可以当场讲清一个没听懂的知识点；专业门限可调，常识不收",
             category: crate::PluginCategory::Analysis,
             phase: crate::PluginPhase::Observer,
             capabilities: &[crate::PluginCapability::Llm],
@@ -552,9 +552,9 @@ MOQ | 5 | 最小起订量，供应商单次接单的最低数量门槛。";
 灰度发布 | 4 | 新版本先放给小比例用户观察。
 对赌协议 | 5 | 业绩未达标时的补偿条款。";
 
-        // 低门限：3/4/5 全收（最多两条）
+        // 低门限：3/4/5 全收
         let low = parse_terms(raw, &[], threshold_min_level("low"));
-        assert_eq!(low.len(), 2);
+        assert_eq!(low.len(), 3);
         assert_eq!(low[0].level, 3, "低门限应收大众媒体常见词");
 
         // 中门限（默认）：4、5 收，3 丢弃
@@ -572,13 +572,14 @@ MOQ | 5 | 最小起订量，供应商单次接单的最低数量门槛。";
         assert_eq!(threshold_min_level("超高级"), 4);
     }
 
-    /// 最多两条，且拿不到专业度（模型没按格式输出）时宁可不收。
+    /// 最多三条，且拿不到专业度（模型没按格式输出）时宁可不收。
     #[test]
     fn parse_terms_caps_count_and_requires_the_level_field() {
-        let three = "灰度发布 | 4 | 新版本先放小比例用户。
+        let four = "灰度发布 | 4 | 新版本先放小比例用户。
 对赌协议 | 5 | 业绩未达标时的补偿条款。
-幂等 | 5 | 重复执行结果不变。";
-        assert_eq!(parse_terms(three, &[], 4).len(), MAX_TERMS);
+幂等 | 5 | 重复执行结果不变。
+埋点 | 4 | 记录用户行为的统计技术。";
+        assert_eq!(parse_terms(four, &[], 4).len(), MAX_TERMS);
 
         // 老格式「术语：解释」没有专业度可判，全部丢弃
         assert!(parse_terms("购物车：电商网站中暂存待购商品的功能。", &[], 4).is_empty());
@@ -648,12 +649,22 @@ MOQ | 5 | 最小起订量，供应商单次接单的最低数量门槛。";
         assert_eq!(out, "SLA：服务等级协议，服务商承诺的可用性与响应时限。");
     }
 
-    /// 模型常常只回解释、不带词头；界面要靠「术语：解释」拆两栏，所以得补上。
+    /// 模型常常只回解释、不带词头；界面要靠「知识点：讲解」拆开，所以得补上。
     #[test]
     fn lookup_term_prepends_the_word_when_model_omits_it() {
         let mock = MockProvider { response: "服务等级协议，服务商承诺的可用性与响应时限。".into() };
         let out = lookup_term(&mock, "  SLA  ", "").unwrap();
         assert!(out.starts_with("SLA："), "应补上词头: {out}");
+    }
+
+    #[test]
+    fn lookup_term_keeps_the_talking_points_after_the_definition() {
+        let mock = MockProvider {
+            response: "弱网络数据传输：在不稳定链路上仍把数据送达。\n关键：重传、断点续传\n接话：可以问现在的丢包率".into(),
+        };
+        let out = lookup_term(&mock, "弱网络数据传输", "客户：我们在做弱网络数据传输").unwrap();
+        assert!(out.contains("关键：重传、断点续传"), "应保留后续行: {out}");
+        assert!(out.contains("接话：可以问现在的丢包率"), "应保留接话: {out}");
     }
 
     #[test]

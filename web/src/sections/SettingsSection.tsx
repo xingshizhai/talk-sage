@@ -81,7 +81,7 @@ const TABS: { key: SettingsTab; label: string; desc: string }[] = [
   { key: "audio", label: "音频与录音", desc: "采集 / 灵敏度 / 断句 / 降噪 / 质量阈值 / 录音" },
   { key: "terminology", label: "术语纠错", desc: "全局热词与误识别替换" },
   { key: "lexicon", label: "词库", desc: "项目术语、纠错和参会人" },
-  { key: "plugins", label: "插件", desc: "专业术语 / 翻译 / 知识源 / 要点聚合" },
+  { key: "plugins", label: "插件", desc: "专业知识 / 翻译 / 知识源 / 要点聚合" },
   { key: "voice", label: "声音标识", desc: "注册主人声音，识别说话人" },
   { key: "llm", label: "LLM", desc: "默认模型与密钥" },
   { key: "webhooks", label: "Webhook", desc: "会议结束推送（n8n/Zapier/CRM）" },
@@ -1774,7 +1774,7 @@ export default function SettingsSection({
       {/* ── LLM ── */}
       {tab === "llm" && (
         <div>
-          <h3 style={groupTitle}>LLM（术语解释 / 翻译 / 纪要生成）</h3>
+          <h3 style={groupTitle}>LLM（专业知识 / 翻译 / 纪要生成）</h3>
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
             <select value={defaultProvider} onChange={(e) => setDefaultProvider(e.target.value)} style={inputStyle}>
               {PROVIDERS.map((p) => (

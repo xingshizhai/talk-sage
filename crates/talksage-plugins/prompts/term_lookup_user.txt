@@ -1,2 +1,2 @@
-请解释这个词：{term}
+请讲解这个知识点：{term}
 {context_section}

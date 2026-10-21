@@ -707,7 +707,7 @@ struct ExplainTermBody {
     term: String,
 }
 
-/// 手动查询一个专业术语。监听中走会话事件通道（顺带入库），否则单独广播。
+/// 当场讲解一个知识点。监听中走会话事件通道（顺带入库），否则单独广播。
 async fn explain_term_api(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,

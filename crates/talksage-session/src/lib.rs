@@ -256,9 +256,9 @@ pub fn export_markdown(detail: &SessionDetail) -> String {
         }
     }
 
-    // 专业术语：会中解释过的词，导出后别人也能看懂这场会在说什么
+    // 专业知识：会中整理或当场讲解过的内容，导出后别人也能看懂这场会在说什么
     if !detail.terms.is_empty() {
-        md.push_str("\n## 专业术语\n\n");
+        md.push_str("\n## 专业知识\n\n");
         for term in &detail.terms {
             md.push_str(&format!("- {term}\n"));
         }
@@ -1559,7 +1559,7 @@ mod tests {
         assert!(md.contains("### 交付"));
         assert!(md.contains("- [ ] 客户发邮件确认"), "行动项应为可勾选列表: {md}");
         // 会中解释过的术语要跟着导出走：库里有、界面看得到，导出给别人时不能缺
-        assert!(md.contains("## 专业术语"), "缺少专业术语小节: {md}");
+        assert!(md.contains("## 专业知识"), "缺少专业知识小节: {md}");
         assert!(md.contains("- MOQ：最小起订量，供应商单次接单的最低数量门槛。"));
         assert!(md.contains("## 转写"));
         assert!(md.contains("[客户]"));

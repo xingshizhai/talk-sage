@@ -145,6 +145,31 @@ impl SessionRuntime {
         self.transcript.lock().unwrap().snapshot(stage)
     }
 
+    /// 最近的已定稿转写，供当场讲解一个知识点时带上会议语境。从尾部截到 `max_chars`。
+    pub fn recent_transcript(&self, max_chars: usize) -> String {
+        let state = self.transcript.lock().unwrap();
+        let mut lines = Vec::new();
+        let mut count = 0usize;
+        for seg in state.committed.iter().rev() {
+            let text = seg.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let line = format!("{}：{text}", seg.speaker_label);
+            let len = line.chars().count();
+            if count > 0 && count + len > max_chars {
+                break;
+            }
+            count += len;
+            lines.push(line);
+            if count >= max_chars {
+                break;
+            }
+        }
+        lines.reverse();
+        lines.join("\n")
+    }
+
     /// 本次监听的有效时长。暂停中的时间不计入。
     pub fn elapsed_ms(&self) -> u64 {
         let clock = self.clock.lock().unwrap();
